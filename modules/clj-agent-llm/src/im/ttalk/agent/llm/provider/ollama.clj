@@ -36,22 +36,59 @@
 ;;; ============================================================
 
 (defn call-ollama
-  "调用 Ollama API（同步）"
+  "调用 Ollama API（同步）
+
+   参数：
+   - config:   配置 map {:model \"llama2\" :max-tokens 4096 ...}
+   - messages: 消息列表 [{:role \"user\" :content \"...\"}]
+   - tools:    工具列表
+
+   返回：
+   Ollama API 响应"
   [config messages tools]
   (base/call-api default-config config messages tools))
 
 (defn call-ollama-stream
-  "流式调用 Ollama API"
+  "流式调用 Ollama API（同步，阻塞当前线程）
+
+   参数：
+   - config:   配置 map
+   - messages: 消息列表
+   - tools:    工具列表
+   - on-token: 回调函数 (fn [{:keys [token index accumulated]}] ...)
+
+   返回：
+   最终完整响应"
   [config messages tools on-token]
   (base/call-api-stream default-config config messages tools on-token))
 
 (defn call-ollama-async
-  "异步调用 Ollama API"
+  "异步调用 Ollama API
+
+   参数：
+   - config:   配置 map
+   - messages: 消息列表
+   - tools:    工具列表
+   - callback: 回调函数 (fn [response] ...)
+
+   返回：
+   nil（结果通过 callback 返回）"
   [config messages tools callback]
   (base/call-api-async default-config config messages tools callback))
 
 (defn call-ollama-stream-async
-  "异步流式调用 Ollama API"
+  "异步流式调用 Ollama API（非阻塞）
+
+   参数：
+   - config:      配置 map
+   - messages:    消息列表
+   - tools:       工具列表
+   - on-token:    token 回调 (fn [{:keys [token]}] ...)
+   - on-complete: 完成回调 (fn [response] ...)
+   - on-error:    错误回调 (fn [error] ...)（可选）
+
+   返回：
+   nil（所有结果通过回调返回）"
   [config messages tools on-token on-complete & [on-error]]
   (base/call-api-stream-async default-config config messages tools
                               on-token on-complete on-error))
@@ -79,7 +116,10 @@
 ;;; ============================================================
 
 (defn list-models
-  "列出 Ollama 上可用的模型"
+  "列出 Ollama 上可用的模型
+
+   返回：
+   模型列表 map（成功时）或 {:error \"...\"}"
   []
   (let [base-url (or (:base-url @default-config) "http://localhost:11434")]
     (try
@@ -91,7 +131,13 @@
         {:error (str "Failed to list models: " (.getMessage e))}))))
 
 (defn pull-model
-  "拉取 Ollama 模型"
+  "拉取 Ollama 模型
+
+   参数：
+   - model-name: 模型名称（如 \"llama2\", \"mistral\"）
+
+   返回：
+   拉取结果 map（成功时）或 {:error \"...\"}"
   [model-name]
   (let [base-url (or (:base-url @default-config) "http://localhost:11434")]
     (try

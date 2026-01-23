@@ -1,0 +1,4 @@
+{:paths ["src" "test"]
+ :deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
+        cheshire/cheshire {:mvn/version "5.13.0"}
+        com.taoensso/timbre {:mvn/version "6.6.1"}}}

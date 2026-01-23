@@ -1,0 +1,363 @@
+(ns im.ttalk.agent.core.kernel.errors
+  "LLM 错误处理模块
+
+   提供统一的错误类型、分类和处理机制。
+
+   错误类型：
+   - :network-error    网络连接错误（可重试）
+   - :timeout-error    请求超时（可重试）
+   - :rate-limit-error 速率限制（可重试）
+   - :auth-error       认证失败（不可重试）
+   - :validation-error 参数验证失败（不可重试）
+   - :parse-error      响应解析失败（不可重试）
+   - :provider-error   Provider 特定错误
+
+   使用示例：
+
+   (require '[im.ttalk.agent.core.kernel.errors :as errors])
+
+   ;; 创建错误
+   (errors/error :timeout-error \"请求超时\")
+
+   ;; 检查是否可重试
+   (errors/retryable? err) ; => true
+
+   ;; 安全执行
+   (errors/with-error-handling #(api-call))"
+  (:require [clojure.string :as str])
+  (:import [java.io IOException]))
+
+;;; ============================================================
+;;; 错误分类
+;;; ============================================================
+
+(def ^:private retryable-types
+  "可重试的错误类型"
+  #{:network-error :timeout-error :rate-limit-error :provider-error})
+
+(def ^:private non-retryable-types
+  "不可重试的错误类型"
+  #{:auth-error :validation-error :parse-error})
+
+;;; ============================================================
+;;; 错误创建
+;;; ============================================================
+
+(defn error
+  "创建错误 map
+
+   参数：
+   - type:    错误类型（关键字）
+   - message: 错误消息
+   - opts:    可选参数 map
+     - :cause      原因异常
+     - :status     HTTP 状态码
+     - :provider   Provider 名称
+     - :context    上下文信息
+
+   返回：
+   错误 map {:type :xxx :message \"...\" :retryable? bool}
+
+   示例：
+   (error :timeout-error \"请求超时\" {:status 504})"
+  ([type message]
+   (error type message nil))
+  ([type message opts]
+   (let [retryable? (cond
+                      (contains? opts :retryable?) (:retryable? opts)
+                      (contains? retryable-types type) true
+                      (contains? non-retryable-types type) false
+                      :else true)]
+     (cond-> {:type type
+              :message message
+              :retryable? retryable?}
+       (:cause opts)    (assoc :cause (:cause opts))
+       (:status opts)   (assoc :status (:status opts))
+       (:provider opts) (assoc :provider (:provider opts))
+       (:context opts)  (assoc :context (:context opts))))))
+
+;;; ============================================================
+;;; 错误判断
+;;; ============================================================
+
+(defn error?
+  "检查是否为错误 map
+
+   参数：
+   - x: 任意值
+
+   返回：
+   boolean"
+  [x]
+  (and (map? x)
+       (contains? x :type)
+       (contains? x :message)))
+
+(defn retryable?
+  "检查错误是否可重试
+
+   参数：
+   - err: 错误 map
+
+   返回：
+   boolean"
+  [err]
+  (boolean (:retryable? err)))
+
+(defn error-type
+  "获取错误类型
+
+   参数：
+   - err: 错误 map
+
+   返回：
+   关键字"
+  [err]
+  (:type err))
+
+(defn http-error?
+  "检查是否为 HTTP 相关错误
+
+   参数：
+   - err: 错误 map
+
+   返回：
+   boolean"
+  [err]
+  (and (error? err)
+       (or (contains? err :status)
+           (#{:network-error :timeout-error} (:type err)))))
+
+(defn auth-error?
+  "检查是否为认证错误
+
+   参数：
+   - err: 错误 map
+
+   返回：
+   boolean"
+  [err]
+  (and (error? err)
+       (or (= :auth-error (:type err))
+           (#{401 403} (:status err)))))
+
+(defn rate-limit-error?
+  "检查是否为速率限制错误
+
+   参数：
+   - err: 错误 map
+
+   返回：
+   boolean"
+  [err]
+  (and (error? err)
+       (or (= :rate-limit-error (:type err))
+           (= 429 (:status err)))))
+
+;;; ============================================================
+;;; 异常转换
+;;; ============================================================
+
+(defn exception->error
+  "将异常转换为错误 map
+
+   参数：
+   - e:       异常对象
+   - context: 上下文信息（可选）
+
+   返回：
+   错误 map
+
+   示例：
+   (exception->error (IOException. \"连接失败\"))"
+  ([e]
+   (exception->error e nil))
+  ([e context]
+   (let [msg (or (.getMessage e) (str (class e)))
+         base-opts (cond-> {:cause e}
+                     context (assoc :context context))]
+     (cond
+       ;; IO 异常 -> 网络错误
+       (instance? IOException e)
+       (error :network-error msg base-opts)
+
+       ;; 超时异常
+       (or (instance? java.util.concurrent.TimeoutException e)
+           (str/includes? (str (class e)) "Timeout"))
+       (error :timeout-error msg base-opts)
+
+       ;; 其他异常 -> Provider 错误
+       :else
+       (error :provider-error msg
+              (assoc base-opts :exception-type (str (class e))))))))
+
+(defn http-response->error
+  "将 HTTP 错误响应转换为错误 map
+
+   参数：
+   - response: HTTP 响应 {:status n :body ...}
+   - provider: Provider 名称
+
+   返回：
+   错误 map
+
+   示例：
+   (http-response->error {:status 401 :body \"Unauthorized\"} :openai)"
+  [response provider]
+  (let [status (:status response)
+        body (:body response)
+        message (cond
+                  (and (map? body) (or (:error body) (:message body)))
+                  (or (:error body) (:message body))
+                  (string? body) body
+                  :else (str "HTTP " status " error"))
+        opts {:status status :provider provider}]
+    (cond
+      (#{401 403} status) (error :auth-error message opts)
+      (= 429 status)      (error :rate-limit-error message opts)
+      (>= status 500)     (error :provider-error message (assoc opts :retryable? true))
+      (>= status 400)     (error :validation-error message opts)
+      :else               (error :provider-error message opts))))
+
+;;; ============================================================
+;;; 异常抛出
+;;; ============================================================
+
+(defn throw!
+  "将错误转换为异常并抛出
+
+   参数：
+   - err: 错误 map
+
+   抛出：
+   ExceptionInfo"
+  [err]
+  (throw (ex-info (:message err) err)))
+
+(defn throw-if-error!
+  "如果是错误结果则抛出异常
+
+   参数：
+   - result: [:ok value] 或 [:error err]
+
+   返回：
+   value（如果成功）
+
+   抛出：
+   ExceptionInfo（如果失败）"
+  [result]
+  (if (and (vector? result) (= :error (first result)))
+    (throw! (second result))
+    (if (vector? result) (second result) result)))
+
+;;; ============================================================
+;;; 错误格式化
+;;; ============================================================
+
+(defn format-error
+  "格式化错误为可读字符串
+
+   参数：
+   - err: 错误 map
+
+   返回：
+   格式化的字符串
+
+   示例：
+   (format-error {:type :timeout-error :message \"请求超时\" :status 504})
+   ; => \"[TIMEOUT-ERROR] 请求超时 (HTTP 504)\""
+  [err]
+  (str "[" (str/upper-case (name (:type err))) "] "
+       (:message err)
+       (when-let [status (:status err)]
+         (str " (HTTP " status ")"))
+       (when-let [provider (:provider err)]
+         (str " [" (name provider) "]"))))
+
+;;; ============================================================
+;;; 错误处理组合器
+;;; ============================================================
+
+(defn with-error-handling
+  "执行函数并捕获异常转换为错误
+
+   参数：
+   - f:       要执行的函数
+   - context: 上下文信息（可选）
+
+   返回：
+   [:ok result] 或 [:error error-map]
+
+   示例：
+   (with-error-handling #(api-call) {:operation \"call-llm\"})"
+  ([f]
+   (with-error-handling f nil))
+  ([f context]
+   (try
+     [:ok (f)]
+     (catch Exception e
+       [:error (exception->error e context)]))))
+
+(defn safe-execute
+  "安全执行函数，失败时返回默认值
+
+   参数：
+   - f:       要执行的函数
+   - default: 默认值
+
+   返回：
+   函数结果或默认值
+
+   示例：
+   (safe-execute #(parse-json data) nil)"
+  [f default]
+  (let [[status result] (with-error-handling f)]
+    (if (= :ok status) result default)))
+
+;;; ============================================================
+;;; Result 类型辅助
+;;; ============================================================
+
+(defn ok
+  "创建成功结果
+
+   参数：
+   - value: 结果值
+
+   返回：
+   [:ok value]"
+  [value]
+  [:ok value])
+
+(defn err
+  "创建失败结果
+
+   参数：
+   - error: 错误 map
+
+   返回：
+   [:error error]"
+  [error]
+  [:error error])
+
+(defn ok?
+  "检查是否为成功结果
+
+   参数：
+   - result: [:ok value] 或 [:error err]
+
+   返回：
+   boolean"
+  [result]
+  (and (vector? result) (= :ok (first result))))
+
+(defn err?
+  "检查是否为失败结果
+
+   参数：
+   - result: [:ok value] 或 [:error err]
+
+   返回：
+   boolean"
+  [result]
+  (and (vector? result) (= :error (first result))))

@@ -1,8 +1,8 @@
 (ns im.ttalk.agent.llm.core.protocol
-  "LLM Provider 协议定义
+  "LLM Provider 协议定义（向后兼容层）
 
-   定义所有 LLM 提供商必须实现的统一接口。
-   支持的提供商：Claude、OpenAI、智谱、Gemini、Mistral、Ollama
+   此命名空间从 im.ttalk.agent.core.kernel.provider re-export 所有定义。
+   新代码建议直接使用 im.ttalk.agent.core.kernel.provider。
 
    使用示例：
 
@@ -12,166 +12,37 @@
      (call-llm [this config messages tools] ...)
      (extract-tool-calls [_ response] ...)
      (extract-text [_ response] ...)
-     (build-tool-result [_ tool-id content] ...))"
-  (:require [im.ttalk.agent.llm.core.types :as types]))
+     (build-tool-result [_ tool-id content] ...)
+     (build-assistant-message [_ response] ...)
+     (build-result-messages [_ assistant-msg tool-results] ...))"
+  (:require [im.ttalk.agent.core.kernel.provider :as provider]))
 
 ;;; ============================================================
-;;; LLM Provider 协议
+;;; Re-export Protocol
 ;;; ============================================================
 
-(defprotocol ILLMProvider
-  "LLM Provider 统一接口
-
-   必需方法：
-   - provider-name     返回提供商名称
-   - call-llm          调用 LLM API（同步）
-   - extract-tool-calls 从响应中提取工具调用
-   - extract-text       从响应中提取文本
-   - build-tool-result  构建工具结果消息
-
-   可选方法（有默认实现）：
-   - call-llm-stream         流式调用
-   - supports-function-calling? 是否支持 Function Call
-   - supports-stream?         是否支持流式调用
-   - tool->schema            工具转 Schema"
-
-  ;; 基本信息
-  (provider-name [this]
-    "返回提供商名称（关键字）
-
-     示例：(provider-name provider) ; => :anthropic")
-
-  ;; 核心 API
-  (call-llm [this config messages tools]
-    "调用 LLM API（同步）
-
-     参数：
-     - config:   配置 {:model \"...\" :max-tokens n :temperature f}
-     - messages: 消息列表 [{:role \"user\" :content \"...\"}]
-     - tools:    工具定义列表
-
-     返回：原始 API 响应")
-
-  (call-llm-stream [this config messages tools on-token]
-    "流式调用 LLM API
-
-     参数：
-     - config:   配置（同 call-llm）
-     - messages: 消息列表
-     - tools:    工具定义列表
-     - on-token: 回调函数 (fn [{:keys [token index accumulated]}] ...)
-
-     返回：最终完整响应
-
-     默认实现：回退到非流式调用")
-
-  ;; 响应解析
-  (extract-tool-calls [this response]
-    "从响应中提取工具调用
-
-     返回：工具调用列表 [{:id \"...\" :name :keyword :input {...}}]")
-
-  (extract-text [this response]
-    "从响应中提取文本内容
-
-     返回：字符串")
-
-  (build-tool-result [this tool-id content]
-    "构建工具结果消息
-
-     参数：
-     - tool-id: 工具调用 ID
-     - content: 工具执行结果（字符串）
-
-     返回：提供商特定的消息格式")
-
-  ;; 能力查询
-  (supports-function-calling? [this]
-    "是否支持 Function Call
-
-     返回：boolean")
-
-  (supports-stream? [this]
-    "是否支持流式调用
-
-     返回：boolean")
-
-  ;; Schema 转换
-  (tool->schema [this tool]
-    "将工具定义转换为提供商特定格式
-
-     参数：
-     - tool: {:name :keyword :description \"...\" :parameters {...}}
-
-     返回：提供商特定的 schema 格式"))
+(def ILLMProvider provider/ILLMProvider)
 
 ;;; ============================================================
-;;; 默认实现
+;;; Re-export Protocol 方法 vars
 ;;; ============================================================
 
-(extend-type Object
-  ILLMProvider
-
-  ;; 默认流式调用：回退到非流式
-  (call-llm-stream [this config messages tools on-token]
-    (let [response (call-llm this config messages tools)
-          text (extract-text this response)]
-      (when (and on-token (seq text))
-        (on-token {:token text :index 0 :accumulated text}))
-      response))
-
-  ;; 默认能力：不支持
-  (supports-function-calling? [_] false)
-  (supports-stream? [_] false)
-
-  ;; 默认 schema 转换：原样返回
-  (tool->schema [_ tool] tool))
+(def provider-name provider/provider-name)
+(def call-llm provider/call-llm)
+(def call-llm-stream provider/call-llm-stream)
+(def extract-tool-calls provider/extract-tool-calls)
+(def extract-text provider/extract-text)
+(def build-tool-result provider/build-tool-result)
+(def supports-function-calling? provider/supports-function-calling?)
+(def supports-stream? provider/supports-stream?)
+(def tool->schema provider/tool->schema)
+(def build-assistant-message provider/build-assistant-message)
+(def build-result-messages provider/build-result-messages)
 
 ;;; ============================================================
-;;; 辅助函数
+;;; Re-export 辅助函数
 ;;; ============================================================
 
-(defn provider?
-  "检查对象是否实现了 ILLMProvider 协议
-
-   参数：
-   - x: 任意对象
-
-   返回：
-   boolean"
-  [x]
-  (satisfies? ILLMProvider x))
-
-(defn call-with-tools
-  "调用 LLM 并返回统一响应格式
-
-   参数：
-   - provider: ILLMProvider 实例
-   - config:   配置
-   - messages: 消息列表
-   - tools:    工具列表
-
-   返回：
-   {:text \"...\" :tool-calls [...] :raw-response ...}"
-  [provider config messages tools]
-  (let [response (call-llm provider config messages tools)
-        text (extract-text provider response)
-        tool-calls (extract-tool-calls provider response)]
-    (types/make-response
-      :text text
-      :tool-calls tool-calls
-      :raw-response response)))
-
-(defn call-simple
-  "简化的 LLM 调用（无工具）
-
-   参数：
-   - provider: ILLMProvider 实例
-   - config:   配置
-   - messages: 消息列表
-
-   返回：
-   文本响应字符串"
-  [provider config messages]
-  (let [response (call-llm provider config messages nil)]
-    (extract-text provider response)))
+(def provider? provider/provider?)
+(def call-with-tools provider/call-with-tools)
+(def call-simple provider/call-simple)

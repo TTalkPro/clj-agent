@@ -82,24 +82,48 @@
        (clojure.string/join "\n")))
 
 (defn has-tool-calls?
-  "检查响应是否包含工具调用"
+  "检查 Anthropic 响应是否包含工具调用
+
+   参数：
+   - response: Anthropic API 响应
+
+   返回：
+   boolean"
   [response]
   (boolean (seq (extract-tool-calls response))))
 
 (defn valid-response?
-  "检查响应是否有效"
+  "检查 Anthropic 响应是否有效
+
+   参数：
+   - response: Anthropic API 响应
+
+   返回：
+   boolean"
   [response]
   (and (map? response)
        (contains? response :content)
        (coll? (:content response))))
 
 (defn get-stop-reason
-  "获取停止原因"
+  "获取停止原因
+
+   参数：
+   - response: Anthropic API 响应
+
+   返回：
+   关键字 (:end_turn, :tool_use, :max_tokens, :stop_sequence)"
   [response]
   (keyword (:stop_reason response)))
 
 (defn get-usage
-  "获取令牌使用情况"
+  "获取令牌使用情况
+
+   参数：
+   - response: Anthropic API 响应
+
+   返回：
+   usage map {:input_tokens n :output_tokens m}"
   [response]
   (:usage response))
 
@@ -307,7 +331,20 @@
 
   ;; Schema 转换
   (tool->schema [_ tool]
-    (schema/tool->schema tool)))
+    (schema/tool->schema tool))
+
+  ;; 消息构建
+  (build-assistant-message [_ response]
+    {:role "assistant" :content (:content response)})
+
+  (build-result-messages [_ assistant-msg tool-results]
+    [assistant-msg
+     {:role "user"
+      :content (mapv (fn [{:keys [tool-id result error]}]
+                       {:type "tool_result"
+                        :tool_use_id tool-id
+                        :content (or result (str "Error: " error))})
+                     tool-results)}]))
 
 ;;; ============================================================
 ;;; 工厂函数

@@ -82,24 +82,54 @@
     {:type "function"
      :function {:name (name (:name tool))
                 :description (:description tool)
-                :parameters (:parameters tool)}}))
+                :parameters (:parameters tool)}})
+
+  (build-assistant-message [_ response]
+    {:role "assistant" :content (:text response)})
+
+  (build-result-messages [_ assistant-msg tool-results]
+    (into [assistant-msg]
+          (mapv (fn [{:keys [tool-id result error]}]
+                  {:role "tool"
+                   :tool_call_id tool-id
+                   :content (or result (str "Error: " error))})
+                tool-results))))
 
 ;;; ============================================================
 ;;; Mock 特有方法
 ;;; ============================================================
 
 (defn get-call-history
-  "获取调用历史"
+  "获取 Mock Provider 的调用历史
+
+   参数：
+   - provider: MockLLMProvider 实例
+
+   返回：
+   调用记录列表 [{:type :call :config ... :messages ... :result ...}]"
   [provider]
   @(:call-history provider))
 
 (defn clear-call-history
-  "清空调用历史"
+  "清空 Mock Provider 的调用历史
+
+   参数：
+   - provider: MockLLMProvider 实例
+
+   返回：
+   空列表 []"
   [provider]
   (reset! (:call-history provider) []))
 
 (defn set-mock-response
-  "设置默认的 mock 响应"
+  "设置 Mock Provider 的默认响应
+
+   参数：
+   - provider: MockLLMProvider 实例
+   - response: 响应文本（字符串）
+
+   返回：
+   更新后的 provider"
   [provider response]
   (swap! (:config provider) assoc :mock-response response)
   provider)
@@ -132,7 +162,15 @@
 ;;; ============================================================
 
 (defn mock-call
-  "便捷函数：直接调用 mock LLM"
+  "便捷函数：直接调用 Mock LLM
+
+   参数：
+   - messages: 消息列表
+   - config:   配置（可选）
+   - tools:    工具列表（可选）
+
+   返回：
+   Mock 响应 map"
   ([messages]
    (mock-call messages {}))
   ([messages config]
@@ -146,13 +184,19 @@
 ;;; ============================================================
 
 (defn create-calculator-mock
-  "创建计算器场景的 Mock Provider"
+  "创建计算器场景的 Mock Provider
+
+   返回：
+   预设为计算器回复的 MockLLMProvider 实例"
   []
   (create-mock-provider
     {:mock-response "我可以帮你进行数学计算，请提供表达式。"}))
 
 (defn create-error-mock
-  "创建会返回错误的 Mock Provider（用于测试错误处理）"
+  "创建会返回错误的 Mock Provider（用于测试错误处理）
+
+   返回：
+   调用时抛出异常的 MockLLMProvider 实例"
   []
   (create-mock-provider
     {:mock-response

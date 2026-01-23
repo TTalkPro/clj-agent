@@ -25,87 +25,7 @@
 
    ;; 对话
    (kernel/invoke-chat-with-tools app-kernel messages {})"
-  (:require [im.ttalk.agent.llm.core.protocol :as proto]
-            [clojure.string :as str]))
-
-;;; ============================================================
-;;; Anthropic 响应解析
-;;; ============================================================
-
-(defn- has-tool-use?
-  "检查 Anthropic 响应是否包含 tool_use 块"
-  [response]
-  (boolean (some #(= "tool_use" (:type %))
-                 (:content response))))
-
-(defn- extract-tool-calls
-  "从 Anthropic 响应中提取工具调用列表
-
-   返回:
-   [{:id \"toolu_xxx\" :name \"fn-name\" :input {...}} ...]"
-  [response]
-  (->> (:content response)
-       (filter #(= "tool_use" (:type %)))
-       (mapv (fn [{:keys [id name input]}]
-               {:id    id
-                :name  name
-                :input (or input {})}))))
-
-(defn- extract-text
-  "从 Anthropic 响应中提取文本内容"
-  [response]
-  (->> (:content response)
-       (filter #(= "text" (:type %)))
-       (map :text)
-       (str/join "\n")))
-
-;;; ============================================================
-;;; 归一化响应
-;;; ============================================================
-
-(defn- normalize-response
-  "将 LLM 原始响应归一化为 Kernel 标准格式
-
-   返回:
-   {:text            文本内容（可为 nil）
-    :tool-calls      工具调用列表（可为 nil）
-    :assistant-msg   原始 assistant 消息（用于追加到历史）
-    :raw-response    原始 API 响应}"
-  [response]
-  (let [tool-calls (when (has-tool-use? response)
-                     (extract-tool-calls response))
-        text       (extract-text response)]
-    {:text          (when (seq text) text)
-     :tool-calls    (when (seq tool-calls) tool-calls)
-     :assistant-msg {:role    "assistant"
-                     :content (:content response)}
-     :raw-response  response}))
-
-;;; ============================================================
-;;; 构建工具结果消息（Anthropic 格式）
-;;; ============================================================
-
-(defn- build-result-msgs
-  "将 assistant 消息和工具结果转为消息列表
-
-   Anthropic 格式要求：
-   1. 保留原始 assistant 消息（包含 tool_use blocks）
-   2. 工具结果以 user 消息返回，content 中包含 tool_result blocks
-
-   参数:
-   - assistant-msg: {:role \"assistant\" :content [...]}
-   - tool-results: [{:tool-id \"...\" :result \"...\" :error nil} ...]
-
-   返回:
-   [assistant-msg tool-results-msg]"
-  [assistant-msg tool-results]
-  [assistant-msg
-   {:role    "user"
-    :content (mapv (fn [{:keys [tool-id result error]}]
-                     {:type        "tool_result"
-                      :tool_use_id tool-id
-                      :content     (or result (str "Error: " error))})
-                   tool-results)}])
+  (:require [im.ttalk.agent.core.kernel.service :as service]))
 
 ;;; ============================================================
 ;;; Service 工厂
@@ -143,26 +63,4 @@
                         :max-tokens (or max-tokens 4096)}
                  system-prompt (assoc :system-prompt system-prompt)
                  temperature   (assoc :temperature temperature))]
-    {:chat-fn
-     (fn [messages opts]
-       ;; tools 已经是 Anthropic 格式（由 kernel get-tools 生成），
-       ;; 直接放入 config 的 :tools 字段，跳过 schema 转换。
-       ;; tool-choice 也通过 config 传入。
-       (let [tool-choice (:tool-choice opts)
-             ;; :none 时不传 tools，让 LLM 纯文本回复
-             tools       (when (not= tool-choice :none)
-                           (:tools opts))
-             call-config (cond-> config
-                           (seq tools)
-                           (assoc :tools tools)
-                           (and tool-choice (not= tool-choice :none))
-                           (assoc :tool-choice
-                                  (case tool-choice
-                                    :auto {:type "auto"}
-                                    :required {:type "any"}
-                                    tool-choice)))
-             response    (proto/call-llm llm-provider call-config messages nil)]
-         (normalize-response response)))
-
-     :build-result-msgs
-     build-result-msgs}))
+    (service/create-service llm-provider config)))
