@@ -1,0 +1,29 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+            "clojars" {:url "https://repo.clojars.org/"}}
+
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        ;; JSON（http/client.clj）
+        cheshire/cheshire {:mvn/version "5.12.0"}
+
+        ;; 日志（common.clj defdefault）
+        com.taoensso/timbre {:mvn/version "6.3.0"}
+
+        ;; HTTP 客户端（http/client.clj）
+        http-kit/http-kit {:mvn/version "2.8.0"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]
+        :extra-deps {nrepl/nrepl {:mvn/version "1.0.0"}
+                     cider/cider-nrepl {:mvn/version "0.30.0"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}
+                      lambdaisland/kaocha-cloverage {:mvn/version "1.1.89"}}
+         :main-opts ["-m" "kaocha.runner"]}
+
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}}}

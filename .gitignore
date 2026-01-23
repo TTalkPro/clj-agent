@@ -1,14 +1,48 @@
+# Clojure/Java build artifacts
 pom.xml
 pom.xml.asc
 *.jar
 *.class
-/lib/
-/classes/
-/target/
-/checkouts/
+target/
+classes/
+lib/
+checkouts/
+.cpcache/
+
+# Leiningen
 .lein-deps-sum
 .lein-repl-history
 .lein-plugins/
 .lein-failures
+
+# REPL
 .nrepl-port
-.cpcache/
+.rebel_readline_history
+
+# IDE
+.idea/
+*.iml
+.calva/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Clojure tooling
+.clj-kondo/
+.lsp/
+
+# Environment & secrets
+.env
+.env.*
+
+# Database files
+*.db
+*.sqlite
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

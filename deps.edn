@@ -1,0 +1,40 @@
+{:paths ["modules/clj-agent-core/src"
+          "modules/clj-agent-llm/src"
+          "modules/clj-agent-tools/src"
+          "modules/clj-agent-rag/src"
+          "modules/clj-agent-mcp/src"
+          "modules/clj-agent-memory/src"]
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        ;; LLM 依赖
+        net.clojars.wkok/openai-clojure {:mvn/version "0.21.0"}
+
+        ;; JSON
+        cheshire/cheshire {:mvn/version "5.12.0"}
+
+        ;; 数据库
+        com.github.seancorfield/next.jdbc {:mvn/version "1.3.939"}
+        org.xerial/sqlite-jdbc {:mvn/version "3.45.1.0"}
+
+        ;; Redis
+        com.taoensso/carmine {:mvn/version "3.2.0"}
+
+        ;; PostgreSQL
+        org.postgresql/postgresql {:mvn/version "42.7.3"}
+
+        ;; 异步
+        org.clojure/core.async {:mvn/version "1.6.681"}
+
+        ;; 日志
+        com.taoensso/timbre {:mvn/version "6.3.0"}
+
+        ;; HTTP (MCP)
+        http-kit/http-kit {:mvn/version "2.8.0"}}
+ :aliases {:mcp-server {:main-opts ["-m" "im.ttalk.mcp.server.main"]}
+
+          :test {:extra-paths ["modules/clj-agent-llm/test"
+                               "modules/clj-agent-tools/test"
+                               "modules/clj-agent-core/test"
+                               "modules/clj-agent-rag/test"]
+                 :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+                 :main-opts ["-m" "kaocha.runner"]}}}
