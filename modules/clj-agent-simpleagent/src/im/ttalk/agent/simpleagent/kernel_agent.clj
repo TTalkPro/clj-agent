@@ -16,31 +16,7 @@
   (:refer-clojure :exclude [reset!])
   (:require [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
-            [im.ttalk.agent.llm.kernel.chat :as chat]))
-
-;;; ============================================================
-;;; 内部：从 opts 构建 Kernel
-;;; ============================================================
-
-(defn- build-kernel-from-opts [opts]
-  (let [service (chat/create-service
-                  {:provider    (:provider opts)
-                   :model       (:model opts "glm-4")
-                   :max-tokens  (:max-tokens opts 4096)
-                   :temperature (:temperature opts)})
-        tools (:tools opts [])
-        ;; 如果传入的是 var 列表而非 plugin，自动包装
-        plugins (if (and (seq tools) (var? (first tools)))
-                  [(kp/create-plugin :agent-tools "Agent 工具集" tools)]
-                  tools)
-        filters (:filters opts [])]
-    (-> (kernel/create-kernel-builder
-          {:max-tool-iterations (or (:max-iterations opts) 10)})
-        (kernel/add-service service)
-        (as-> b (reduce kernel/add-plugin b plugins))
-        (as-> b (reduce kernel/add-filter b filters))
-        (kernel/build-kernel))))
+            [im.ttalk.agent.simpleagent.common :as common]))
 
 ;;; ============================================================
 ;;; 公开 API
@@ -64,7 +40,7 @@
    返回:
    Agent map"
   [opts]
-  (let [k (or (:kernel opts) (build-kernel-from-opts opts))]
+  (let [k (common/ensure-kernel opts)]
     {:kernel       k
      :context-atom (atom (ctx/create))
      :settings     (select-keys opts [:system-prompt :max-iterations])}))
