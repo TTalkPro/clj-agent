@@ -1,13 +1,13 @@
 # clj-agent-memory
 
-clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的统一实现。
+clj-agent 记忆系统模块，提供 Store、SnapshotStore 和 Memory 组件的统一实现。
 
 ## 架构概览
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            clj-agent-core (协议定义)                         │
-│                      IStore  │  ICheckpointer                               │
+│                      IStore  │  ISnapshotStore                               │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ▲
                                     │ 实现
@@ -19,9 +19,9 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 │   │ InMemoryStore│ │ SQLiteStore  │ │ RedisStore   │ │PostgresStore │       │
 │   └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘       │
 │                                    ▲                                         │
-│   Layer 2: Checkpointer ───────────┘                                         │
+│   Layer 2: SnapshotStore ──────────┘                                         │
 │   ┌──────────────────────────────────────────────────────────────────┐      │
-│   │  UnifiedCheckpointer (context-store + persistent-store)          │      │
+│   │  UnifiedSnapshotStore (context-store + persistent-store)         │      │
 │   └──────────────────────────────────────────────────────────────────┘      │
 │                                    ▲                                         │
 │   Layer 3: Memory 组件 ────────────┘                                         │
@@ -36,7 +36,7 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 
 1. **依赖倒置** - 协议定义在 clj-agent-core，实现在本模块
 2. **可插拔后端** - Store 协议支持多种实现（内存、SQLite、Redis、PostgreSQL）
-3. **组件复用** - Checkpointer 和 Memory 组件都基于 Store 协议
+3. **组件复用** - SnapshotStore 和 Memory 组件都基于 Store 协议
 4. **双 Store 架构** - 支持热/冷数据分离，可降级为单 Store
 
 ## 快速开始
@@ -48,17 +48,17 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 ;; 创建存储
 (def store (mem/create-in-memory-store))
 
-;; 创建检查点管理器
-(def checkpointer (mem/create-checkpointer store))
+;; 创建快照存储
+(def snapshot-store (mem/create-snapshot-store store))
 
-;; 保存检查点
-(proto/cp-put checkpointer
+;; 保存快照
+(proto/snap-put snapshot-store
               {:thread-id "thread-1"}
               {:state {:messages []}}
               {:step 1 :node "start"})
 
-;; 获取检查点
-(proto/cp-get-tuple checkpointer {:thread-id "thread-1"})
+;; 获取快照
+(proto/snap-get-tuple snapshot-store {:thread-id "thread-1"})
 ```
 
 ## Store 后端
@@ -114,18 +114,18 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
                                         :password "pass"}))
 ```
 
-## Checkpointer
+## SnapshotStore
 
-基于 Store 协议的统一检查点管理器，支持 Graph 状态持久化和时间旅行。
+基于 Store 协议的统一快照管理器，支持 Graph 状态持久化和时间旅行。
 
 ### 单 Store 模式
 
 ```clojure
 ;; 使用内存存储
-(def cp (mem/create-checkpointer (mem/create-in-memory-store)))
+(def cp (mem/create-snapshot-store (mem/create-in-memory-store)))
 
 ;; 使用 SQLite 存储
-(def cp (mem/create-checkpointer (mem/create-sqlite-store "checkpoints.db")))
+(def cp (mem/create-snapshot-store (mem/create-sqlite-store "snapshots.db")))
 ```
 
 ### 双 Store 模式
@@ -135,7 +135,7 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 - **persistent-store**: 持久化存储，用于历史归档
 
 ```clojure
-(def cp (mem/create-checkpointer
+(def cp (mem/create-snapshot-store
           (mem/create-in-memory-store)           ; 热数据
           :persistent-store (mem/create-sqlite-store "archive.db")))  ; 冷数据
 
@@ -146,43 +146,43 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 ### 核心操作
 
 ```clojure
-;; 保存检查点
-(proto/cp-put cp
+;; 保存快照
+(proto/snap-put cp
               {:thread-id "t1"}
               {:state {:messages [{:role "user" :content "你好"}]}}
               {:step 1 :node "chat"})
 
-;; 获取最新检查点
-(proto/cp-get-tuple cp {:thread-id "t1"})
-;; => {:checkpoint {:state ...}
+;; 获取最新快照
+(proto/snap-get-tuple cp {:thread-id "t1"})
+;; => {:snapshot {:state ...}
 ;;     :metadata {:step 1 :node "chat" :created-at ...}
-;;     :parent-config {:thread-id "t1" :checkpoint-id "..."}
+;;     :parent-config {:thread-id "t1" :snapshot-id "..."}
 ;;     :pending-writes [...]}
 
-;; 获取指定检查点
-(proto/cp-get-tuple cp {:thread-id "t1" :checkpoint-id "cp-123"})
+;; 获取指定快照
+(proto/snap-get-tuple cp {:thread-id "t1" :snapshot-id "snap-123"})
 
-;; 列出检查点
-(proto/cp-list cp {:thread-id "t1"} {:limit 10})
+;; 列出快照
+(proto/snap-list cp {:thread-id "t1"} {:limit 10})
 
 ;; 获取执行历史
-(proto/cp-get-history cp "t1")
-;; => [{:id "cp-1" :step 1 :node "start" :created-at ...}
-;;     {:id "cp-2" :step 2 :node "process" :created-at ...}]
+(proto/snap-get-history cp "t1")
+;; => [{:id "snap-1" :step 1 :node "start" :created-at ...}
+;;     {:id "snap-2" :step 2 :node "process" :created-at ...}]
 
 ;; 恢复到指定步骤
-(proto/cp-restore-to-step cp "t1" 2)
+(proto/snap-restore-to-step cp "t1" 2)
 ```
 
 ### 分支管理
 
 ```clojure
-;; 从检查点创建分支
-(proto/cp-create-branch cp "t1" "cp-123" "experiment")
-;; => {:branch-id "t1-experiment" :checkpoint-id "new-cp-id"}
+;; 从快照创建分支
+(proto/snap-create-branch cp "t1" "snap-123" "experiment")
+;; => {:branch-id "t1-experiment" :snapshot-id "new-snap-id"}
 
 ;; 列出分支
-(proto/cp-list-branches cp "t1")
+(proto/snap-list-branches cp "t1")
 ```
 
 ### 归档功能（双 Store 模式）
@@ -194,7 +194,7 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 
 ;; 列出已归档线程
 (mem/list-archived-threads cp)
-;; => [{:thread-id "thread-1" :checkpoint-count 5 :archived-at ...}]
+;; => [{:thread-id "thread-1" :snapshot-count 5 :archived-at ...}]
 
 ;; 从归档加载线程
 (mem/load-archived-thread! cp "thread-1")
@@ -204,14 +204,14 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 ### 清理操作
 
 ```clojure
-;; 删除线程所有检查点
-(proto/cp-delete-thread cp "t1")
+;; 删除线程所有快照
+(proto/snap-delete-thread cp "t1")
 
-;; 清理旧检查点（保留最新 10 个）
-(proto/cp-prune cp "t1" {:keep-count 10})
+;; 清理旧快照（保留最新 10 个）
+(proto/snap-prune cp "t1" {:keep-count 10})
 
 ;; 清除所有数据
-(proto/cp-clear-all cp)
+(proto/snap-clear-all cp)
 ```
 
 ## Memory 组件
@@ -364,7 +364,7 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 
 ;; 返回
 ;; {:store ...          ; Store 实例
-;;  :checkpointer ...   ; Checkpointer 实例
+;;  :snapshot-store ... ; SnapshotStore 实例
 ;;  :vector-store ...   ; VectorStore 实例
 ;;  :embedder ...}      ; Embedder 实例
 ```
@@ -373,7 +373,7 @@ clj-agent 记忆系统模块，提供 Store、Checkpointer 和 Memory 组件的�
 
 ```clojure
 (mem/store? x)              ; 是否实现 IStore
-(mem/checkpointer? x)       ; 是否实现 ICheckpointer
+(mem/snapshot-store? x)     ; 是否实现 ISnapshotStore
 (mem/conversation-buffer? x)
 (mem/semantic-memory? x)
 (mem/episodic-memory? x)
@@ -394,8 +394,8 @@ src/im/ttalk/memory/
 │   ├── postgresql.clj           # PostgreSQL 存储
 │   ├── vector_memory.clj        # 向量存储
 │   └── embedding.clj            # 嵌入生成器
-├── checkpointer/
-│   ├── unified.clj              # 统一 Checkpointer（推荐）
+├── snapshot/
+│   ├── unified.clj              # 统一 SnapshotStore（推荐）
 │   ├── memory_saver.clj         # 内存 Saver（废弃）
 │   └── sqlite_saver.clj         # SQLite Saver（废弃）
 ├── short_term/
@@ -422,7 +422,7 @@ src/im/ttalk/memory/
 
 ## 版本历史
 
-- **2.5.0** - 实现双 Store 架构的 UnifiedCheckpointer，简化 API
-- **2.4.0** - 将 IStore/ICheckpointer 协议移到 clj-agent-core，删除 IMemoryManager
+- **2.5.0** - 实现双 Store 架构的 UnifiedSnapshotStore，简化 API
+- **2.4.0** - 将 IStore/ISnapshotStore 协议移到 clj-agent-core，删除 IMemoryManager
 - **2.3.0** - 重构目录结构
 - **2.0.0** - 初始版本

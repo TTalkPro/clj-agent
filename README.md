@@ -10,7 +10,7 @@ Clojure AI Agent Framework - Kernel 中央编排器
 - **多级 Invoke API**：`invoke`（函数调用）、`invoke-chat`（纯 LLM）、`invoke-chat-with-tools`（工具循环）
 - **Filter 中间件**：Ring-style 洋葱模型拦截工具调用
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
-- **多后端存储**：IKeyValueStore + ICheckpointer 协议（Memory/SQLite/Redis/PostgreSQL）
+- **多后端存储**：IKeyValueStore + ISnapshotStore 协议（Memory/SQLite/Redis/PostgreSQL）
 
 ## 模块结构
 

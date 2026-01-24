@@ -10,7 +10,7 @@ clj-agent/
 │   ├── clj-agent-core/         # 核心框架（macros, store protocol, common）
 │   ├── clj-agent-llm/          # LLM Provider + Kernel 架构
 │   ├── clj-agent-tools/        # 工具系统（ITool, KernelFunction, KernelPlugin）
-│   ├── clj-agent-memory/       # Memory 系统（Store, Checkpointer, 长短期记忆）
+│   ├── clj-agent-memory/       # Memory 系统（Store, SnapshotStore, 长短期记忆）
 │   ├── clj-agent-rag/          # RAG 检索增强生成
 │   └── clj-agent-mcp/          # MCP 服务器
 ├── scripts/                     # 构建脚本
@@ -70,7 +70,7 @@ clj-agent/
 
 **包含**:
 - `im.ttalk.agent.memory.store.*` - 存储后端（InMemory, SQLite, PostgreSQL, Redis）
-- `im.ttalk.agent.memory.checkpoint.*` - 检查点（StoreBackedCheckpointer）
+- `im.ttalk.agent.memory.snapshot.*` - 快照（StoreBackedSnapshotStore）
 - `im.ttalk.agent.memory.long_term.*` - 长期记忆（语义/情景/程序记忆）
 
 **依赖**: `clj-agent-core`

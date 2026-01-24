@@ -105,7 +105,7 @@
   (separator "测试 1: 基本线性流程")
   (safe-call "线性流程 A → B → C"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :linear-demo)
                 (builder/add-step
                   {:id :step-a
@@ -131,7 +131,7 @@
                 (builder/on-event :b-done :step-c :input)
                 (builder/set-initial-event :start "原始数据")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    结果: " (ctx/get-var (:context result) :final-result)))
         (assert (= :completed (:status result)))
@@ -146,7 +146,7 @@
   (separator "测试 2: 单轮对话（Step 内调用 LLM）")
   (safe-call "单轮 LLM 对话"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :single-chat)
                 (builder/add-step
                   {:id :chat-step
@@ -168,7 +168,7 @@
                 (builder/on-event :chat-done :result-step :input)
                 (builder/set-initial-event :start "用一句话介绍中国的首都。")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    回答: " (ctx/get-var (:context result) :answer)))
         (assert (= :completed (:status result)))
@@ -182,7 +182,7 @@
   (separator "测试 3: 多轮对话（context 累积）")
   (safe-call "多轮对话 context 传递"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :multi-turn)
                 (builder/add-step
                   {:id :turn-1
@@ -225,7 +225,7 @@
                 (builder/on-event :done :final :input)
                 (builder/set-initial-event :start "中国有多少个省份？简短回答。")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    最终结果: " (ctx/get-var (:context result) :multi-turn-result)))
         (println (str "    messages 数量: " (count (ctx/get-messages (:context result)))))
@@ -240,7 +240,7 @@
   (separator "测试 4: 上下文传递")
   (safe-call "Step 间 context 变量传递"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :ctx-passing)
                 (builder/add-step
                   {:id :init-step
@@ -282,7 +282,7 @@
                 (builder/on-event :enriched :summary-step :input)
                 (builder/set-initial-event :start nil)
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    trace: " (ctx/get-var (:context result) :step-trace)))
         (println (str "    summary: " (ctx/get-var (:context result) :summary)))
@@ -298,7 +298,7 @@
   (separator "测试 5: 工具调用（Step 内使用 invoke）")
   (safe-call "Process 中使用工具"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :tool-process)
                 (builder/add-step
                   {:id :query-step
@@ -328,7 +328,7 @@
                 (builder/on-event :answered :collect-step :input)
                 (builder/set-initial-event :start "现在几点了？")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 60000})]
+            result (runtime/run-process process-spec {:timeout-ms 60000})]
         (println (str "    状态: " (:status result)))
         (when (= :failed (:status result))
           (println (str "    错误: " (:error result))))
@@ -386,7 +386,7 @@
                 (kernel/add-filter post-chat-filter)
                 (kernel/build-kernel))
 
-            process-def
+            process-spec
             (-> (builder/builder :filtered-process)
                 (builder/add-step
                   {:id :tool-step
@@ -411,7 +411,7 @@
                 (builder/on-event :tool-done :chat-step :input)
                 (builder/set-initial-event :start nil)
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    Filter 日志:"))
         (doseq [entry @call-log]
@@ -436,7 +436,7 @@
   (separator "测试 7: 暂停/恢复（Human-in-the-loop）")
   (safe-call "暂停和恢复流程"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :approval-process)
                 (builder/add-step
                   {:id :prepare-step
@@ -480,7 +480,7 @@
                 (builder/build))
 
             ;; 运行到暂停
-            paused (runtime/run-process process-def {:timeout-ms 30000})]
+            paused (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    --- 状态: " (:status paused)))
         (println (str "    --- 暂停原因: " (:pause-reason paused)))
         (assert (= :paused (:status paused)))
@@ -497,7 +497,7 @@
         ;; 再次运行，模拟审批拒绝
         (println)
         (println (str "    --- 再次运行，模拟审批拒绝 ---"))
-        (let [paused2 (runtime/run-process process-def {:timeout-ms 10000})
+        (let [paused2 (runtime/run-process process-spec {:timeout-ms 10000})
               result (runtime/run-resume paused2 "rejected")]
           (println (str "    --- 恢复后状态: " (:status result)))
           (assert (= :completed (:status result)))
@@ -512,7 +512,7 @@
   (separator "测试 8: Fan-out/Fan-in 模式")
   (safe-call "并行分支汇聚"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :fan-pattern)
                 ;; 分发 step
                 (builder/add-step
@@ -565,7 +565,7 @@
                 (builder/on-event :b-result :aggregator :from-b)
                 (builder/set-initial-event :start ["北京" "上海"])
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (let [report (ctx/get-var (:context result) :weather-report)]
           (println (str "    城市数: " (count (:cities report))))
@@ -580,7 +580,7 @@
   (separator "测试 9: Step 状态持久化 + 循环")
   (safe-call "带状态的循环 step"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :stateful-loop)
                 (builder/add-step
                   {:id :counter
@@ -613,7 +613,7 @@
                 (builder/on-event :loop-done :final :input)
                 (builder/set-initial-event :start "测试城市")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (let [loop-result (ctx/get-var (:context result) :loop-result)]
           (println (str "    迭代次数: " (:iterations loop-result)))
@@ -629,7 +629,7 @@
   (separator "测试 10: 错误处理")
   (safe-call "error-handler 捕获 step 错误"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :error-process)
                 (builder/add-step
                   {:id :risky-step
@@ -649,7 +649,7 @@
                 (builder/set-error-handler :error-handler)
                 (builder/set-initial-event :start "go")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    错误处理: " (ctx/get-var (:context result) :error-handled)))
         (assert (= :completed (:status result)))
@@ -664,7 +664,7 @@
   (separator "测试 11: 带 Transform 的事件绑定")
   (safe-call "绑定 transform 数据转换"
     (fn []
-      (let [process-def
+      (let [process-spec
             (-> (builder/builder :transform-demo)
                 (builder/add-step
                   {:id :source
@@ -693,7 +693,7 @@
                                   (fn [data] (str "城市: " (:city data))))
                 (builder/set-initial-event :start "go")
                 (builder/build))
-            result (runtime/run-process process-def {:timeout-ms 30000})]
+            result (runtime/run-process process-spec {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (assert (= :completed (:status result)))
         (assert (= "张三" (ctx/get-var (:context result) :got-name)))

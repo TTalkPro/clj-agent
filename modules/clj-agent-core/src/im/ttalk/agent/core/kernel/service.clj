@@ -93,7 +93,8 @@
   {:chat-fn
    (fn [messages opts]
      (let [call-config (build-call-config config opts)
-           response    (provider/call-llm provider call-config messages nil)]
+           tools       (:tools call-config)
+           response    (provider/call-llm provider call-config messages tools)]
        (normalize-response provider response)))
    :build-result-msgs
    (fn [assistant-msg tool-results]

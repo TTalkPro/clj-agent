@@ -1,6 +1,6 @@
-# Memory、State 和 Checkpoint 架构说明
+# Memory、State 和 Snapshot 架构说明
 
-本文档详细说明 clj-agent 记忆系统中 Memory、State 和 Checkpoint 三个核心概念的关系。
+本文档详细说明 clj-agent 记忆系统中 Memory、State 和 Snapshot 三个核心概念的关系。
 
 ## 概念关系图
 
@@ -12,7 +12,7 @@
                     ┌───────────────┼───────────────┐
                     ▼               ▼               ▼
             ┌───────────┐   ┌───────────┐   ┌───────────────┐
-            │   State   │   │  Memory   │   │  Checkpoint   │
+            │   State   │   │  Memory   │   │   Snapshot    │
             │ (运行状态) │   │ (记忆系统) │   │  (状态快照)   │
             └───────────┘   └───────────┘   └───────────────┘
                  │               │                  │
@@ -57,7 +57,7 @@ State 是 Graph 执行过程中的当前数据状态，是节点之间传递信�
 | **瞬时性** | 只存在于执行过程中，执行结束后消失 |
 | **可变性** | 每个节点都可以读取和修改 State |
 | **结构化** | 由 StateSchema 定义，有明确的类型约束 |
-| **内存驻留** | 不自动持久化，需要通过 Checkpoint 保存 |
+| **内存驻留** | 不自动持久化，需要通过 Snapshot 保存 |
 
 ### 生命周期
 
@@ -67,17 +67,17 @@ Graph 开始 → 初始化 State → 节点1修改 → 节点2修改 → ... →
 
 ---
 
-## 2. Checkpoint（状态快照）
+## 2. Snapshot（状态快照）
 
 ### 定义
 
-Checkpoint 是 State 在某个时刻的持久化快照，用于保存执行进度、支持恢复和分支。
+Snapshot 是 State 在某个时刻的持久化快照，用于保存执行进度、支持恢复和分支。
 
 ### 数据结构
 
 ```clojure
-;; Checkpoint 保存的内容
-{:checkpoint
+;; Snapshot 保存的内容
+{:snapshot
   {:state state-data           ;; 完整的 State 快照
    :channel-values {...}}      ;; Channel 值
 
@@ -85,11 +85,11 @@ Checkpoint 是 State 在某个时刻的持久化快照，用于保存执行进�
   {:step 3                     ;; 执行步骤号
    :node "chat"                ;; 当前节点名
    :created-at 1705000000      ;; 创建时间戳
-   :parent-id "cp-xxx"}        ;; 父检查点 ID（形成链表）
+   :parent-id "snap-xxx"}      ;; 父快照 ID（形成链表）
 
- :parent-config                ;; 父检查点配置
+ :parent-config                ;; 父快照配置
   {:thread-id "t1"
-   :checkpoint-id "cp-xxx"}
+   :snapshot-id "snap-xxx"}
 
  :pending-writes [...]}        ;; 待处理的写入
 ```
@@ -97,16 +97,16 @@ Checkpoint 是 State 在某个时刻的持久化快照，用于保存执行进�
 ### 核心概念
 
 - **thread-id**: 线程/会话 ID，标识一个执行序列
-- **checkpoint-id**: 检查点 ID，标识某个具体的状态快照
-- **parent-id**: 父检查点，形成检查点链，支持历史追溯
+- **snapshot-id**: 快照 ID，标识某个具体的状态快照
+- **parent-id**: 父快照，形成快照链，支持历史追溯
 
 ### 用途
 
 | 用途 | 说明 |
 |------|------|
 | **持久化** | 保存执行进度，进程重启后可恢复 |
-| **时间旅行** | 恢复到任意历史检查点继续执行 |
-| **分支执行** | 从某个检查点创建新分支，探索不同路径 |
+| **时间旅行** | 恢复到任意历史快照继续执行 |
+| **分支执行** | 从某个快照创建新分支，探索不同路径 |
 | **Human-in-the-loop** | 暂停执行等待人工干预，之后继续 |
 | **调试** | 重放执行过程，定位问题 |
 
@@ -114,7 +114,7 @@ Checkpoint 是 State 在某个时刻的持久化快照，用于保存执行进�
 
 ```
               保存
-State ──────────────────► Checkpoint
+State ──────────────────► Snapshot
   │                           │
   │                           │ 恢复
   │                           ▼
@@ -122,15 +122,15 @@ State ──────────────────► Checkpoint
 ```
 
 ```clojure
-;; 保存 State 到 Checkpoint
-(proto/cp-put checkpointer
+;; 保存 State 到 Snapshot
+(proto/snap-put snapshot-store
   {:thread-id "thread-1"}
   {:state current-state}
   {:step 1 :node "chat"})
 
-;; 从 Checkpoint 恢复 State
-(let [tuple (proto/cp-get-tuple checkpointer {:thread-id "thread-1"})]
-  (get-in tuple [:checkpoint :state]))
+;; 从 Snapshot 恢复 State
+(let [tuple (proto/snap-get-tuple snapshot-store {:thread-id "thread-1"})]
+  (get-in tuple [:snapshot :state]))
 ```
 
 ---
@@ -185,10 +185,10 @@ Memory
  :enabled true}
 ```
 
-### 与 State/Checkpoint 的区别
+### 与 State/Snapshot 的区别
 
-| 维度 | State | Checkpoint | Memory |
-|------|-------|------------|--------|
+| 维度 | State | Snapshot | Memory |
+|------|-------|----------|--------|
 | **生命周期** | 单次执行 | 单个 Thread | 跨 Thread/会话 |
 | **存储内容** | 执行时数据 | State 快照 | 知识/经验/规则 |
 | **主要用途** | 节点间通信 | 恢复/分支 | 个性化/学习 |
@@ -218,8 +218,8 @@ Memory
 ├─────────────────────────────────────────────────────────────────┤
 │  • State 在节点间传递和更新                                       │
 │  • 消息添加到短期记忆 (Buffer)                                    │
-│  • 重要步骤保存 Checkpoint                                        │
-│  • 需要时可从 Checkpoint 恢复                                     │
+│  • 重要步骤保存 Snapshot                                          │
+│  • 需要时可从 Snapshot 恢复                                       │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -229,14 +229,14 @@ Memory
 │  • 从对话提取事实 → 存入语义记忆                                  │
 │  • 成功案例 → 存入情景记忆                                        │
 │  • 学到的模式 → 存入程序记忆                                      │
-│  • 清理过期 Checkpoint                                           │
+│  • 清理过期 Snapshot                                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### 时序图
 
 ```
-用户      Agent       State      Checkpoint    Memory
+用户      Agent       State      Snapshot      Memory
  │          │           │            │           │
  │─请求────►│           │            │           │
  │          │──加载记忆─┼────────────┼──────────►│
@@ -274,9 +274,9 @@ Memory
 
 ;; 或者手动配置
 (def store (mem/create-in-memory-store))
-(def checkpointer (mem/create-memory-checkpointer))
+(def snapshot-store (mem/create-memory-snapshot-store))
 (def manager (mem/create-memory-manager store
-               :checkpointer checkpointer))
+               :snapshot-store snapshot-store))
 
 ;; ============================================
 ;; 1. 会话开始 - 加载记忆构建上下文
@@ -289,7 +289,7 @@ Memory
 ;;     :rules [...]}
 
 ;; ============================================
-;; 2. 执行过程 - 操作 State 和 Checkpoint
+;; 2. 执行过程 - 操作 State 和 Snapshot
 ;; ============================================
 
 ;; 添加消息到短期记忆
@@ -299,8 +299,8 @@ Memory
 ;; 获取当前消息（短期记忆）
 (def messages (mem/get-messages* manager "thread-1"))
 
-;; 保存 Checkpoint（State 快照）
-(mem/checkpoint! manager "thread-1"
+;; 保存 Snapshot（State 快照）
+(mem/snapshot! manager "thread-1"
   {:messages messages
    :current-step 1
    :tool-results nil}
@@ -311,20 +311,20 @@ Memory
 (mem/add-user-message manager "thread-1" "能解释下原理吗？")
 (mem/add-assistant-message manager "thread-1" "快速排序的核心思想...")
 
-;; 保存另一个 Checkpoint
-(mem/checkpoint! manager "thread-1"
+;; 保存另一个 Snapshot
+(mem/snapshot! manager "thread-1"
   {:messages (mem/get-messages* manager "thread-1")
    :current-step 2}
   :step 2
   :node "explain")
 
-;; 查看检查点历史
-(mem/get-checkpoint-history manager "thread-1")
-;; => [{:id "cp-1" :step 1 :node "chat" :created-at ...}
-;;     {:id "cp-2" :step 2 :node "explain" :created-at ...}]
+;; 查看快照历史
+(mem/get-snapshot-history manager "thread-1")
+;; => [{:id "snap-1" :step 1 :node "chat" :created-at ...}
+;;     {:id "snap-2" :step 2 :node "explain" :created-at ...}]
 
-;; 恢复到之前的检查点（时间旅行）
-(def old-state (mem/restore-to-checkpoint! manager "thread-1" "cp-1"))
+;; 恢复到之前的快照（时间旅行）
+(def old-state (mem/restore-to-snapshot! manager "thread-1" "snap-1"))
 
 ;; ============================================
 ;; 3. 会话结束 - 存储长期记忆
@@ -377,7 +377,7 @@ Memory
 | 概念 | 人类类比 | 说明 |
 |------|---------|------|
 | **State** | 工作记忆 | 当前正在处理的信息，容量有限，易丢失 |
-| **Checkpoint** | 笔记/书签 | 记录重要节点，方便回顾和恢复 |
+| **Snapshot** | 笔记/书签 | 记录重要节点，方便回顾和恢复 |
 | **短期记忆** | 对话记忆 | 记住刚才说了什么 |
 | **语义记忆** | 知识/常识 | "这个用户喜欢中文" |
 | **情景记忆** | 经验/回忆 | "上次这样做成功了" |
@@ -387,21 +387,21 @@ Memory
 
 ## 7. 最佳实践
 
-### Checkpoint 使用建议
+### Snapshot 使用建议
 
 ```clojure
-;; 1. 在重要步骤保存 Checkpoint
-(mem/checkpoint! manager thread-id state
+;; 1. 在重要步骤保存 Snapshot
+(mem/snapshot! manager thread-id state
   :step step-num
   :node node-name)
 
-;; 2. 定期清理旧检查点
-(proto/cp-prune checkpointer thread-id
+;; 2. 定期清理旧快照
+(proto/snap-prune snapshot-store thread-id
   {:keep-count 10
    :keep-types #{:initial :final :error}})
 
 ;; 3. 使用分支探索不同路径
-(proto/cp-create-branch checkpointer thread-id checkpoint-id "experiment-1")
+(proto/snap-create-branch snapshot-store thread-id snapshot-id "experiment-1")
 ```
 
 ### Memory 使用建议
@@ -429,8 +429,8 @@ Memory
 | clj-agent | LangChain | LangGraph | 说明 |
 |-----------|-----------|-----------|------|
 | IStore | BaseStore | - | 基础 KV 存储 |
-| ICheckpointer | - | BaseCheckpointSaver | 检查点管理 |
-| StoreBackedCheckpointer | - | MemorySaver/SqliteSaver | 基于 Store 的检查点（统一实现） |
+| ISnapshotStore | - | BaseCheckpointSaver | 快照管理 |
+| StoreBackedSnapshotStore | - | MemorySaver/SqliteSaver | 基于 Store 的快照（统一实现） |
 | ConversationBuffer | ConversationBufferMemory | - | 会话缓冲 |
 | SemanticMemory | - | - | 语义/知识记忆 |
 | EpisodicMemory | - | - | 情景/经验记忆 |

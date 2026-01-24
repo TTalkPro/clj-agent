@@ -10,9 +10,9 @@
    - IKeyValueStore: 基础 KV 存储协议
 
    ═══════════════════════════════════════════════════════════════
-   Layer 2 - Checkpointer (状态快照)
+   Layer 2 - SnapshotStore (状态快照)
    ═══════════════════════════════════════════════════════════════
-   - ICheckpointer: 检查点管理协议，支持状态持久化和时间旅行
+   - ISnapshotStore: 快照管理协议，支持状态持久化和时间旅行
 
    ═══════════════════════════════════════════════════════════════
    短期记忆 - IConversationBuffer
@@ -141,82 +141,82 @@
      返回: boolean"))
 
 ;; =============================================================================
-;; Layer 2: ICheckpointer - 检查点协议
+;; Layer 2: ISnapshotStore - 快照存储协议
 ;; =============================================================================
 
-(defprotocol ICheckpointer
-  "检查点管理协议
+(defprotocol ISnapshotStore
+  "快照管理协议
 
    管理 Agent 执行的状态快照，支持：
    - 持久化：保存执行状态
-   - 时间旅行：恢复到任意检查点
-   - 分支管理：从检查点创建分支
+   - 时间旅行：恢复到任意快照
+   - 分支管理：从快照创建分支
    - Human-in-the-loop：暂停和恢复执行
 
    实现：
-   - StoreBackedCheckpointer: 基于 IKeyValueStore 的统一实现
+   - StoreBackedSnapshotStore: 基于 IKeyValueStore 的统一实现
      - 使用 InMemoryStore: 内存保存（开发/测试）
      - 使用 SQLiteStore: SQLite 持久化
      - 使用 PostgresStore: PostgreSQL 持久化
 
    核心概念：
    - thread-id: 线程/会话 ID
-   - checkpoint-id: 检查点 ID
-   - checkpoint: {:id :thread-id :state :metadata :parent-id :created-at}
+   - snapshot-id: 快照 ID
+   - snapshot: {:id :thread-id :state :metadata :parent-id :created-at}
 
    使用示例：
-   (save checkpointer config checkpoint metadata)
-   (get-checkpoint checkpointer config)
-   (list-checkpoints checkpointer config {})"
+   (snap-put store config snapshot metadata)
+   (snap-get store config)
+   (snap-list store config {})"
 
   ;; -------------------------------------------------------------------------
   ;; 核心操作
   ;; -------------------------------------------------------------------------
 
-  (save [this config checkpoint metadata]
-    "保存检查点
-     config: {:thread-id string :checkpoint-id string (optional)}
-     checkpoint: {:state any :channel-values map}
+  (snap-put [this config snapshot metadata]
+    "保存快照
+     config: {:thread-id string :snapshot-id string (optional)}
+     snapshot: {:state any :channel-values map}
      metadata: {:step int :node string :source string}
-     返回: checkpoint-id")
+     返回: snapshot-id")
 
-  (save-writes [this config writes task-id]
+  (snap-put-writes [this config writes task-id]
     "保存中间写入（pending writes）
-     config: {:thread-id :checkpoint-id}
+     config: {:thread-id :snapshot-id}
      writes: [{:channel :value} ...]
      task-id: 任务 ID
      返回: boolean")
 
-  (get-checkpoint [this config]
-    "获取检查点元组
-     config: {:thread-id string :checkpoint-id string (optional)}
-     返回: {:checkpoint :metadata :parent-config :pending-writes} 或 nil")
+  (snap-get [this config]
+    "获取快照元组
+     config: {:thread-id string :snapshot-id string (optional)}
+     返回: {:snapshot :metadata :parent-config :pending-writes} 或 nil")
 
-  (list-checkpoints [this config opts]
-    "列出检查点
+  (snap-list [this config opts]
+    "列出快照
      config: {:thread-id string}
      opts: {:limit int :before string :filter map}
-     返回: checkpoint 序列")
+     返回: snapshot 序列")
 
-  (delete-thread [this thread-id]
-    "删除线程的所有检查点
+  (snap-delete-thread [this thread-id]
+    "删除线程的所有快照
      返回: 删除的数量")
 
   ;; -------------------------------------------------------------------------
   ;; 扩展操作
   ;; -------------------------------------------------------------------------
 
-  (get-next-version [this current channel]
+  (snap-get-next-version [this current channel]
     "获取下一个版本号
      current: 当前版本
      channel: 通道名
      返回: 新版本号")
 
-  (restore-to-step [this thread-id step]
+  (snap-restore-to-step [this thread-id step]
     "恢复到指定步骤
-     返回: checkpoint 或 nil")
+     返回: snapshot 或 nil")
 
-  (get-history [this thread-id]
+  (snap-get-history [this thread-id]
     "获取执行历史
      返回: [{:id :step :node :created-at} ...]")
 
@@ -224,24 +224,24 @@
   ;; 分支管理
   ;; -------------------------------------------------------------------------
 
-  (create-branch [this thread-id checkpoint-id branch-name]
-    "从检查点创建分支
-     返回: {:branch-id :checkpoint-id}")
+  (snap-create-branch [this thread-id snapshot-id branch-name]
+    "从快照创建分支
+     返回: {:branch-id :snapshot-id}")
 
-  (list-branches [this thread-id]
+  (snap-list-branches [this thread-id]
     "列出分支
-     返回: [{:branch-id :name :checkpoint-count} ...]")
+     返回: [{:branch-id :name :snapshot-count} ...]")
 
   ;; -------------------------------------------------------------------------
   ;; 清理操作
   ;; -------------------------------------------------------------------------
 
-  (prune [this thread-id opts]
-    "清理旧检查点
+  (snap-prune [this thread-id opts]
+    "清理旧快照
      opts: {:keep-count int :keep-types #{:initial :final}}
      返回: {:kept int :deleted int}")
 
-  (clear-all [this]
+  (snap-clear-all [this]
     "清除所有数据
      返回: 删除的数量"))
 
@@ -516,10 +516,10 @@
   [x]
   (satisfies? IKeyValueStore x))
 
-(defn checkpointer?
-  "检查是否实现了 ICheckpointer 协议"
+(defn snapshot-store?
+  "检查是否实现了 ISnapshotStore 协议"
   [x]
-  (satisfies? ICheckpointer x))
+  (satisfies? ISnapshotStore x))
 
 (defn conversation-buffer?
   "检查是否实现了 IConversationBuffer 协议"

@@ -46,7 +46,7 @@
                                    {:created-at timestamp
                                     :updated-at timestamp})}]
       ;; 存储到 Store
-      (proto/kv-put store namespace key record)
+      (proto/put store namespace key record)
 
       ;; 如果有向量存储，生成并存储嵌入
       (when (and vector-store embedder)
@@ -63,7 +63,7 @@
 
   (get-fact [this namespace fact-id]
     (let [key (fact-key fact-id)]
-      (proto/kv-get store namespace key)))
+      (proto/get-value store namespace key)))
 
   (query-facts [this namespace query opts]
     (if (and vector-store embedder)
@@ -82,17 +82,17 @@
 
   (update-fact [this namespace fact-id updates]
     (let [key (fact-key fact-id)
-          existing (proto/kv-get store namespace key)]
+          existing (proto/get-value store namespace key)]
       (when existing
         (let [updated (-> existing
                           (merge updates)
                           (assoc-in [:metadata :updated-at] (now)))]
-          (proto/kv-put store namespace key updated)
+          (proto/put store namespace key updated)
           updated))))
 
   (delete-fact [this namespace fact-id]
     (let [key (fact-key fact-id)]
-      (proto/kv-delete store namespace key)
+      (proto/delete store namespace key)
       (when vector-store
         (proto/delete-vector vector-store fact-id))
       true))
@@ -104,7 +104,7 @@
       (count facts)))
 
   (list-facts [this namespace opts]
-    (let [all-values (proto/kv-list-values store namespace {:prefix "fact:"
+    (let [all-values (proto/list-values store namespace {:prefix "fact:"
                                                             :limit (or (:limit opts) 100)})]
       (->> all-values
            (map :value)
@@ -114,16 +114,16 @@
                       true)))))
 
   (count-facts [this namespace]
-    (proto/kv-count store namespace {:prefix "fact:"}))
+    (proto/count-keys store namespace {:prefix "fact:"}))
 
   ;; Profile 操作
   (get-profile [this namespace profile-type]
     (let [key (profile-key profile-type)]
-      (proto/kv-get store namespace key)))
+      (proto/get-value store namespace key)))
 
   (update-profile [this namespace profile-type updates]
     (let [key (profile-key profile-type)
-          existing (or (proto/kv-get store namespace key) {})
+          existing (or (proto/get-value store namespace key) {})
           updated (merge-with (fn [old new]
                                 (if (and (map? old) (map? new))
                                   (merge old new)
@@ -131,7 +131,7 @@
                               existing
                               updates
                               {:updated-at (now)})]
-      (proto/kv-put store namespace key updated)
+      (proto/put store namespace key updated)
       updated))
 
   (set-profile [this namespace profile-type data]
@@ -139,7 +139,7 @@
           record (assoc data
                    :profile-type profile-type
                    :updated-at (now))]
-      (proto/kv-put store namespace key record)
+      (proto/put store namespace key record)
       record)))
 
 ;; =============================================================================

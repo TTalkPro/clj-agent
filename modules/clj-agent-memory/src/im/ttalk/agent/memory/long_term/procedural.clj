@@ -43,7 +43,7 @@
   proto/IProceduralMemory
 
   (get-system-prompt [_ namespace]
-    (let [data (proto/kv-get store namespace (system-prompt-key))]
+    (let [data (proto/get-value store namespace (system-prompt-key))]
       (:prompt data)))
 
   (set-system-prompt [_ namespace prompt]
@@ -51,7 +51,7 @@
           record {:prompt prompt
                   :namespace namespace
                   :updated-at (now)}]
-      (proto/kv-put store namespace key record)
+      (proto/put store namespace key record)
       prompt))
 
   (append-to-system-prompt [this namespace addition]
@@ -74,23 +74,23 @@
           key (rule-key rule-id)]
 
       ;; 存储规则
-      (proto/kv-put store namespace key record)
+      (proto/put store namespace key record)
 
       ;; 更新索引
-      (let [idx (or (proto/kv-get store namespace (rules-index-key)) {:rule-ids []})
+      (let [idx (or (proto/get-value store namespace (rules-index-key)) {:rule-ids []})
             updated-idx (update idx :rule-ids #(conj (vec %) rule-id))]
-        (proto/kv-put store namespace (rules-index-key) updated-idx))
+        (proto/put store namespace (rules-index-key) updated-idx))
 
       rule-id))
 
   (get-rules [_ namespace opts]
-    (let [idx (proto/kv-get store namespace (rules-index-key))
+    (let [idx (proto/get-value store namespace (rules-index-key))
           rule-ids (or (:rule-ids idx) [])
           active-only (:active-only opts)
           source-filter (:source opts)
           priority-min (:priority-min opts)]
       (->> rule-ids
-           (map #(proto/kv-get store namespace (rule-key %)))
+           (map #(proto/get-value store namespace (rule-key %)))
            (filter some?)
            (filter #(if active-only (:active %) true))
            (filter #(if source-filter (= (:source %) source-filter) true))
@@ -107,12 +107,12 @@
 
   (update-rule [_ namespace rule-id updates]
     (let [key (rule-key rule-id)
-          existing (proto/kv-get store namespace key)]
+          existing (proto/get-value store namespace key)]
       (when existing
         (let [updated (-> existing
                           (merge updates)
                           (assoc :updated-at (now)))]
-          (proto/kv-put store namespace key updated)
+          (proto/put store namespace key updated)
           updated))))
 
   (deactivate-rule [this namespace rule-id]
@@ -120,21 +120,21 @@
 
   (delete-rule [_ namespace rule-id]
     (let [key (rule-key rule-id)]
-      (proto/kv-delete store namespace key)
+      (proto/delete store namespace key)
 
       ;; 更新索引
-      (let [idx (proto/kv-get store namespace (rules-index-key))]
+      (let [idx (proto/get-value store namespace (rules-index-key))]
         (when idx
           (let [updated-idx (update idx :rule-ids
                                     #(filterv (fn [id] (not= id rule-id)) %))]
-            (proto/kv-put store namespace (rules-index-key) updated-idx))))
+            (proto/put store namespace (rules-index-key) updated-idx))))
       true))
 
   (update-from-feedback [this namespace feedback]
     (let [feedback-type (:type feedback)
           context (:context feedback)
           suggestion (:suggestion feedback)
-          existing-patterns (or (proto/kv-get store namespace (patterns-key))
+          existing-patterns (or (proto/get-value store namespace (patterns-key))
                                 {:patterns [] :feedback-count 0})]
 
       ;; 记录反馈模式
@@ -145,7 +145,7 @@
             updated-patterns (-> existing-patterns
                                  (update :patterns #(conj (vec %) pattern))
                                  (update :feedback-count inc))]
-        (proto/kv-put store namespace (patterns-key) updated-patterns)
+        (proto/put store namespace (patterns-key) updated-patterns)
 
         ;; 根据反馈类型采取行动
         (case feedback-type
@@ -182,7 +182,7 @@
         pattern)))
 
   (get-learned-patterns [_ namespace]
-    (let [data (proto/kv-get store namespace (patterns-key))]
+    (let [data (proto/get-value store namespace (patterns-key))]
       (:patterns data []))))
 
 ;; =============================================================================

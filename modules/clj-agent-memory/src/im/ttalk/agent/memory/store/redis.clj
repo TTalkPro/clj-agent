@@ -15,7 +15,7 @@
 
    使用示例：
    (def store (create-redis-store {:host \"localhost\" :port 6379}))
-   (proto/kv-put store \"user-123\" \"preference\" {:lang \"zh\"})"
+   (proto/put store \"user-123\" \"preference\" {:lang \"zh\"})"
   (:require [im.ttalk.agent.memory.protocol :as proto]
             [taoensso.carmine :as car]
             [cheshire.core :as json]))
@@ -77,9 +77,9 @@
 ;; =============================================================================
 
 (defrecord RedisStore [conn-spec config]
-  proto/IStore
+  proto/IKeyValueStore
 
-  (kv-put [this namespace key value]
+  (put [this namespace key value]
     (let [rkey (redis-key namespace key)
           timestamp (now)
           record {:namespace namespace
@@ -102,17 +102,17 @@
 
       record))
 
-  (kv-put-batch [this namespace items]
+  (put-batch [this namespace items]
     (mapv (fn [{:keys [key value]}]
-            (proto/kv-put this namespace key value))
+            (proto/put this namespace key value))
           items))
 
-  (kv-get [this namespace key]
+  (get-value [this namespace key]
     (when-let [data (wcar* conn-spec
                       (car/get (redis-key namespace key)))]
       (:value (deserialize data))))
 
-  (kv-get-batch [this namespace keys]
+  (get-batch [this namespace keys]
     (if (empty? keys)
       {}
       (let [rkeys (map #(redis-key namespace %) keys)
@@ -125,7 +125,7 @@
                 {}
                 (map vector keys values)))))
 
-  (kv-delete [this namespace key]
+  (delete [this namespace key]
     (let [rkey (redis-key namespace key)
           idx-key (index-key namespace)
           existed? (= 1 (wcar* conn-spec (car/exists rkey)))]
@@ -135,7 +135,7 @@
           (car/zrem idx-key key)))
       existed?))
 
-  (kv-delete-batch [this namespace keys]
+  (delete-batch [this namespace keys]
     (if (empty? keys)
       0
       (let [rkeys (map #(redis-key namespace %) keys)
@@ -145,11 +145,11 @@
           (apply car/zrem idx-key keys))
         (count keys))))
 
-  (kv-exists? [this namespace key]
+  (exists? [this namespace key]
     (= 1 (wcar* conn-spec
            (car/exists (redis-key namespace key)))))
 
-  (kv-list-keys [this namespace opts]
+  (list-keys [this namespace opts]
     (let [{:keys [prefix limit offset]
            :or {limit 100 offset 0}} opts
           idx-key (index-key namespace)
@@ -165,8 +165,8 @@
            (take limit)
            (vec))))
 
-  (kv-list-values [this namespace opts]
-    (let [keys (proto/kv-list-keys this namespace opts)]
+  (list-values [this namespace opts]
+    (let [keys (proto/list-keys this namespace opts)]
       (when (seq keys)
         (->> keys
              (map (fn [k]
@@ -181,14 +181,14 @@
              (remove nil?)
              (vec)))))
 
-  (kv-search [this namespace query opts]
+  (search [this namespace query opts]
     ;; Redis 简单实现：遍历所有值进行字符串匹配
     (let [{:keys [top-k] :or {top-k 10}} opts
           query-str (:query query)
-          all-keys (proto/kv-list-keys this namespace {:limit 1000})]
+          all-keys (proto/list-keys this namespace {:limit 1000})]
       (->> all-keys
            (map (fn [k]
-                  (when-let [v (proto/kv-get this namespace k)]
+                  (when-let [v (proto/get-value this namespace k)]
                     (let [value-str (pr-str v)
                           score (if (and query-str
                                          (.contains ^String value-str ^String query-str))
@@ -200,7 +200,7 @@
            (take top-k)
            (vec))))
 
-  (kv-count [this namespace opts]
+  (count-keys [this namespace opts]
     (let [{:keys [prefix]} opts
           idx-key (index-key namespace)]
       (if prefix
@@ -208,13 +208,13 @@
           (count (filter #(.startsWith ^String % ^String prefix) all-keys)))
         (or (wcar* conn-spec (car/zcard idx-key)) 0))))
 
-  (store-init! [this]
+  (init! [this]
     this)
 
-  (store-close! [this]
+  (close! [this]
     nil)
 
-  (store-healthy? [this]
+  (healthy? [this]
     (try
       (= "PONG" (wcar* conn-spec (car/ping)))
       (catch Exception _

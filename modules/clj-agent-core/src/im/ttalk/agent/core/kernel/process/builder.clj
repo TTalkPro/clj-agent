@@ -1,7 +1,7 @@
 (ns im.ttalk.agent.core.kernel.process.builder
   "Process Builder - 构建 Process 定义
 
-   提供链式 API 构建 process-def，编译时验证。
+   提供链式 API 构建 process-spec，编译时验证。
 
    使用示例:
 
@@ -139,14 +139,14 @@
 ;;; ============================================================
 
 (defn build
-  "编译 builder 为 process-def
+  "编译 builder 为 process-spec
 
    执行验证并生成最终的 process 定义。
 
    参数:
    - b: builder
 
-   返回: process-def map
+   返回: process-spec map
 
    异常: 验证失败时抛出 ex-info"
   [b]
@@ -157,8 +157,8 @@
       (throw (ex-info "Process 至少需要一个 step" {:name (:name b)})))
     (validate-bindings steps bindings)
     (validate-error-handler steps (:error-handler b))
-    ;; 生成 process-def
-    {:__process_def__  true
+    ;; 生成 process-spec
+    {:__process_spec__  true
      :name             (:name b)
      :steps            steps
      :bindings         bindings

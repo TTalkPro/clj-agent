@@ -1,7 +1,7 @@
 (ns im.ttalk.agent.memory.agent-memory
   "AgentMemory - Agent 记忆管理
 
-   双 Store 架构 + CheckpointManager 组合：
+   双 Store 架构 + SnapshotManager 组合：
    ┌─────────────────────────────────────────────────────────────┐
    │                      AgentMemory                            │
    │  ┌─────────────────┐         ┌─────────────────────────┐    │
@@ -12,14 +12,14 @@
    │           │                             │                   │
    │           ▼                             │                   │
    │  ┌─────────────────┐                   │                   │
-   │  │ CheckpointMgr   │                   │                   │
-   │  │ (checkpoint管理)│                   │                   │
+   │  │ SnapshotMgr     │                   │                   │
+   │  │ (snapshot管理)  │                   │                   │
    │  └─────────────────┘                   │                   │
    │                                       │                   │
    │  ┌────────────────────────────────────┴─────────────────┐ │
    │  │              AgentMemory 职责：                       │ │
-   │  │  • 实现 ICheckpointer 协议（委托给 CheckpointManager） │ │
-   │  │  • 组合 CheckpointManager + 双 Store                 │ │
+   │  │  • 实现 ISnapshotStore 协议（委托给 SnapshotManager）│ │
+   │  │  • 组合 SnapshotManager + 双 Store                   │ │
    │  │  • 归档功能 (archive-session!/load-archived/list...) │ │
    │  │  • 知识库 (remember/recall/forget)                   │ │
    │  │  • 消息管理 (add-message/get-messages)               │ │
@@ -28,10 +28,9 @@
    └─────────────────────────────────────────────────────────────┘
 
    设计原则：
-   1. 实现 ICheckpointer 协议，可直接用于 create-agent
+   1. 实现 ISnapshotStore 协议，可直接用于 create-agent
    2. 双 Store 架构：context-store（热数据）+ persistent-store（冷数据）
    3. 当 persistent-store 为 nil 时，降级为单 Store 模式
-   4. 与 Lisp 版本 api/agent-memory.lisp 对齐
 
    使用示例：
 
@@ -40,16 +39,12 @@
                 :context-store (create-in-memory-store)))
 
    (def agent (create-agent provider tools
-               {:checkpointer memory}))
+               {:snapshot-store memory}))
 
    ;; 双 Store 模式（推荐）
    (def memory (create-agent-memory
                 :context-store (create-in-memory-store)
                 :persistent-store (create-sqlite-store \"archive.db\")))
-
-   ;; 作为 checkpointer 使用
-   (def agent (create-agent provider tools
-               {:checkpointer memory}))
 
    ;; 高级功能
    (save-state memory {:user \"Alice\" :count 0})
@@ -57,13 +52,13 @@
    (archive-session! memory)
    (remember memory :user \"Alice\" {:type :preference})"
   (:require [im.ttalk.agent.memory.protocol :as proto]
-            [im.ttalk.agent.memory.checkpoint.manager :as mgr]))
+            [im.ttalk.agent.memory.snapshot.manager :as mgr]))
 
 ;; =============================================================================
 ;; 命名空间常量
 ;; =============================================================================
 
-(def ^:private ns-checkpoints "checkpoints")
+(def ^:private ns-snapshots "snapshots")
 (def ^:private ns-threads "threads")
 (def ^:private ns-archives "archives")
 (def ^:private ns-knowledge "knowledge")
@@ -94,53 +89,53 @@
 ;; AgentMemory 实现
 ;; =============================================================================
 
-(defrecord AgentMemory [context-store persistent-store checkpointer
+(defrecord AgentMemory [context-store persistent-store snapshot-store
                        default-thread-id auto-archive config]
 
   ;; ==========================================================================
-  ;; ICheckpointer 协议实现（委托给内部的 CheckpointManager）
+  ;; ISnapshotStore 协议实现（委托给内部的 SnapshotManager）
   ;; ==========================================================================
-  proto/ICheckpointer
+  proto/ISnapshotStore
 
   ;; 核心操作
-  (cp-put [this cfg checkpoint metadata]
-    (proto/cp-put checkpointer cfg checkpoint metadata))
+  (snap-put [this cfg snapshot metadata]
+    (proto/snap-put snapshot-store cfg snapshot metadata))
 
-  (cp-put-writes [this cfg writes task-id]
-    (proto/cp-put-writes checkpointer cfg writes task-id))
+  (snap-put-writes [this cfg writes task-id]
+    (proto/snap-put-writes snapshot-store cfg writes task-id))
 
-  (cp-get-tuple [this cfg]
-    (proto/cp-get-tuple checkpointer cfg))
+  (snap-get [this cfg]
+    (proto/snap-get snapshot-store cfg))
 
-  (cp-list [this cfg opts]
-    (proto/cp-list checkpointer cfg opts))
+  (snap-list [this cfg opts]
+    (proto/snap-list snapshot-store cfg opts))
 
-  (cp-delete-thread [this thread-id]
-    (proto/cp-delete-thread checkpointer thread-id))
+  (snap-delete-thread [this thread-id]
+    (proto/snap-delete-thread snapshot-store thread-id))
 
   ;; 扩展操作
-  (cp-get-next-version [this current channel]
-    (proto/cp-get-next-version checkpointer current channel))
+  (snap-get-next-version [this current channel]
+    (proto/snap-get-next-version snapshot-store current channel))
 
-  (cp-restore-to-step [this thread-id step]
-    (proto/cp-restore-to-step checkpointer thread-id step))
+  (snap-restore-to-step [this thread-id step]
+    (proto/snap-restore-to-step snapshot-store thread-id step))
 
-  (cp-get-history [this thread-id]
-    (proto/cp-get-history checkpointer thread-id))
+  (snap-get-history [this thread-id]
+    (proto/snap-get-history snapshot-store thread-id))
 
   ;; 分支管理
-  (cp-create-branch [this thread-id checkpoint-id branch-name]
-    (proto/cp-create-branch checkpointer thread-id checkpoint-id branch-name))
+  (snap-create-branch [this thread-id snapshot-id branch-name]
+    (proto/snap-create-branch snapshot-store thread-id snapshot-id branch-name))
 
-  (cp-list-branches [this thread-id]
-    (proto/cp-list-branches checkpointer thread-id))
+  (snap-list-branches [this thread-id]
+    (proto/snap-list-branches snapshot-store thread-id))
 
   ;; 清理操作
-  (cp-prune [this thread-id opts]
-    (proto/cp-prune checkpointer thread-id opts))
+  (snap-prune [this thread-id opts]
+    (proto/snap-prune snapshot-store thread-id opts))
 
-  (cp-clear-all [this]
-    (proto/cp-clear-all checkpointer)))
+  (snap-clear-all [this]
+    (proto/snap-clear-all snapshot-store)))
 
 ;; =============================================================================
 ;; AgentMemory 扩展方法
@@ -156,7 +151,7 @@
   (or thread-id (:default-thread-id memory)))
 
 (defn save-state
-  "保存状态为 checkpoint（保存到 context-store）
+  "保存状态为 snapshot（保存到 context-store）
 
    参数：
    - memory: AgentMemory 实例
@@ -165,34 +160,34 @@
      :thread-id 线程 ID
      :metadata 元数据
 
-   返回：checkpoint-id"
+   返回：snapshot-id"
   [memory state & {:keys [thread-id metadata]
                    :or {thread-id nil
                         metadata {}}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}]
-    (proto/cp-put memory cfg state metadata)))
+    (proto/snap-put memory cfg state metadata)))
 
 (defn load-state
-  "加载 checkpoint
+  "加载 snapshot
 
    参数：
    - memory: AgentMemory 实例
    - opts: 可选参数
      :thread-id 线程 ID
-     :checkpoint-id 检查点 ID（可选，默认最新）
+     :snapshot-id 快照 ID（可选，默认最新）
 
-   返回：checkpoint tuple"
-  [memory & {:keys [thread-id checkpoint-id]
+   返回：snapshot tuple"
+  [memory & {:keys [thread-id snapshot-id]
              :or {thread-id nil
-                  checkpoint-id nil}}]
+                  snapshot-id nil}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid
-             :checkpoint-id checkpoint-id}]
-    (proto/cp-get-tuple memory cfg)))
+             :snapshot-id snapshot-id}]
+    (proto/snap-get memory cfg)))
 
 ;; -------------------------------------------------------------------------
-;; 便捷方法：时间旅行（使用 checkpoint.manager 的方法）
+;; 便捷方法：时间旅行（使用 snapshot.manager 的方法）
 ;; -------------------------------------------------------------------------
 
 (defn go-back
@@ -204,31 +199,31 @@
      :thread-id 线程 ID
      :steps 步数（默认 1）
 
-   返回：目标 checkpoint 或 nil"
+   返回：目标 snapshot 或 nil"
   [memory & {:keys [thread-id steps]
              :or {thread-id nil
                   steps 1}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}
-        history (proto/cp-list memory cfg {})
-        branch-id @(get-in memory [:checkpointer :current-branch])
-        branches @(get-in memory [:checkpointer :branches])
+        history (proto/snap-list memory cfg {})
+        branch-id @(get-in memory [:snapshot-store :current-branch])
+        branches @(get-in memory [:snapshot-store :branches])
         branch-info (get branches branch-id)
-        current-id (:head-checkpoint-id branch-info)
+        current-id (:head-snapshot-id branch-info)
         current-index (when current-id
                         (first (keep-indexed
-                                 (fn [i cp]
-                                   (when (= (:id cp) current-id)
+                                 (fn [i s]
+                                   (when (= (:id s) current-id)
                                      i))
                                  history)))]
 
     (when (and current-index
                (< (+ current-index steps) (count history)))
-      (let [target-cp (nth history (+ current-index steps))
-            target-id (:id target-cp)]
-        ;; 更新分支 head
-        (swap! branches assoc-in [branch-id :head-checkpoint-id] target-id)
-        target-cp))))
+      (let [target (nth history (+ current-index steps))
+            target-id (:id target)]
+        (swap! (get-in memory [:snapshot-store :branches])
+               update branch-id assoc :head-snapshot-id target-id)
+        target))))
 
 (defn go-forward
   "前进 N 步
@@ -239,55 +234,54 @@
      :thread-id 线程 ID
      :steps 步数（默认 1）
 
-   返回：目标 checkpoint 或 nil"
+   返回：目标 snapshot 或 nil"
   [memory & {:keys [thread-id steps]
              :or {thread-id nil
                   steps 1}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}
-        history (proto/cp-list memory cfg {})
-        branch-id @(get-in memory [:checkpointer :current-branch])
-        branches @(get-in memory [:checkpointer :branches])
+        history (proto/snap-list memory cfg {})
+        branch-id @(get-in memory [:snapshot-store :current-branch])
+        branches @(get-in memory [:snapshot-store :branches])
         branch-info (get branches branch-id)
-        current-id (:head-checkpoint-id branch-info)
+        current-id (:head-snapshot-id branch-info)
         current-index (when current-id
                        (first (keep-indexed
-                                (fn [i cp]
-                                  (when (= (:id cp) current-id)
+                                (fn [i s]
+                                  (when (= (:id s) current-id)
                                     i))
                                 history)))]
 
     (when (and current-index
                (>= (- current-index steps) 0))
-      (let [target-cp (nth history (- current-index steps))
-            target-id (:id target-cp)]
-        ;; 更新分支 head
-        (swap! branches assoc-in [branch-id :head-checkpoint-id] target-id)
-        target-cp))))
+      (let [target (nth history (- current-index steps))
+            target-id (:id target)]
+        (swap! (get-in memory [:snapshot-store :branches])
+               update branch-id assoc :head-snapshot-id target-id)
+        target))))
 
 (defn goto
-  "跳转到指定 checkpoint
+  "跳转到指定 snapshot
 
    参数：
    - memory: AgentMemory 实例
-   - checkpoint-id: 目标 checkpoint ID
+   - snapshot-id: 目标 snapshot ID
    - opts: 可选参数
      :thread-id 线程 ID
 
-   返回：目标 checkpoint 或 nil"
-  [memory checkpoint-id & {:keys [thread-id]
-                           :or {thread-id nil}}]
+   返回：目标 snapshot 或 nil"
+  [memory snapshot-id & {:keys [thread-id]
+                         :or {thread-id nil}}]
   (let [tid (get-thread-id memory thread-id)
-        branch-id @(get-in memory [:checkpointer :current-branch])
-        branches @(get-in memory [:checkpointer :branches])
+        branch-id @(get-in memory [:snapshot-store :current-branch])
         cfg {:thread-id tid
-             :checkpoint-id checkpoint-id}
-        target-cp (proto/cp-get-tuple memory cfg)]
+             :snapshot-id snapshot-id}
+        target (proto/snap-get memory cfg)]
 
-    (when target-cp
-      ;; 更新分支 head
-      (swap! branches assoc-in [branch-id :head-checkpoint-id] checkpoint-id)
-      target-cp)))
+    (when target
+      (swap! (get-in memory [:snapshot-store :branches])
+             update branch-id assoc :head-snapshot-id snapshot-id)
+      target)))
 
 (defn list-history
   "列出历史
@@ -298,13 +292,13 @@
      :thread-id 线程 ID
      :limit 数量限制（默认 100）
 
-   返回：checkpoint 列表"
+   返回：snapshot 列表"
   [memory & {:keys [thread-id limit]
              :or {thread-id nil
                   limit 100}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}]
-    (proto/cp-list memory cfg {:limit limit})))
+    (proto/snap-list memory cfg {:limit limit})))
 
 ;; -------------------------------------------------------------------------
 ;; 便捷方法：分支管理
@@ -318,14 +312,14 @@
    - branch-id: 分支 ID
    - opts: 可选参数
      :thread-id 线程 ID
-     :from-checkpoint 源 checkpoint ID（可选）
+     :from-snapshot 源 snapshot ID（可选）
 
    返回：新分支信息"
-  [memory branch-id & {:keys [thread-id from-checkpoint]
+  [memory branch-id & {:keys [thread-id from-snapshot]
                        :or {thread-id nil
-                            from-checkpoint nil}}]
+                            from-snapshot nil}}]
   (let [tid (get-thread-id memory thread-id)]
-    (proto/cp-create-branch memory tid from-checkpoint branch-id)))
+    (proto/snap-create-branch memory tid from-snapshot branch-id)))
 
 (defn switch-branch
   "切换分支
@@ -336,22 +330,19 @@
    - opts: 可选参数
      :thread-id 线程 ID
 
-   返回：目标分支的最新 checkpoint 或 nil"
+   返回：目标分支的最新 snapshot 或 nil"
   [memory branch-id & {:keys [thread-id]
                        :or {thread-id nil}}]
   (let [tid (get-thread-id memory thread-id)
-        branches @(get-in memory [:checkpointer :branches])
+        branches @(get-in memory [:snapshot-store :branches])
         branch-info (get branches branch-id)]
 
     (when branch-info
-      ;; 切换当前分支
-      (reset! (get-in memory [:checkpointer :current-branch]) branch-id)
-
-      ;; 返回该分支的 head
-      (let [head-id (:head-checkpoint-id branch-info)]
+      (reset! (get-in memory [:snapshot-store :current-branch]) branch-id)
+      (let [head-id (:head-snapshot-id branch-info)]
         (when head-id
-          (proto/cp-get-tuple memory {:thread-id tid
-                                    :checkpoint-id head-id}))))))
+          (proto/snap-get memory {:thread-id tid
+                                  :snapshot-id head-id}))))))
 
 (defn list-branches
   "列出所有分支
@@ -365,7 +356,7 @@
   [memory & {:keys [thread-id]
              :or {thread-id nil}}]
   (let [tid (get-thread-id memory thread-id)]
-    (proto/cp-list-branches memory tid)))
+    (proto/snap-list-branches memory tid)))
 
 ;; -------------------------------------------------------------------------
 ;; 归档功能（context-store → persistent-store）
@@ -374,13 +365,13 @@
 (defn archive-session!
   "将当前会话完整归档到 persistent-store
 
-   归档所有 checkpoint 历史到 persistent-store，并从 context-store 清理。
+   归档所有 snapshot 历史到 persistent-store，并从 context-store 清理。
 
    参数：
    - memory: AgentMemory 实例
    - opts: 可选参数
      :thread-id 线程 ID
-     :summarize-fn 总结函数 (fn [checkpoints] -> summary-string)
+     :summarize-fn 总结函数 (fn [snapshots] -> summary-string)
 
    返回：归档的 session-id 或 nil（如果没有 persistent-store）
 
@@ -388,19 +379,19 @@
    ;; 基本归档
    (archive-session! memory :thread-id \"user-123\")
 
-   带 AI 摘要
+   ;; 带 AI 摘要
    (archive-session! memory
      :thread-id \"user-123\"
-     :summarize-fn (fn [checkpoints]
-                    (str \"共 \" (count checkpoints) \" 个检查点\")))"
+     :summarize-fn (fn [snapshots]
+                    (str \"共 \" (count snapshots) \" 个快照\")))"
   [memory & {:keys [thread-id summarize-fn]
              :or {thread-id nil
                   summarize-fn nil}}]
   (when-let [ps (:persistent-store memory)]
     (let [tid (get-thread-id memory thread-id)
 
-          ;; 获取完整历史 ✅
-          history (proto/cp-list memory {:thread-id tid} {:limit 10000})
+          ;; 获取完整历史
+          history (proto/snap-list memory {:thread-id tid} {:limit 10000})
 
           session-id (str "session-" tid "-" (now))
 
@@ -408,18 +399,18 @@
           archive-data {:session-id session-id
                         :thread-id tid
                         :archived-at (now)
-                        :checkpoint-count (count history)
-                        :checkpoints history      ; ← 完整历史！
-                        :first-checkpoint-id (:id (first history))
-                        :last-checkpoint-id (:id (last history))
+                        :snapshot-count (count history)
+                        :snapshots history
+                        :first-snapshot-id (:id (first history))
+                        :last-snapshot-id (:id (last history))
                         :summary (when summarize-fn
                                    (summarize-fn history))}]
 
       ;; 归档到 persistent-store
-      (proto/kv-put ps ns-archives (archive-key tid) archive-data)
+      (proto/put ps ns-archives (archive-key tid) archive-data)
 
       ;; 清理 context-store
-      (proto/cp-delete-thread memory tid)
+      (proto/snap-delete-thread memory tid)
 
       session-id)))
 
@@ -437,7 +428,7 @@
                         :or {thread-id nil}}]
   (when-let [ps (:persistent-store memory)]
     (let [tid (get-thread-id memory thread-id)]
-      (proto/kv-get ps ns-archives (archive-key tid)))))
+      (proto/get-value ps ns-archives (archive-key tid)))))
 
 (defn list-archived
   "列出所有归档的会话
@@ -451,7 +442,7 @@
   [memory & {:keys [limit]
              :or {limit 20}}]
   (when-let [ps (:persistent-store memory)]
-    (->> (proto/kv-list-values ps ns-archives {:limit limit})
+    (->> (proto/list-values ps ns-archives {:limit limit})
          (map (fn [item]
                 (let [data (:value item)]
                   {:session-id (:session-id data)
@@ -481,7 +472,7 @@
                                   embedding nil}}]
   (let [store (or (:persistent-store memory) (:context-store memory))
         key (knowledge-key (name type) id)]
-    (proto/kv-put store ns-knowledge key
+    (proto/put store ns-knowledge key
                   {:type type
                    :id id
                    :content content
@@ -505,7 +496,7 @@
                      :or {thread-id nil}}]
   (let [store (or (:persistent-store memory) (:context-store memory))
         key (knowledge-key (name type) id)
-        item (proto/kv-get store ns-knowledge key)]
+        item (proto/get-value store ns-knowledge key)]
     (when item
       (:content (:value item)))))
 
@@ -523,7 +514,7 @@
                   :or {limit 100}}]
   (let [store (or (:persistent-store memory) (:context-store memory))
         type-str (name type)
-        all-items (proto/kv-list-values store ns-knowledge {:limit limit})]
+        all-items (proto/list-values store ns-knowledge {:limit limit})]
     (->> all-items
          (filter #(= type-str (get-in % [:value :type] "")))
          (map :content))))
@@ -540,7 +531,7 @@
   [memory type id]
   (let [store (or (:persistent-store memory) (:context-store memory))
         key (knowledge-key (name type) id)]
-    (proto/kv-delete store ns-knowledge key)))
+    (proto/delete store ns-knowledge key)))
 
 (defn search-knowledge
   "搜索知识库（基于元数据或内容）
@@ -557,7 +548,7 @@
   [memory query & {:keys [limit]
                     :or {limit 10}}]
   (let [store (or (:persistent-store memory) (:context-store memory))
-        all-items (proto/kv-list-values store ns-knowledge {:limit 1000})]
+        all-items (proto/list-values store ns-knowledge {:limit 1000})]
     (->> all-items
          (filter (fn [item]
                    (or (clojure.string/includes?
@@ -590,16 +581,16 @@
                               metadata {}}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}
-        tuple (proto/cp-get-tuple memory cfg)
-        current-checkpoint (:checkpoint tuple)
-        current-messages (or (:messages current-checkpoint) [])
+        tuple (proto/snap-get memory cfg)
+        current-snapshot (:snapshot tuple)
+        current-messages (or (:messages current-snapshot) [])
         new-message {:role role
                      :content content
                      :metadata metadata
                      :timestamp (now)}
-        updated-checkpoint (assoc current-checkpoint
-                                  :messages (conj current-messages new-message))]
-    (proto/cp-put memory cfg updated-checkpoint {})
+        updated-snapshot (assoc current-snapshot
+                                :messages (conj current-messages new-message))]
+    (proto/snap-put memory cfg updated-snapshot {})
     new-message))
 
 (defn get-messages
@@ -617,9 +608,9 @@
                   limit nil}}]
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}
-        tuple (proto/cp-get-tuple memory cfg)
-        checkpoint (:checkpoint tuple)
-        messages (or (:messages checkpoint) [])]
+        tuple (proto/snap-get memory cfg)
+        snapshot (:snapshot tuple)
+        messages (or (:messages snapshot) [])]
     (if (and limit (> (count messages) limit))
       (take-last limit messages)
       messages)))
@@ -642,10 +633,10 @@
 
   (let [tid (get-thread-id memory thread-id)
         cfg {:thread-id tid}
-        tuple (proto/cp-get-tuple memory cfg)
-        checkpoint (:checkpoint tuple)
-        updated-checkpoint (assoc checkpoint :messages [])]
-    (proto/cp-put memory cfg updated-checkpoint {})))
+        tuple (proto/snap-get memory cfg)
+        snapshot (:snapshot tuple)
+        updated-snapshot (assoc snapshot :messages [])]
+    (proto/snap-put memory cfg updated-snapshot {})))
 
 ;; =============================================================================
 ;; 工厂函数
@@ -663,7 +654,7 @@
      - :initial-branch 初始分支名（默认 \"main\"）
      - :config 额外配置
 
-   返回：AgentMemory 实例（实现 ICheckpointer 协议）
+   返回：AgentMemory 实例（实现 ISnapshotStore 协议）
 
    示例：
    ;; 单 Store 模式
@@ -673,11 +664,7 @@
    ;; 双 Store 模式（推荐）
    (def memory (create-agent-memory
                  :context-store (create-in-memory-store)
-                 :persistent-store (create-sqlite-store \"archive.db\")))
-
-   ;; 直接用于 create-agent
-   (def agent (create-agent provider tools
-                 {:checkpointer memory}))"
+                 :persistent-store (create-sqlite-store \"archive.db\")))"
   [context-store & {:keys [persistent-store
                          default-thread-id
                          auto-archive
@@ -690,11 +677,11 @@
   {:pre [(some? context-store)
          (proto/store? context-store)
          (or (nil? persistent-store) (proto/store? persistent-store))]}
-  (let [cp (mgr/create-checkpoint-manager context-store
-                                          :initial-branch initial-branch)]
+  (let [ss (mgr/create-snapshot-manager context-store
+                                        :initial-branch initial-branch)]
     (->AgentMemory context-store
                   persistent-store
-                  cp
+                  ss
                   default-thread-id
                   auto-archive
                   config)))

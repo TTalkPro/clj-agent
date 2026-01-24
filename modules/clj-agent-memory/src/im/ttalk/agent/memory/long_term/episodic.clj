@@ -55,13 +55,13 @@
           key (episode-key episode-id)]
 
       ;; 存储到 Store
-      (proto/kv-put store namespace key record)
+      (proto/put store namespace key record)
 
       ;; 更新索引
-      (let [idx (or (proto/kv-get store namespace (index-key)) {:episode-ids []})
+      (let [idx (or (proto/get-value store namespace (index-key)) {:episode-ids []})
             updated-idx (update idx :episode-ids
                                 #(conj (vec %) {:id episode-id :created-at timestamp}))]
-        (proto/kv-put store namespace (index-key) updated-idx))
+        (proto/put store namespace (index-key) updated-idx))
 
       ;; 如果有向量存储，存储情境嵌入
       (when (and vector-store embedder)
@@ -79,7 +79,7 @@
     ;; 尝试在所有 namespace 查找
     (let [namespaces ["default"]]  ;; 可以扩展支持多 namespace
       (some (fn [ns]
-              (proto/kv-get store ns (episode-key episode-id)))
+              (proto/get-value store ns (episode-key episode-id)))
             namespaces)))
 
   (query-similar [this situation opts]
@@ -107,12 +107,12 @@
     (let [namespace (or (:namespace opts) "default")
           limit (or (:limit opts) 10)
           outcome-filter (:outcome-filter opts)
-          idx (proto/kv-get store namespace (index-key))]
+          idx (proto/get-value store namespace (index-key))]
       (when idx
         (->> (:episode-ids idx)
              (sort-by :created-at >)  ; 按时间倒序
              (take (* limit 2))  ; 多取一些以便过滤
-             (map #(proto/kv-get store namespace (episode-key (:id %))))
+             (map #(proto/get-value store namespace (episode-key (:id %))))
              (filter some?)
              (filter #(if outcome-filter
                         (= (:outcome %) outcome-filter)
@@ -127,14 +127,14 @@
       (let [namespace (:namespace episode)
             key (episode-key episode-id)]
         ;; 删除记录
-        (proto/kv-delete store namespace key)
+        (proto/delete store namespace key)
 
         ;; 更新索引
-        (let [idx (proto/kv-get store namespace (index-key))]
+        (let [idx (proto/get-value store namespace (index-key))]
           (when idx
             (let [updated-idx (update idx :episode-ids
                                       #(filterv (fn [e] (not= (:id e) episode-id)) %))]
-              (proto/kv-put store namespace (index-key) updated-idx))))
+              (proto/put store namespace (index-key) updated-idx))))
 
         ;; 删除向量
         (when vector-store
@@ -149,7 +149,7 @@
                       :outcome outcome
                       :reasoning reasoning
                       :updated-at (now))]
-        (proto/kv-put store namespace key updated)
+        (proto/put store namespace key updated)
 
         ;; 更新向量元数据
         (when vector-store

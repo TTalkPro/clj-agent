@@ -111,7 +111,7 @@ V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-acti
 
 ```clojure
 {:status       (atom :running)         ;; :running | :paused | :completed | :failed
- :process-def  process-def
+ :process-spec  process-spec
  :event-chan   (async/chan 256)          ;; 事件总线
  :control-chan (async/chan)              ;; 控制信号（pause/resume/stop）
  :steps        {:step-id step-runtime ...}
@@ -170,11 +170,11 @@ V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-acti
 
 ```clojure
 ;; 启动 process（返回 result channel）
-(start-process process-def opts)
+(start-process process-spec opts)
 ;; -> 返回 channel，完成时放入 {:status :context :error}
 
 ;; 同步便利函数
-(run-process process-def opts)
+(run-process process-spec opts)
 ;; -> 阻塞等待完成，返回 result map
 
 ;; 恢复

@@ -25,7 +25,7 @@
 
    Runtime 结构:
    {:status       atom  ;; :running | :paused | :completed | :failed
-    :process-def  map
+    :process-spec  map
     :event-chan   chan   ;; 事件总线
     :control-chan chan   ;; 控制信号
     :steps        {step-id step-runtime}
@@ -38,15 +38,15 @@
 
    使用:
    ;; 异步
-   (let [result-ch (start-process process-def opts)]
+   (let [result-ch (start-process process-spec opts)]
      (async/<!! result-ch))
 
    ;; 同步便利
-   (run-process process-def opts)
+   (run-process process-spec opts)
    ;; -> {:status :completed :context ctx}
 
    ;; 暂停/恢复
-   (let [rt (run-process process-def opts)]
+   (let [rt (run-process process-spec opts)]
      (when (= :paused (:status rt))
        (run-resume rt resume-data opts)))"
   (:require [clojure.core.async :as async :refer [go go-loop <! >! >!! <!! chan
@@ -78,15 +78,23 @@
    - in-flight:  进行中计数 atom
    - on-pause:   暂停回调 (fn [step-id reason state])
    - on-error:   错误回调 (fn [step-id reason])
+   - opts:       可选参数
+     :initial-step-state  恢复的 step 状态 {:state any :activation-count int}
 
    返回: step-runtime map（含 state atom 和 worker handle）"
-  [step-id step-def input-chan event-chan context in-flight on-pause on-error]
+  [step-id step-def input-chan event-chan context in-flight on-pause on-error
+   & {:keys [initial-step-state]}]
   (let [init-fn (:init step-def)
         config (or (:config step-def) {})
-        initial-state (when init-fn (init-fn config))
+        initial-state (if initial-step-state
+                        (:state initial-step-state)
+                        (when init-fn (init-fn config)))
+        initial-count (if initial-step-state
+                        (:activation-count initial-step-state)
+                        0)
         state-atom (atom {:collected-inputs {}
                           :state            initial-state
-                          :activation-count 0})
+                          :activation-count initial-count})
         worker
         (go-loop []
           (when-let [{:keys [input-name data]} (<! input-chan)]
@@ -272,10 +280,11 @@
    初始化所有 step worker，启动 router，放入初始事件。
 
    参数:
-   - process-def: 编译后的 process 定义
+   - process-spec: 编译后的 process 定义
    - opts:        选项 map
      :context      Context 对象（可选）
      :timeout-ms   全局超时毫秒（默认 60000）
+     :step-states  恢复的 step 状态 {step-id {:state any :activation-count int}}
 
    返回:
    runtime map，包含 result-chan（完成时放入结果）
@@ -287,8 +296,9 @@
     :paused-step nil-or-step-id
     :pause-reason nil-or-reason
     :runtime runtime}  ;; 用于 resume"
-  [process-def opts]
-  (let [context-atom (atom (or (:context opts) (ctx/create)))
+  [process-spec opts]
+  (let [step-states (or (:step-states opts) {})
+        context-atom (atom (or (:context opts) (ctx/create)))
         timeout-ms (or (:timeout-ms opts) default-timeout-ms)
         event-chan (chan 256)
         control-chan (chan 16)
@@ -325,7 +335,7 @@
 
         ;; 错误回调
         on-error (fn [step-id reason]
-                   (let [error-handler-id (:error-handler process-def)]
+                   (let [error-handler-id (:error-handler process-spec)]
                      (if (and error-handler-id (not= step-id error-handler-id))
                        ;; 路由到 error-handler step
                        (let [step-rt (get (:steps (meta event-chan)) error-handler-id)]
@@ -349,17 +359,19 @@
         steps (reduce-kv
                 (fn [acc step-id step-def]
                   (let [input-chan (chan 64)
+                        saved-state (get step-states step-id)
                         step-rt (start-step-worker
                                   step-id step-def input-chan event-chan
-                                  context-atom in-flight on-pause on-error)]
+                                  context-atom in-flight on-pause on-error
+                                  :initial-step-state saved-state)]
                     (assoc acc step-id step-rt)))
                 {}
-                (:steps process-def))
+                (:steps process-spec))
 
         ;; 错误事件绑定（如有 error-handler）
-        error-bindings (when-let [eh (:error-handler process-def)]
+        error-bindings (when-let [eh (:error-handler process-spec)]
                          [(event/binding :error eh :error)])
-        all-bindings (into (vec (:bindings process-def))
+        all-bindings (into (vec (:bindings process-spec))
                            (or error-bindings []))
 
         ;; 启动 router
@@ -368,7 +380,7 @@
 
         ;; Runtime 结构
         runtime {:status       status
-                 :process-def  process-def
+                 :process-spec  process-spec
                  :event-chan   event-chan
                  :control-chan control-chan
                  :steps        steps
@@ -381,7 +393,7 @@
                  :router       router}]
 
     ;; 放入初始事件
-    (let [initial-events (:initial-events process-def)]
+    (let [initial-events (:initial-events process-spec)]
       (if (seq initial-events)
         (do
           (reset! in-flight (count initial-events))
@@ -421,6 +433,44 @@
     (close! (:input-chan step-rt))))
 
 ;;; ============================================================
+;;; Process Snapshot（纯数据快照）
+;;; ============================================================
+
+(defn create-process-snapshot
+  "将运行时状态捕获为纯数据快照（无 atom/channel）
+
+   用于跨进程持久化。调用时机：process 暂停后。
+
+   参数:
+   - runtime:       runtime map
+   - paused-result: 暂停结果 map
+
+   返回:
+   {:process-name   keyword
+    :status         :paused
+    :paused-step    keyword
+    :pause-reason   string
+    :context        context-map
+    :step-states    {step-id {:state any :activation-count int}}
+    :created-at     long}"
+  [runtime paused-result]
+  (let [step-states (reduce-kv
+                      (fn [acc step-id step-rt]
+                        (let [state-data @(:state-atom step-rt)]
+                          (assoc acc step-id
+                                 {:state (:state state-data)
+                                  :activation-count (:activation-count state-data)})))
+                      {}
+                      (:steps runtime))]
+    {:process-name   (get-in runtime [:process-spec :name])
+     :status         :paused
+     :paused-step    (:paused-step paused-result)
+     :pause-reason   (:pause-reason paused-result)
+     :context        (:context paused-result)
+     :step-states    step-states
+     :created-at     (System/currentTimeMillis)}))
+
+;;; ============================================================
 ;;; 同步便利 API
 ;;; ============================================================
 
@@ -428,10 +478,11 @@
   "运行 process 直到完成、暂停或失败（同步阻塞）
 
    参数:
-   - process-def: 编译后的 process 定义
+   - process-spec: 编译后的 process 定义
    - opts:        选项 map
      :context      Context 对象（可选）
      :timeout-ms   全局超时毫秒（默认 60000）
+     :step-states  恢复的 step 状态（可选）
 
    返回:
    {:status  :completed/:paused/:failed
@@ -439,14 +490,19 @@
     :error   nil-or-error-info
     :paused-step nil-or-step-id
     :pause-reason nil-or-reason
-    :runtime runtime}  ;; paused 时可用于 resume"
-  ([process-def]
-   (run-process process-def {}))
-  ([process-def opts]
-   (let [runtime (start-process process-def opts)
-         result (<!! (:result-chan runtime))]
+    :runtime runtime     ;; paused 时可用于 resume
+    :snapshot snapshot}   ;; paused 时自动生成的纯数据快照"
+  ([process-spec]
+   (run-process process-spec {}))
+  ([process-spec opts]
+   (let [runtime (start-process process-spec opts)
+         result (<!! (:result-chan runtime))
+         result (assoc result :runtime runtime)
+         result (if (= :paused (:status result))
+                  (assoc result :snapshot (create-process-snapshot runtime result))
+                  result)]
      (shutdown-runtime runtime)
-     (assoc result :runtime runtime))))
+     result)))
 
 ;;; ============================================================
 ;;; 恢复暂停的 Process
@@ -468,13 +524,13 @@
   (when (not= :paused (:status paused-result))
     (throw (ex-info "只能恢复处于 :paused 状态的 process"
                     {:current-status (:status paused-result)})))
-  (let [process-def (:process-def (:runtime paused-result))
+  (let [process-spec (:process-spec (:runtime paused-result))
         paused-step-id (:paused-step paused-result)
         old-runtime (:runtime paused-result)
         old-step-state @(get-in old-runtime [:steps paused-step-id :state-atom])
 
         ;; 调用 step 的 on-resume
-        step-def (get-in process-def [:steps paused-step-id])
+        step-def (get-in process-spec [:steps paused-step-id])
         on-resume (:on-resume step-def)
         _ (when-not on-resume
             (throw (ex-info "Step 不支持 resume（缺少 :on-resume）"
@@ -511,11 +567,25 @@
           ;; resume 产出事件 → 继续执行
           (:events result)
           (let [new-ctx (or (:context result) ctx)
-                ;; 构造一个新的 process-def，用 resume 产出的事件作为初始事件
-                resumed-def (assoc process-def
+                ;; 收集所有 step 状态
+                old-step-states (reduce-kv
+                                  (fn [acc step-id step-rt]
+                                    (let [state-data @(:state-atom step-rt)]
+                                      (assoc acc step-id
+                                             {:state (:state state-data)
+                                              :activation-count (:activation-count state-data)})))
+                                  {}
+                                  (:steps old-runtime))
+                ;; 更新 paused step 的状态（如 on-resume 返回了新 state）
+                updated-step-states (if (contains? result :state)
+                                      (assoc-in old-step-states
+                                                [paused-step-id :state] (:state result))
+                                      old-step-states)
+                ;; 构造一个新的 process-spec，用 resume 产出的事件作为初始事件
+                resumed-def (assoc process-spec
                                    :initial-events (or (:events result) []))
-                ;; 恢复 step states
                 new-opts (merge opts {:context new-ctx
+                                      :step-states updated-step-states
                                       :timeout-ms (or (:timeout-ms opts) default-timeout-ms)})]
             (start-process resumed-def new-opts))
 
@@ -565,6 +635,127 @@
    (run-resume paused-result data {}))
   ([paused-result data opts]
    (let [runtime (resume-process paused-result data opts)
+         result (<!! (:result-chan runtime))]
+     (when (:event-chan runtime)
+       (shutdown-runtime runtime))
+     result)))
+
+;;; ============================================================
+;;; 跨进程 Rehydration（从纯数据快照恢复）
+;;; ============================================================
+
+(defn restore-from-snapshot
+  "从快照恢复 process（跨进程 rehydration）
+
+   Process 定义由调用方提供（函数引用无法序列化）。
+
+   参数:
+   - snapshot:     纯数据快照 map（由 create-process-snapshot 生成）
+   - process-spec:  编译后的 process 定义
+   - resume-data:  传给 paused step 的 on-resume 的数据
+   - opts:         运行选项
+
+   返回: runtime map（含 result-chan）"
+  [snapshot process-spec resume-data opts]
+  (let [paused-step-id (:paused-step snapshot)
+        step-def (get-in process-spec [:steps paused-step-id])
+        on-resume (:on-resume step-def)
+        _ (when-not on-resume
+            (throw (ex-info "Step 不支持 resume（缺少 :on-resume）"
+                            {:step paused-step-id})))
+        ctx (:context snapshot)
+        step-states (:step-states snapshot)
+        paused-step-state (get-in step-states [paused-step-id :state])
+
+        ;; 调用 on-resume
+        resume-result (try
+                        {:ok (on-resume resume-data paused-step-state ctx)}
+                        (catch Exception e
+                          {:error (.getMessage e)}))]
+
+    (cond
+      ;; resume 执行出错
+      (:error resume-result)
+      (let [result-chan (chan 1)]
+        (put! result-chan {:status       :failed
+                          :context      ctx
+                          :error        {:step paused-step-id
+                                         :reason (:error resume-result)}
+                          :paused-step  nil
+                          :pause-reason nil})
+        {:result-chan result-chan})
+
+      ;; resume 正常
+      (:ok resume-result)
+      (let [result (:ok resume-result)
+            result (if (:events result)
+                     (update result :events
+                             (fn [evts]
+                               (mapv #(event/with-source % paused-step-id) evts)))
+                     result)]
+        (cond
+          ;; 产出事件 → 继续执行
+          (:events result)
+          (let [new-ctx (or (:context result) ctx)
+                ;; 更新 paused step 的状态
+                updated-step-states (if (contains? result :state)
+                                      (assoc-in step-states
+                                                [paused-step-id :state] (:state result))
+                                      step-states)
+                resumed-def (assoc process-spec
+                                   :initial-events (:events result))
+                new-opts (merge opts {:context new-ctx
+                                      :step-states updated-step-states
+                                      :timeout-ms (or (:timeout-ms opts) default-timeout-ms)})]
+            (start-process resumed-def new-opts))
+
+          ;; 再次暂停
+          (:pause result)
+          (let [result-chan (chan 1)]
+            (put! result-chan {:status       :paused
+                              :context      ctx
+                              :error        nil
+                              :paused-step  paused-step-id
+                              :pause-reason (get-in result [:pause :reason])})
+            {:result-chan result-chan})
+
+          ;; 报错
+          (:error result)
+          (let [result-chan (chan 1)]
+            (put! result-chan {:status       :failed
+                              :context      ctx
+                              :error        {:step paused-step-id
+                                             :reason (get-in result [:error :reason])}
+                              :paused-step  nil
+                              :pause-reason nil})
+            {:result-chan result-chan})
+
+          ;; 无事件（完成）
+          :else
+          (let [new-ctx (or (:context result) ctx)
+                result-chan (chan 1)]
+            (put! result-chan {:status       :completed
+                              :context      new-ctx
+                              :error        nil
+                              :paused-step  nil
+                              :pause-reason nil})
+            {:result-chan result-chan}))))))
+
+(defn run-restore
+  "从快照恢复 process（同步阻塞）
+
+   参数:
+   - snapshot:     纯数据快照 map
+   - process-spec:  编译后的 process 定义
+   - resume-data:  传给 paused step 的 on-resume 的数据
+   - opts:         运行选项（可选）
+
+   返回:
+   {:status :context :error ...}"
+  ([snapshot process-spec resume-data]
+   (run-restore snapshot process-spec resume-data {}))
+  ([snapshot process-spec resume-data opts]
+   (let [runtime (restore-from-snapshot snapshot process-spec resume-data opts)
          result (<!! (:result-chan runtime))]
      (when (:event-chan runtime)
        (shutdown-runtime runtime))

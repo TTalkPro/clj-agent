@@ -4,7 +4,7 @@
 
 | 概念 | SK (C#) | BeamAI (Erlang) | Clojure 实现 |
 |------|---------|-----------------|-------------|
-| Process | `ProcessBuilder` → `KernelProcess` | `beamai_process_builder` → `beamai_process_runtime` | Builder map → process-def → 执行引擎 |
+| Process | `ProcessBuilder` → `KernelProcess` | `beamai_process_builder` → `beamai_process_runtime` | Builder map → process-spec → 执行引擎 |
 | Step | `KernelProcessStep` + `[KernelFunction]` | 模块 callbacks: `init/1`, `can_activate/2`, `on_activate/3` | map 定义 + 3 个 fn |
 | Event | `KernelProcessEvent` | tagged map `{name, type, source, data}` | 普通 map |
 | Edge/Binding | `.OnEvent().SendEventTo()` | `event_binding()` map | 声明式 map |
@@ -17,7 +17,7 @@
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Builder Layer (纯数据，无副作用)                      │
-│  - process-def: steps + bindings + initial-events    │
+│  - process-spec: steps + bindings + initial-events    │
 │  - 编译时验证                                        │
 └─────────────────────────────────────────────────────┘
                         ↓ build
@@ -130,7 +130,7 @@ modules/clj-agent-core/src/im/ttalk/agent/core/kernel/process/
 
 ```clojure
 {:status          :running     ;; :idle | :running | :paused | :completed | :failed
- :process-def     process-def
+ :process-spec     process-spec
  :steps-state     {:step-id {:state s :collected-inputs {} :activation-count 0} ...}
  :event-queue     [event ...]
  :context         context
@@ -159,7 +159,7 @@ modules/clj-agent-core/src/im/ttalk/agent/core/kernel/process/
 ## 执行流程
 
 ```
-run-process(process-def, opts)
+run-process(process-spec, opts)
 ├─ init-runtime: 初始化所有 step 状态, 填充事件队列
 ├─ event-loop:
 │  ├─ dequeue event
