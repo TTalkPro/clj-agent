@@ -10,11 +10,12 @@
     :can-activate?   (fn [inputs state] -> boolean)       ;; 可选
     :on-activate     (fn [inputs state context] -> result) ;; 必需
     :on-resume       (fn [data state context] -> result)  ;; 可选
+    :on-terminate    (fn [state context] -> nil)          ;; 可选，资源清理
     :required-inputs [:input]                             ;; 默认 [:input]
     :config          {}}                                  ;; 可选
 
    Step Runtime State:
-   {:step-def          step-def
+   {:step-spec          step-spec
     :state             any          ;; step 内部状态
     :collected-inputs  {}           ;; 已收集的输入
     :activation-count  0}           ;; 激活次数
@@ -36,20 +37,20 @@
 (defn init-step
   "初始化 step runtime state
 
-   调用 step-def 的 :init 函数（如有），创建 runtime state。
+   调用 step-spec 的 :init 函数（如有），创建 runtime state。
 
    参数:
-   - step-def: step 定义 map
+   - step-spec: step 定义 map
 
    返回:
    step runtime state map"
-  [step-def]
-  (let [init-fn (:init step-def)
-        config (or (:config step-def) {})
+  [step-spec]
+  (let [init-fn (:init step-spec)
+        config (or (:config step-spec) {})
         initial-state (if init-fn
                         (init-fn config)
                         nil)]
-    {:step-def         step-def
+    {:step-spec         step-spec
      :state            initial-state
      :collected-inputs {}
      :activation-count 0}))
@@ -88,8 +89,8 @@
 
 (defn- default-required-inputs
   "获取 step 的 required-inputs（默认 [:input]）"
-  [step-def]
-  (or (:required-inputs step-def) [:input]))
+  [step-spec]
+  (or (:required-inputs step-spec) [:input]))
 
 (defn check-activation
   "检查 step 是否满足激活条件
@@ -103,12 +104,12 @@
 
    返回: boolean"
   [step-state]
-  (let [step-def (:step-def step-state)
-        required (default-required-inputs step-def)
+  (let [step-spec (:step-spec step-state)
+        required (default-required-inputs step-spec)
         collected (:collected-inputs step-state)
         all-present? (every? #(contains? collected %) required)]
     (if all-present?
-      (if-let [can-fn (:can-activate? step-def)]
+      (if-let [can-fn (:can-activate? step-spec)]
         (can-fn collected (:state step-state))
         true)
       false)))
@@ -131,14 +132,14 @@
    activation-result 格式:
    {:events [...] :state s :context c} | {:pause {...}} | {:error {...}}"
   [step-state context]
-  (let [step-def (:step-def step-state)
-        on-activate (:on-activate step-def)
+  (let [step-spec (:step-spec step-state)
+        on-activate (:on-activate step-spec)
         inputs (:collected-inputs step-state)
         state (:state step-state)]
     (try
       (let [result (on-activate inputs state context)
             ;; 标记事件来源
-            step-id (:id step-def)
+            step-id (:id step-spec)
             result (if (:events result)
                      (update result :events
                              (fn [evts]
@@ -178,12 +179,12 @@
    {:result activation-result :step-state updated-step-state}
    或 nil（step 不支持 resume）"
   [step-state data context]
-  (let [step-def (:step-def step-state)
-        on-resume (:on-resume step-def)]
+  (let [step-spec (:step-spec step-state)
+        on-resume (:on-resume step-spec)]
     (when on-resume
       (try
         (let [result (on-resume data (:state step-state) context)
-              step-id (:id step-def)
+              step-id (:id step-spec)
               result (if (:events result)
                        (update result :events
                                (fn [evts]
@@ -197,3 +198,27 @@
         (catch Exception e
           {:result     {:error {:reason (.getMessage e)}}
            :step-state step-state})))))
+
+;;; ============================================================
+;;; Step 终止
+;;; ============================================================
+
+(defn terminate-step
+  "终止 step，调用 on-terminate 进行资源清理
+
+   在 process 完成、失败或超时关闭时调用。
+   on-terminate 的异常会被捕获并忽略（不影响其他 step 的清理）。
+
+   参数:
+   - step-state: step runtime state
+   - context:    Context 对象
+
+   返回: nil"
+  [step-state context]
+  (let [step-spec (:step-spec step-state)
+        on-terminate (:on-terminate step-spec)]
+    (when on-terminate
+      (try
+        (on-terminate (:state step-state) context)
+        (catch Exception _e
+          nil)))))

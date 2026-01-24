@@ -71,7 +71,7 @@
 
    参数:
    - step-id:     step 标识
-   - step-def:    step 定义
+   - step-spec:    step 定义
    - input-chan:  接收投递输入的 channel
    - event-chan:  事件总线（产出事件放入此处）
    - context:    context atom
@@ -80,12 +80,14 @@
    - on-error:   错误回调 (fn [step-id reason])
    - opts:       可选参数
      :initial-step-state  恢复的 step 状态 {:state any :activation-count int}
+     :active-count        正在执行 on-activate 的 step 计数 atom
+     :on-step-done        step 完成后回调 (fn [step-id])
 
    返回: step-runtime map（含 state atom 和 worker handle）"
-  [step-id step-def input-chan event-chan context in-flight on-pause on-error
-   & {:keys [initial-step-state]}]
-  (let [init-fn (:init step-def)
-        config (or (:config step-def) {})
+  [step-id step-spec input-chan event-chan context in-flight on-pause on-error
+   & {:keys [initial-step-state active-count on-step-done]}]
+  (let [init-fn (:init step-spec)
+        config (or (:config step-spec) {})
         initial-state (if initial-step-state
                         (:state initial-step-state)
                         (when init-fn (init-fn config)))
@@ -103,7 +105,7 @@
                    (fn [s] (assoc-in s [:collected-inputs input-name] data)))
             ;; 检查激活条件
             (let [current @state-atom
-                  step-state {:step-def         step-def
+                  step-state {:step-spec         step-spec
                               :state            (:state current)
                               :collected-inputs (:collected-inputs current)
                               :activation-count (:activation-count current)}]
@@ -115,11 +117,12 @@
                              (assoc :collected-inputs {})
                              (update :activation-count inc))))
                 ;; 在独立线程执行（避免阻塞 go-loop 线程池）
+                (when active-count (swap! active-count inc))
                 (let [ctx-snapshot @context
                       result-ch
                       (async/thread
                         (try
-                          (let [on-activate (:on-activate step-def)
+                          (let [on-activate (:on-activate step-spec)
                                 inputs (:collected-inputs current)
                                 result (on-activate inputs (:state current) ctx-snapshot)
                                 ;; 标记事件来源
@@ -200,11 +203,16 @@
                                                    (:variables (:context result)))
                                            (assoc :messages (:messages (:context result)))
                                            (assoc :history (:history (:context result)))))))
-                            (swap! in-flight dec))))))))
+                            (swap! in-flight dec)))))
+                    ;; active-count 跟踪：step 执行完毕
+                    (when active-count
+                      (let [n (swap! active-count dec)]
+                        (when (and (zero? n) on-step-done)
+                          (on-step-done step-id)))))))
                 ;; 未激活 → dec in-flight（输入已收集但 step 未执行）
                 (swap! in-flight dec))
             (recur))))]
-    {:step-def   step-def
+    {:step-spec   step-spec
      :input-chan input-chan
      :state-atom state-atom
      :worker     worker}))
@@ -285,6 +293,8 @@
      :context      Context 对象（可选）
      :timeout-ms   全局超时毫秒（默认 60000）
      :step-states  恢复的 step 状态 {step-id {:state any :activation-count int}}
+     :on-quiescent 静止点回调 (fn [snapshot] ...)
+                   当所有并发 step 执行完毕时触发，snapshot 格式同 create-process-snapshot
 
    返回:
    runtime map，包含 result-chan（完成时放入结果）
@@ -300,6 +310,7 @@
   (let [step-states (or (:step-states opts) {})
         context-atom (atom (or (:context opts) (ctx/create)))
         timeout-ms (or (:timeout-ms opts) default-timeout-ms)
+        on-quiescent (:on-quiescent opts)
         event-chan (chan 256)
         control-chan (chan 16)
         result-chan (chan 1)
@@ -308,6 +319,31 @@
         error-atom (atom nil)
         paused-step-atom (atom nil)
         pause-reason-atom (atom nil)
+        ;; on-quiescent 支持
+        active-count (when on-quiescent (atom 0))
+        steps-ref (when on-quiescent (atom nil))
+        on-step-done (when on-quiescent
+                       (fn [_step-id]
+                         (when (and (= :running @status)
+                                    (pos? @in-flight))
+                           (let [steps @steps-ref
+                                 snapshot
+                                 (reduce-kv
+                                   (fn [acc sid step-rt]
+                                     (let [sd @(:state-atom step-rt)]
+                                       (assoc acc sid
+                                              {:state (:state sd)
+                                               :activation-count (:activation-count sd)})))
+                                   {}
+                                   steps)]
+                             (try
+                               (on-quiescent {:process-name (:name process-spec)
+                                              :reason       :quiescent
+                                              :status       :running
+                                              :step-states  snapshot
+                                              :context      @context-atom
+                                              :created-at   (System/currentTimeMillis)})
+                               (catch Exception _e nil))))))
 
         ;; 完成回调
         on-idle (fn []
@@ -324,6 +360,28 @@
                    (when (compare-and-set! status :running :paused)
                      (reset! paused-step-atom step-id)
                      (reset! pause-reason-atom reason)
+                     ;; 触发 on-quiescent（reason :paused）
+                     (when (and on-quiescent steps-ref)
+                       (let [steps @steps-ref
+                             step-snapshot
+                             (reduce-kv
+                               (fn [acc sid step-rt]
+                                 (let [sd @(:state-atom step-rt)]
+                                   (assoc acc sid
+                                          {:state (:state sd)
+                                           :activation-count (:activation-count sd)})))
+                               {}
+                               steps)]
+                         (try
+                           (on-quiescent {:process-name  (:name process-spec)
+                                          :reason        :paused
+                                          :status        :paused
+                                          :paused-step   step-id
+                                          :pause-reason  reason
+                                          :step-states   step-snapshot
+                                          :context       @context-atom
+                                          :created-at    (System/currentTimeMillis)})
+                           (catch Exception _e nil))))
                      ;; 停止 router
                      (put! control-chan {:action :pause})
                      (put! result-chan
@@ -357,16 +415,19 @@
 
         ;; 创建 step workers
         steps (reduce-kv
-                (fn [acc step-id step-def]
+                (fn [acc step-id step-spec]
                   (let [input-chan (chan 64)
                         saved-state (get step-states step-id)
                         step-rt (start-step-worker
-                                  step-id step-def input-chan event-chan
+                                  step-id step-spec input-chan event-chan
                                   context-atom in-flight on-pause on-error
-                                  :initial-step-state saved-state)]
+                                  :initial-step-state saved-state
+                                  :active-count active-count
+                                  :on-step-done on-step-done)]
                     (assoc acc step-id step-rt)))
                 {}
                 (:steps process-spec))
+        _ (when steps-ref (reset! steps-ref steps))
 
         ;; 错误事件绑定（如有 error-handler）
         error-bindings (when-let [eh (:error-handler process-spec)]
@@ -425,8 +486,15 @@
     (assoc runtime :result-chan result-chan)))
 
 (defn- shutdown-runtime
-  "关闭 runtime 的所有 channel 和 worker"
+  "关闭 runtime：先调用各 step 的 on-terminate，再关闭 channel"
   [runtime]
+  ;; 调用各 step 的 on-terminate 进行资源清理
+  (let [context @(:context runtime)]
+    (doseq [[_ step-rt] (:steps runtime)]
+      (let [state-data @(:state-atom step-rt)
+            step-state (assoc state-data :step-spec (:step-spec step-rt))]
+        (step/terminate-step step-state context))))
+  ;; 关闭 channel
   (close! (:event-chan runtime))
   (close! (:control-chan runtime))
   (doseq [[_ step-rt] (:steps runtime)]
@@ -483,6 +551,7 @@
      :context      Context 对象（可选）
      :timeout-ms   全局超时毫秒（默认 60000）
      :step-states  恢复的 step 状态（可选）
+     :on-quiescent 静止点回调（可选），并发 step 全部完成时触发
 
    返回:
    {:status  :completed/:paused/:failed
@@ -530,8 +599,8 @@
         old-step-state @(get-in old-runtime [:steps paused-step-id :state-atom])
 
         ;; 调用 step 的 on-resume
-        step-def (get-in process-spec [:steps paused-step-id])
-        on-resume (:on-resume step-def)
+        step-spec (get-in process-spec [:steps paused-step-id])
+        on-resume (:on-resume step-spec)
         _ (when-not on-resume
             (throw (ex-info "Step 不支持 resume（缺少 :on-resume）"
                             {:step paused-step-id})))
@@ -658,8 +727,8 @@
    返回: runtime map（含 result-chan）"
   [snapshot process-spec resume-data opts]
   (let [paused-step-id (:paused-step snapshot)
-        step-def (get-in process-spec [:steps paused-step-id])
-        on-resume (:on-resume step-def)
+        step-spec (get-in process-spec [:steps paused-step-id])
+        on-resume (:on-resume step-spec)
         _ (when-not on-resume
             (throw (ex-info "Step 不支持 resume（缺少 :on-resume）"
                             {:step paused-step-id})))

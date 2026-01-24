@@ -43,7 +43,7 @@
 (defn add-step
   "添加 Step 到 builder
 
-   step-def 必须包含:
+   step-spec 必须包含:
    - :id           step 标识（keyword）
    - :on-activate  激活函数 (fn [inputs state context] -> result)
 
@@ -51,21 +51,22 @@
    - :init            初始化函数 (fn [config] -> state)
    - :can-activate?   激活守卫 (fn [inputs state] -> boolean)
    - :on-resume       恢复函数 (fn [data state context] -> result)
+   - :on-terminate    终止清理函数 (fn [state context] -> nil)
    - :required-inputs 必需输入列表（默认 [:input]）
    - :config          配置 map
 
    参数:
    - b:        builder
-   - step-def: step 定义 map
+   - step-spec: step 定义 map
 
    返回: 更新后的 builder"
-  [b step-def]
-  (let [step-id (:id step-def)]
+  [b step-spec]
+  (let [step-id (:id step-spec)]
     (when-not step-id
-      (throw (ex-info "Step 定义缺少 :id" {:step-def step-def})))
-    (when-not (:on-activate step-def)
+      (throw (ex-info "Step 定义缺少 :id" {:step-spec step-spec})))
+    (when-not (:on-activate step-spec)
       (throw (ex-info "Step 定义缺少 :on-activate" {:step-id step-id})))
-    (assoc-in b [:steps step-id] step-def)))
+    (assoc-in b [:steps step-id] step-spec)))
 
 (defn on-event
   "添加事件绑定（Edge）

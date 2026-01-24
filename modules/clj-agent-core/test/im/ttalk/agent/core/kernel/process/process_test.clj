@@ -90,20 +90,20 @@
 
 (deftest step-init-test
   (testing "初始化无 init 函数的 step"
-    (let [step-def {:id :my-step
+    (let [step-spec {:id :my-step
                     :on-activate (fn [_ _ _] {})}
-          state (step/init-step step-def)]
-      (is (= step-def (:step-def state)))
+          state (step/init-step step-spec)]
+      (is (= step-spec (:step-spec state)))
       (is (nil? (:state state)))
       (is (= {} (:collected-inputs state)))
       (is (= 0 (:activation-count state)))))
 
   (testing "初始化有 init 函数的 step"
-    (let [step-def {:id :my-step
+    (let [step-spec {:id :my-step
                     :init (fn [config] {:counter (:start config)})
                     :config {:start 10}
                     :on-activate (fn [_ _ _] {})}
-          state (step/init-step step-def)]
+          state (step/init-step step-spec)]
       (is (= {:counter 10} (:state state))))))
 
 (deftest step-collect-input-test
@@ -156,12 +156,12 @@
 
 (deftest step-execute-test
   (testing "正常执行产出事件"
-    (let [step-def {:id :adder
+    (let [step-spec {:id :adder
                     :on-activate (fn [inputs state _ctx]
                                    {:events [{:name :result :data (+ (:a inputs) (:b inputs))}]
                                     :state (inc (or state 0))})
                     :required-inputs [:a :b]}
-          state (-> (step/init-step step-def)
+          state (-> (step/init-step step-spec)
                     (step/collect-input :a 3)
                     (step/collect-input :b 4))
           {:keys [result step-state]} (step/execute state (ctx/create))]
@@ -172,42 +172,42 @@
       (is (= 1 (:activation-count step-state)))))
 
   (testing "执行产出暂停"
-    (let [step-def {:id :pauser
+    (let [step-spec {:id :pauser
                     :on-activate (fn [inputs _state _ctx]
                                    {:pause {:reason "需要审批" :state {:pending inputs}}})}
-          state (-> (step/init-step step-def)
+          state (-> (step/init-step step-spec)
                     (step/collect-input :input "data"))
           {:keys [result step-state]} (step/execute state (ctx/create))]
       (is (= "需要审批" (get-in result [:pause :reason])))
       (is (= {:pending {:input "data"}} (:state step-state)))))
 
   (testing "执行产出错误"
-    (let [step-def {:id :failer
+    (let [step-spec {:id :failer
                     :on-activate (fn [_ _ _]
                                    {:error {:reason "something broke"}})}
-          state (-> (step/init-step step-def)
+          state (-> (step/init-step step-spec)
                     (step/collect-input :input "x"))
           {:keys [result]} (step/execute state (ctx/create))]
       (is (= "something broke" (get-in result [:error :reason])))))
 
   (testing "执行时异常被捕获"
-    (let [step-def {:id :thrower
+    (let [step-spec {:id :thrower
                     :on-activate (fn [_ _ _]
                                    (throw (Exception. "boom")))}
-          state (-> (step/init-step step-def)
+          state (-> (step/init-step step-spec)
                     (step/collect-input :input "x"))
           {:keys [result]} (step/execute state (ctx/create))]
       (is (= "boom" (get-in result [:error :reason]))))))
 
 (deftest step-resume-test
   (testing "恢复暂停的 step"
-    (let [step-def {:id :resumable
+    (let [step-spec {:id :resumable
                     :on-activate (fn [_ _ _]
                                    {:pause {:reason "wait" :state {:waiting true}}})
                     :on-resume (fn [data state _ctx]
                                  {:events [{:name :resumed :data data}]
                                   :state (assoc state :waiting false)})}
-          state (-> (step/init-step step-def)
+          state (-> (step/init-step step-spec)
                     (step/collect-input :input "x"))
           {:keys [step-state]} (step/execute state (ctx/create))
           {:keys [result step-state]} (step/resume-step step-state "approved" (ctx/create))]
@@ -215,9 +215,9 @@
       (is (= {:waiting false} (:state step-state)))))
 
   (testing "不支持 resume 的 step 返回 nil"
-    (let [step-def {:id :no-resume
+    (let [step-spec {:id :no-resume
                     :on-activate (fn [_ _ _] {})}
-          state (step/init-step step-def)]
+          state (step/init-step step-spec)]
       (is (nil? (step/resume-step state "data" (ctx/create)))))))
 
 ;; ============================================================
@@ -826,3 +826,240 @@
       (let [result (runtime/run-resume paused1 "continue")]
         (is (= :completed (:status result)))
         (is (= 4 (ctx/get-var (:context result) :iterations)))))))
+
+;; ============================================================
+;; on-terminate 生命周期测试
+;; ============================================================
+
+(deftest step-terminate-test
+  (testing "terminate-step 调用 on-terminate"
+    (let [terminated (atom false)
+          step-spec {:id :s
+                     :on-activate (fn [_ _ _] {})
+                     :on-terminate (fn [state _ctx]
+                                     (reset! terminated state))}
+          state (step/init-step step-spec)
+          state (assoc state :state {:resource "open"})]
+      (step/terminate-step state (ctx/create))
+      (is (= {:resource "open"} @terminated))))
+
+  (testing "terminate-step 无 on-terminate 不报错"
+    (let [step-spec {:id :s :on-activate (fn [_ _ _] {})}
+          state (step/init-step step-spec)]
+      (step/terminate-step state (ctx/create))
+      (is true)))
+
+  (testing "terminate-step 异常被捕获"
+    (let [step-spec {:id :s
+                     :on-activate (fn [_ _ _] {})
+                     :on-terminate (fn [_ _] (throw (Exception. "cleanup error")))}
+          state (step/init-step step-spec)]
+      (step/terminate-step state (ctx/create))
+      (is true "不应抛出异常"))))
+
+(deftest runtime-on-terminate-called-on-completion-test
+  (testing "process 完成时调用所有 step 的 on-terminate"
+    (let [terminated-steps (atom [])
+          process-spec (-> (builder/builder :terminate-test)
+                          (builder/add-step
+                            {:id :step-a
+                             :init (fn [_] {:name "a"})
+                             :on-activate (fn [inputs state _ctx]
+                                            {:events [{:name :a-done :data "from-a"}]
+                                             :state state})
+                             :on-terminate (fn [state _ctx]
+                                             (swap! terminated-steps conj [:a state]))})
+                          (builder/add-step
+                            {:id :step-b
+                             :init (fn [_] {:name "b"})
+                             :on-activate (fn [inputs state _ctx]
+                                            {:state state})
+                             :on-terminate (fn [state _ctx]
+                                             (swap! terminated-steps conj [:b state]))})
+                          (builder/on-event :start :step-a :input)
+                          (builder/on-event :a-done :step-b :input)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          result (runtime/run-process process-spec {:timeout-ms test-timeout})]
+      (is (= :completed (:status result)))
+      (is (= 2 (count @terminated-steps)))
+      (is (some #(= :a (first %)) @terminated-steps))
+      (is (some #(= :b (first %)) @terminated-steps)))))
+
+(deftest runtime-on-terminate-called-on-failure-test
+  (testing "process 失败时也调用 on-terminate"
+    (let [terminated (atom false)
+          process-spec (-> (builder/builder :fail-terminate)
+                          (builder/add-step
+                            {:id :failing
+                             :on-activate (fn [_ _ _]
+                                            {:error {:reason "boom"}})
+                             :on-terminate (fn [_ _]
+                                             (reset! terminated true))})
+                          (builder/on-event :start :failing :input)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          result (runtime/run-process process-spec {:timeout-ms test-timeout})]
+      (is (= :failed (:status result)))
+      (is (true? @terminated)))))
+
+;; ============================================================
+;; on-quiescent 静止点回调测试
+;; ============================================================
+
+(deftest runtime-on-quiescent-fan-out-test
+  (testing "fan-out 场景：并发 step 全部完成后触发 on-quiescent"
+    (let [quiescent-snapshots (atom [])
+          process-spec (-> (builder/builder :fan-out-quiescent)
+                          (builder/add-step
+                            {:id :splitter
+                             :init (fn [_] {:name "splitter"})
+                             :on-activate (fn [inputs state _ctx]
+                                            {:events [{:name :branch-a :data "a"}
+                                                      {:name :branch-b :data "b"}]
+                                             :state state})})
+                          (builder/add-step
+                            {:id :worker-a
+                             :init (fn [_] {:name "a"})
+                             :on-activate (fn [inputs state ctx]
+                                            (Thread/sleep 50)
+                                            {:events [{:name :done-a :data "result-a"}]
+                                             :state (assoc state :result "a-done")})})
+                          (builder/add-step
+                            {:id :worker-b
+                             :init (fn [_] {:name "b"})
+                             :on-activate (fn [inputs state ctx]
+                                            (Thread/sleep 80)
+                                            {:events [{:name :done-b :data "result-b"}]
+                                             :state (assoc state :result "b-done")})})
+                          (builder/add-step
+                            {:id :collector
+                             :required-inputs [:a :b]
+                             :on-activate (fn [inputs state ctx]
+                                            {:state {:collected true}
+                                             :context (ctx/set-var ctx :done true)})})
+                          (builder/on-event :start :splitter :input)
+                          (builder/on-event :branch-a :worker-a :input)
+                          (builder/on-event :branch-b :worker-b :input)
+                          (builder/on-event :done-a :collector :a)
+                          (builder/on-event :done-b :collector :b)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          result (runtime/run-process process-spec
+                   {:timeout-ms test-timeout
+                    :on-quiescent (fn [snapshot]
+                                    (swap! quiescent-snapshots conj snapshot))})]
+      (is (= :completed (:status result)))
+      (is (true? (ctx/get-var (:context result) :done)))
+      ;; on-quiescent 应该至少触发过（splitter完成后、worker-a+b完成后）
+      (is (pos? (count @quiescent-snapshots)))
+      ;; 每个 snapshot 都有正确的结构
+      (doseq [snap @quiescent-snapshots]
+        (is (= :quiescent (:reason snap)))
+        (is (= :running (:status snap)))
+        (is (map? (:step-states snap)))
+        (is (some? (:context snap)))))))
+
+(deftest runtime-on-quiescent-linear-test
+  (testing "线性 process：中间步骤完成时触发 on-quiescent"
+    (let [quiescent-count (atom 0)
+          process-spec (-> (builder/builder :linear-quiescent)
+                          (builder/add-step
+                            {:id :step-1
+                             :init (fn [_] {:n 1})
+                             :on-activate (fn [_ state _]
+                                            {:events [{:name :to-2 :data (:n state)}]
+                                             :state state})})
+                          (builder/add-step
+                            {:id :step-2
+                             :init (fn [_] {:n 2})
+                             :on-activate (fn [_ state _]
+                                            {:events [{:name :to-3 :data (:n state)}]
+                                             :state state})})
+                          (builder/add-step
+                            {:id :step-3
+                             :init (fn [_] {:n 3})
+                             :on-activate (fn [_ state ctx]
+                                            {:state state
+                                             :context (ctx/set-var ctx :final 3)})})
+                          (builder/on-event :start :step-1 :input)
+                          (builder/on-event :to-2 :step-2 :input)
+                          (builder/on-event :to-3 :step-3 :input)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          result (runtime/run-process process-spec
+                   {:timeout-ms test-timeout
+                    :on-quiescent (fn [_snapshot]
+                                    (swap! quiescent-count inc))})]
+      (is (= :completed (:status result)))
+      (is (= 3 (ctx/get-var (:context result) :final)))
+      ;; step-1/step-2 完成后触发（step-3 是最后一步，不触发）
+      ;; 由于 go-loop 调度时序，至少触发 1 次
+      (is (pos? @quiescent-count))
+      (is (<= @quiescent-count 2)))))
+
+(deftest runtime-on-quiescent-not-called-without-option-test
+  (testing "未设置 on-quiescent 时不影响正常执行"
+    (let [process-spec (-> (builder/builder :no-quiescent)
+                          (builder/add-step
+                            {:id :only
+                             :on-activate (fn [_ _ ctx]
+                                            {:context (ctx/set-var ctx :ok true)})})
+                          (builder/on-event :start :only :input)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          result (runtime/run-process process-spec {:timeout-ms test-timeout})]
+      (is (= :completed (:status result)))
+      (is (true? (ctx/get-var (:context result) :ok))))))
+
+(deftest runtime-on-quiescent-on-pause-test
+  (testing "暂停时触发 on-quiescent，reason 为 :paused"
+    (let [quiescent-snapshots (atom [])
+          process-spec (-> (builder/builder :pause-quiescent)
+                          (builder/add-step
+                            {:id :step-a
+                             :init (fn [_] {:count 0})
+                             :on-activate (fn [inputs state ctx]
+                                            {:events [{:name :to-b :data (:input inputs)}]
+                                             :state (update state :count inc)})})
+                          (builder/add-step
+                            {:id :step-b
+                             :init (fn [_] {:processed false})
+                             :on-activate (fn [inputs state _ctx]
+                                            {:pause {:reason "需要审批"
+                                                     :state (assoc state :processed true)}})
+                             :on-resume (fn [data state ctx]
+                                          {:events [{:name :done :data data}]
+                                           :state state})})
+                          (builder/add-step
+                            {:id :step-c
+                             :on-activate (fn [inputs state ctx]
+                                            {:context (ctx/set-var ctx :final (:input inputs))})})
+                          (builder/on-event :start :step-a :input)
+                          (builder/on-event :to-b :step-b :input)
+                          (builder/on-event :done :step-c :input)
+                          (builder/set-initial-event :start "hello")
+                          (builder/build))
+          result (runtime/run-process process-spec
+                   {:timeout-ms test-timeout
+                    :on-quiescent (fn [snapshot]
+                                    (swap! quiescent-snapshots conj snapshot))})]
+      (is (= :paused (:status result)))
+      ;; on-quiescent 被触发：step-a 完成时 (:quiescent) + 暂停时 (:paused)
+      (is (>= (count @quiescent-snapshots) 1))
+      ;; 最后一个 snapshot 应该是 pause 触发的
+      (let [pause-snap (last @quiescent-snapshots)]
+        (is (= :paused (:reason pause-snap)))
+        (is (= :paused (:status pause-snap)))
+        (is (= :step-b (:paused-step pause-snap)))
+        (is (= "需要审批" (:pause-reason pause-snap)))
+        (is (map? (:step-states pause-snap)))
+        ;; step-a 的状态应该已更新
+        (is (= 1 (get-in pause-snap [:step-states :step-a :state :count])))
+        ;; step-b 的状态应该已更新
+        (is (true? (get-in pause-snap [:step-states :step-b :state :processed]))))
+      ;; quiescent 类型的 snapshot
+      (let [quiescent-snaps (filter #(= :quiescent (:reason %)) @quiescent-snapshots)]
+        (when (seq quiescent-snaps)
+          (doseq [snap quiescent-snaps]
+            (is (= :running (:status snap)))))))))

@@ -124,7 +124,7 @@ V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-acti
 #### Step Runtime
 
 ```clojure
-{:step-def    step-def
+{:step-spec    step-spec
  :input-chan  (async/chan 64)            ;; 接收投递的输入
  :state       (atom {:collected-inputs {}
                      :state nil
@@ -164,7 +164,7 @@ V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-acti
 #### 超时保护
 
 - 全局超时：start-process 接受 :timeout-ms 选项
-- 单步超时：step-def 可配置 :timeout-ms
+- 单步超时：step-spec 可配置 :timeout-ms
 
 #### API
 
