@@ -69,11 +69,34 @@
   [filters type]
   (sort-filters (filter #(= type (:type %)) filters)))
 
+(defn- run-pipeline
+  "通用 filter 管道执行器
+
+   参数:
+   - filters:     该类型的 filter 列表（已排序）
+   - init-state:  初始状态 map
+   - build-ctx:   (fn [state] -> filter-ctx) 构建传给 handler 的上下文
+   - extract:     (fn [handler-result state] -> updated-state) 从 handler 返回值提取更新
+   - wrap-ok:     (fn [final-state] -> result) 包装最终成功结果
+
+   返回:
+   {:ok ...} | {:skip ...} | {:error ...}"
+  [filters init-state build-ctx extract wrap-ok]
+  (loop [remaining filters
+         state init-state]
+    (if (empty? remaining)
+      {:ok (wrap-ok state)}
+      (let [f (first remaining)
+            result ((:handler f) (build-ctx state))]
+        (case (:action result)
+          :continue (recur (rest remaining) (extract result state))
+          :skip     {:skip (:value result)}
+          :error    {:error (:reason result)}
+          ;; 默认视为 continue
+          (recur (rest remaining) state))))))
+
 (defn apply-pre-invocation-filters
   "执行 pre-invocation filter 管道
-
-   filter-ctx 格式:
-   {:function func-def :args args-map :context ctx :metadata {}}
 
    参数:
    - filters:  所有 filter 定义列表
@@ -82,37 +105,22 @@
    - context:  Context 对象
 
    返回:
-   {:ok {:args a :context c}}   继续执行
-   {:skip value}                 跳过执行，直接返回此值
-   {:error reason}               中止"
+   {:ok {:args a :context c}} | {:skip value} | {:error reason}"
   [filters func-def args context]
-  (let [pre-filters (filters-by-type filters :pre-invocation)]
-    (loop [remaining pre-filters
-           current-args args
-           current-ctx context]
-      (if (empty? remaining)
-        {:ok {:args current-args :context current-ctx}}
-        (let [f (first remaining)
-              filter-ctx {:function func-def
-                          :args     current-args
-                          :context  current-ctx
-                          :metadata {}}
-              result ((:handler f) filter-ctx)]
-          (case (:action result)
-            :continue (let [updated-ctx (:context result)]
-                        (recur (rest remaining)
-                               (or (:args updated-ctx) current-args)
-                               (or (:context updated-ctx) current-ctx)))
-            :skip     {:skip (:value result)}
-            :error    {:error (:reason result)}
-            ;; default: treat as continue
-            (recur (rest remaining) current-args current-ctx)))))))
+  (run-pipeline
+    (filters-by-type filters :pre-invocation)
+    {:args args :context context}
+    (fn [state]
+      {:function func-def :args (:args state)
+       :context (:context state) :metadata {}})
+    (fn [result state]
+      (let [ctx (:context result)]
+        {:args (or (:args ctx) (:args state))
+         :context (or (:context ctx) (:context state))}))
+    identity))
 
 (defn apply-post-invocation-filters
   "执行 post-invocation filter 管道
-
-   filter-ctx 格式:
-   {:function func-def :args args-map :result value :context ctx :metadata {}}
 
    参数:
    - filters:  所有 filter 定义列表
@@ -122,36 +130,22 @@
    - context:  Context 对象
 
    返回:
-   {:ok {:result r :context c}}  继续
-   {:error reason}                中止"
+   {:ok {:result r :context c}} | {:error reason}"
   [filters func-def args result context]
-  (let [post-filters (filters-by-type filters :post-invocation)]
-    (loop [remaining post-filters
-           current-result result
-           current-ctx context]
-      (if (empty? remaining)
-        {:ok {:result current-result :context current-ctx}}
-        (let [f (first remaining)
-              filter-ctx {:function func-def
-                          :args     args
-                          :result   current-result
-                          :context  current-ctx
-                          :metadata {}}
-              r ((:handler f) filter-ctx)]
-          (case (:action r)
-            :continue (let [updated-ctx (:context r)]
-                        (recur (rest remaining)
-                               (or (:result updated-ctx) current-result)
-                               (or (:context updated-ctx) current-ctx)))
-            :error    {:error (:reason r)}
-            ;; default: treat as continue
-            (recur (rest remaining) current-result current-ctx)))))))
+  (run-pipeline
+    (filters-by-type filters :post-invocation)
+    {:result result :context context}
+    (fn [state]
+      {:function func-def :args args :result (:result state)
+       :context (:context state) :metadata {}})
+    (fn [r state]
+      (let [ctx (:context r)]
+        {:result (or (:result ctx) (:result state))
+         :context (or (:context ctx) (:context state))}))
+    identity))
 
 (defn apply-pre-chat-filters
   "执行 pre-chat filter 管道
-
-   filter-ctx 格式:
-   {:messages [msg ...] :context ctx :metadata {}}
 
    参数:
    - filters:  所有 filter 定义列表
@@ -159,34 +153,21 @@
    - context:  Context 对象
 
    返回:
-   {:ok {:messages m :context c}}  继续
-   {:error reason}                  中止"
+   {:ok {:messages m :context c}} | {:error reason}"
   [filters messages context]
-  (let [chat-filters (filters-by-type filters :pre-chat)]
-    (loop [remaining chat-filters
-           current-msgs messages
-           current-ctx context]
-      (if (empty? remaining)
-        {:ok {:messages current-msgs :context current-ctx}}
-        (let [f (first remaining)
-              filter-ctx {:messages current-msgs
-                          :context  current-ctx
-                          :metadata {}}
-              r ((:handler f) filter-ctx)]
-          (case (:action r)
-            :continue (let [updated-ctx (:context r)]
-                        (recur (rest remaining)
-                               (or (:messages updated-ctx) current-msgs)
-                               (or (:context updated-ctx) current-ctx)))
-            :error    {:error (:reason r)}
-            ;; default: treat as continue
-            (recur (rest remaining) current-msgs current-ctx)))))))
+  (run-pipeline
+    (filters-by-type filters :pre-chat)
+    {:messages messages :context context}
+    (fn [state]
+      {:messages (:messages state) :context (:context state) :metadata {}})
+    (fn [r state]
+      (let [ctx (:context r)]
+        {:messages (or (:messages ctx) (:messages state))
+         :context (or (:context ctx) (:context state))}))
+    identity))
 
 (defn apply-post-chat-filters
   "执行 post-chat filter 管道
-
-   filter-ctx 格式:
-   {:response response :context ctx :metadata {}}
 
    参数:
    - filters:  所有 filter 定义列表
@@ -194,28 +175,18 @@
    - context:  Context 对象
 
    返回:
-   {:ok {:response r :context c}}  继续
-   {:error reason}                  中止"
+   {:ok {:response r :context c}} | {:error reason}"
   [filters response context]
-  (let [chat-filters (filters-by-type filters :post-chat)]
-    (loop [remaining chat-filters
-           current-resp response
-           current-ctx context]
-      (if (empty? remaining)
-        {:ok {:response current-resp :context current-ctx}}
-        (let [f (first remaining)
-              filter-ctx {:response current-resp
-                          :context  current-ctx
-                          :metadata {}}
-              r ((:handler f) filter-ctx)]
-          (case (:action r)
-            :continue (let [updated-ctx (:context r)]
-                        (recur (rest remaining)
-                               (or (:response updated-ctx) current-resp)
-                               (or (:context updated-ctx) current-ctx)))
-            :error    {:error (:reason r)}
-            ;; default: treat as continue
-            (recur (rest remaining) current-resp current-ctx)))))))
+  (run-pipeline
+    (filters-by-type filters :post-chat)
+    {:response response :context context}
+    (fn [state]
+      {:response (:response state) :context (:context state) :metadata {}})
+    (fn [r state]
+      (let [ctx (:context r)]
+        {:response (or (:response ctx) (:response state))
+         :context (or (:context ctx) (:context state))}))
+    identity))
 
 ;;; ============================================================
 ;;; 内置 Filter: 日志

@@ -16,7 +16,7 @@
      (invoke kernel messages opts)
 
    Query API - 查询 Kernel 状态:
-     (get-tools kernel)
+     (:tools kernel)          ;; 直接关键字访问
      (find-function kernel :get-weather)
      (list-functions kernel)
 
@@ -128,29 +128,6 @@
 ;;; ============================================================
 ;;; Query API
 ;;; ============================================================
-
-(defn get-tools
-  "获取 Kernel 中所有工具的 schema 列表"
-  [kernel]
-  (:tools kernel))
-
-(defn get-plugins
-  "获取 Kernel 中所有 Plugin"
-  [kernel]
-  (:plugins kernel))
-
-(defn get-filters
-  "获取 Kernel 中所有 Filter"
-  [kernel]
-  (:filters kernel))
-
-(defn get-service
-  "获取 Kernel 的 LLM 服务
-
-   返回:
-   service map 或 nil"
-  [kernel]
-  (:service kernel))
 
 (defn find-function
   "在 Kernel 的所有 Plugin 中查找函数
@@ -351,6 +328,46 @@
                    result-value
                    (pr-str result-value))})
 
+(defn- execute-tool-calls
+  "批量执行工具调用，累积 context 和结果记录
+
+   参数:
+   - kernel:     Kernel 实例
+   - tool-calls: 工具调用列表
+   - context:    当前 Context
+
+   返回:
+   {:results [{:tool-id :name :result}...]
+    :context updated-ctx
+    :records [{:name :args :result}...]}"
+  [kernel tool-calls context]
+  (reduce
+    (fn [acc tc]
+      (let [fn-name (keyword (:name tc))
+            args (:input tc)
+            {:keys [value context]}
+            (try
+              (invoke-tool kernel fn-name args (:context acc))
+              (catch Exception e
+                {:value (str "错误: " (.getMessage e))
+                 :context (:context acc)}))
+            tool-msg (encode-tool-result tc value)
+            new-ctx (ctx/track-message context tool-msg)]
+        {:results (conj (:results acc)
+                        {:tool-id (:id tc) :name fn-name :result value})
+         :context new-ctx
+         :records (conj (:records acc)
+                        {:name fn-name :args args :result value})}))
+    {:results [] :context context :records []}
+    tool-calls))
+
+(defn- build-tool-messages
+  "构建工具调用的追加消息（assistant-msg + tool-result-msgs）
+
+   使用 service 的 build-result-msgs 格式化"
+  [service assistant-msg results]
+  ((:build-result-msgs service) assistant-msg results))
+
 (defn invoke
   "工具调用循环主入口
 
@@ -395,11 +412,9 @@
         max-iter (or (:max-iterations opts)
                      (get-in kernel [:settings :max-tool-iterations])
                      default-max-iterations)
-        tool-schemas (get-tools kernel)
+        tool-schemas (:tools kernel)
         tool-choice (or (:tool-choice opts) :auto)
         service (:service kernel)
-        chat-fn (:chat-fn service)
-        build-msgs (:build-result-msgs service)
 
         ;; 组合 context.messages + 新 messages
         existing-msgs (ctx/get-messages context)
@@ -428,50 +443,18 @@
 
         (if (seq (:tool-calls response))
           ;; 工具调用分支
-          (let [tool-calls (:tool-calls response)
-                assistant-msg (:assistant-msg response)
-                ;; track assistant message
+          (let [assistant-msg (:assistant-msg response)
                 ctx (ctx/track-message ctx assistant-msg)
-                ;; 逐个执行 invoke-tool，累积 context
-                {:keys [results ctx tool-records]}
-                (reduce
-                  (fn [acc tc]
-                    (let [fn-name (keyword (:name tc))
-                          args (:input tc)
-                          ;; invoke-tool 经过 filter 管道
-                          {:keys [value context]}
-                          (try
-                            (invoke-tool kernel fn-name args (:ctx acc))
-                            (catch Exception e
-                              {:value (str "错误: " (.getMessage e))
-                               :context (:ctx acc)}))
-                          ;; 编码为 tool message
-                          tool-msg (encode-tool-result tc value)
-                          ;; track tool message
-                          new-ctx (ctx/track-message context tool-msg)]
-                      {:results (conj (:results acc)
-                                      {:tool-id (:id tc)
-                                       :name fn-name
-                                       :result value})
-                       :ctx new-ctx
-                       :tool-records (conj (:tool-records acc)
-                                           {:name fn-name
-                                            :args args
-                                            :result value})}))
-                  {:results [] :ctx ctx :tool-records []}
-                  tool-calls)
-                ;; 构建追加消息（由 service 的 build-result-msgs 负责格式化）
-                new-msgs (build-msgs assistant-msg results)
-                ;; 追加到对话历史
-                updated-conv-msgs (into conv-msgs new-msgs)]
-            (recur updated-conv-msgs
+                {:keys [results context records]}
+                (execute-tool-calls kernel (:tool-calls response) ctx)
+                new-msgs (build-tool-messages service assistant-msg results)]
+            (recur (into conv-msgs new-msgs)
                    (dec remaining)
-                   (into all-tool-calls tool-records)
-                   ctx))
+                   (into all-tool-calls records)
+                   context))
 
           ;; 文本响应分支
-          (let [assistant-msg (:assistant-msg response)
-                ctx (ctx/track-message ctx assistant-msg)]
+          (let [ctx (ctx/track-message ctx (:assistant-msg response))]
             {:response response
              :context ctx
              :tool-calls-made all-tool-calls}))))))

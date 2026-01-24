@@ -19,8 +19,8 @@
    ;; 创建错误
    (errors/error :timeout-error \"请求超时\")
 
-   ;; 检查是否可重试
-   (errors/retryable? err) ; => true
+   ;; 检查是否可重试（直接关键字访问）
+   (:retryable? err) ; => true
 
    ;; 安全执行
    (errors/with-error-handling #(api-call))"
@@ -93,66 +93,31 @@
        (contains? x :type)
        (contains? x :message)))
 
-(defn retryable?
-  "检查错误是否可重试
+(defmacro ^:private deferrpred
+  "生成错误类型谓词函数
 
-   参数：
-   - err: 错误 map
+   每个谓词检查: error? + (类型匹配 或 状态码匹配)"
+  [fn-name doc-str type-check status-check]
+  `(defn ~fn-name
+     ~doc-str
+     [~'err]
+     (and (error? ~'err)
+          (or ~type-check ~status-check))))
 
-   返回：
-   boolean"
-  [err]
-  (boolean (:retryable? err)))
+(deferrpred http-error?
+  "检查是否为 HTTP 相关错误（网络/超时/有状态码）"
+  (#{:network-error :timeout-error} (:type err))
+  (contains? err :status))
 
-(defn error-type
-  "获取错误类型
+(deferrpred auth-error?
+  "检查是否为认证错误（401/403 或 :auth-error 类型）"
+  (= :auth-error (:type err))
+  (#{401 403} (:status err)))
 
-   参数：
-   - err: 错误 map
-
-   返回：
-   关键字"
-  [err]
-  (:type err))
-
-(defn http-error?
-  "检查是否为 HTTP 相关错误
-
-   参数：
-   - err: 错误 map
-
-   返回：
-   boolean"
-  [err]
-  (and (error? err)
-       (or (contains? err :status)
-           (#{:network-error :timeout-error} (:type err)))))
-
-(defn auth-error?
-  "检查是否为认证错误
-
-   参数：
-   - err: 错误 map
-
-   返回：
-   boolean"
-  [err]
-  (and (error? err)
-       (or (= :auth-error (:type err))
-           (#{401 403} (:status err)))))
-
-(defn rate-limit-error?
-  "检查是否为速率限制错误
-
-   参数：
-   - err: 错误 map
-
-   返回：
-   boolean"
-  [err]
-  (and (error? err)
-       (or (= :rate-limit-error (:type err))
-           (= 429 (:status err)))))
+(deferrpred rate-limit-error?
+  "检查是否为速率限制错误（429 或 :rate-limit-error 类型）"
+  (= :rate-limit-error (:type err))
+  (= 429 (:status err)))
 
 ;;; ============================================================
 ;;; 异常转换
@@ -314,50 +279,3 @@
   (let [[status result] (with-error-handling f)]
     (if (= :ok status) result default)))
 
-;;; ============================================================
-;;; Result 类型辅助
-;;; ============================================================
-
-(defn ok
-  "创建成功结果
-
-   参数：
-   - value: 结果值
-
-   返回：
-   [:ok value]"
-  [value]
-  [:ok value])
-
-(defn err
-  "创建失败结果
-
-   参数：
-   - error: 错误 map
-
-   返回：
-   [:error error]"
-  [error]
-  [:error error])
-
-(defn ok?
-  "检查是否为成功结果
-
-   参数：
-   - result: [:ok value] 或 [:error err]
-
-   返回：
-   boolean"
-  [result]
-  (and (vector? result) (= :ok (first result))))
-
-(defn err?
-  "检查是否为失败结果
-
-   参数：
-   - result: [:ok value] 或 [:error err]
-
-   返回：
-   boolean"
-  [result]
-  (and (vector? result) (= :error (first result))))

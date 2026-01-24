@@ -114,57 +114,22 @@
 ;; ============================================================
 
 (defn- parse-response
-  "解析 HTTP 响应"
-  [{:keys [status headers body error] :as resp}]
-  (cond
-    error
-    {:status 0
-     :error (str error)
-     :success? false}
+  "解析 HTTP 响应
 
-    :else
+   根据 as 参数决定 body 解析方式：
+   - :json       尝试 JSON 解析（默认）
+   - :text/:stream/:byte-array  原样返回"
+  [{:keys [status headers body error]} as]
+  (if error
+    {:status 0 :error (str error) :success? false}
     {:status status
      :headers headers
-     :body (if (string? body)
-             (try
-               (json/parse-string body true)
-               (catch Exception _ body))
+     :body (if (= as :json)
+             (if (string? body)
+               (try (json/parse-string body true)
+                    (catch Exception _ body))
+               body)
              body)
-     :success? (<= 200 status 299)}))
-
-(defn- parse-response-auto
-  "根据 :as 参数解析响应"
-  [{:keys [status headers body error] :as resp} as]
-  (cond
-    error
-    {:status 0
-     :error (str error)
-     :success? false}
-
-    (= as :json)
-    {:status status
-     :headers headers
-     :body (try
-             (json/parse-string body true)
-             (catch Exception _ body))
-     :success? (<= 200 status 299)}
-
-    (or (= as :text) (= as :stream))
-    {:status status
-     :headers headers
-     :body body
-     :success? (<= 200 status 299)}
-
-    (= as :byte-array)
-    {:status status
-     :headers headers
-     :body body
-     :success? (<= 200 status 299)}
-
-    :else
-    {:status status
-     :headers headers
-     :body body
      :success? (<= 200 status 299)}))
 
 ;; ============================================================
@@ -217,174 +182,74 @@
       ;; 异步模式
       (http/request opts
         (fn [{:keys [status headers body error] :as resp}]
-          (let [parsed (parse-response-auto resp as)]
+          (let [parsed (parse-response resp as)]
             (when callback
               (callback parsed)))))
       ;; 同步模式
       (let [resp @(http/request opts)]
-        (parse-response-auto resp as)))))
+        (parse-response resp as)))))
 
 ;; ============================================================
-;; 同步便捷方法
+;; HTTP 便捷方法（宏批量生成）
 ;; ============================================================
 
-(defn get
-  "同步 GET 请求
+(defmacro ^:private defhttp-methods
+  "批量生成同步和异步 HTTP 便捷方法
 
-   示例:
-   (get \"https://api.example.com/users\")
-   (get url :headers {\"Auth\" \"token\"} :query-params {:page 1})"
-  [url & {:keys [headers query-params timeout]
-          :or {timeout *default-timeout*}}]
-  (request :get url
-           :headers headers
-           :query-params query-params
-           :timeout timeout
-           :async? false))
+   对每个 [method has-body?] 对，生成:
+   - 同步函数: (method url & opts)
+   - 异步函数: (method-async url callback & opts)"
+  [& specs]
+  `(do
+     ~@(mapcat
+         (fn [[method has-body?]]
+           (let [sync-name (symbol (name method))
+                 async-name (symbol (str (name method) "-async"))
+                 method-kw (keyword method)]
+             [(if has-body?
+                `(defn ~sync-name
+                   ~(str "同步 " (clojure.string/upper-case (name method)) " 请求")
+                   [~'url & {:keys [~'headers ~'body ~'query-params ~'timeout]
+                             :or {~'timeout *default-timeout*}}]
+                   (request ~method-kw ~'url
+                            :headers ~'headers :body ~'body
+                            :query-params ~'query-params
+                            :timeout ~'timeout :async? false))
+                `(defn ~sync-name
+                   ~(str "同步 " (clojure.string/upper-case (name method)) " 请求")
+                   [~'url & {:keys [~'headers ~'query-params ~'timeout]
+                             :or {~'timeout *default-timeout*}}]
+                   (request ~method-kw ~'url
+                            :headers ~'headers
+                            :query-params ~'query-params
+                            :timeout ~'timeout :async? false)))
+              (if has-body?
+                `(defn ~async-name
+                   ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
+                   [~'url ~'callback & {:keys [~'headers ~'body ~'query-params ~'timeout]
+                                        :or {~'timeout *default-timeout*}}]
+                   (request ~method-kw ~'url
+                            :headers ~'headers :body ~'body
+                            :query-params ~'query-params
+                            :timeout ~'timeout
+                            :async? true :callback ~'callback))
+                `(defn ~async-name
+                   ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
+                   [~'url ~'callback & {:keys [~'headers ~'query-params ~'timeout]
+                                        :or {~'timeout *default-timeout*}}]
+                   (request ~method-kw ~'url
+                            :headers ~'headers
+                            :query-params ~'query-params
+                            :timeout ~'timeout
+                            :async? true :callback ~'callback)))]))
+         specs)))
 
-(defn post
-  "同步 POST 请求
-
-   示例:
-   (post \"https://api.example.com/users\" :body {:name \"test\"})"
-  [url & {:keys [headers body query-params timeout]
-          :or {timeout *default-timeout*}}]
-  (request :post url
-           :headers headers
-           :body body
-           :query-params query-params
-           :timeout timeout
-           :async? false))
-
-(defn put
-  "同步 PUT 请求
-
-   示例:
-   (put \"https://api.example.com/users/1\" :body {:name \"updated\"})"
-  [url & {:keys [headers body query-params timeout]
-          :or {timeout *default-timeout*}}]
-  (request :put url
-           :headers headers
-           :body body
-           :query-params query-params
-           :timeout timeout
-           :async? false))
-
-(defn patch
-  "同步 PATCH 请求
-
-   示例:
-   (patch \"https://api.example.com/users/1\" :body {:name \"patched\"})"
-  [url & {:keys [headers body query-params timeout]
-          :or {timeout *default-timeout*}}]
-  (request :patch url
-           :headers headers
-           :body body
-           :query-params query-params
-           :timeout timeout
-           :async? false))
-
-(defn delete
-  "同步 DELETE 请求
-
-   示例:
-   (delete \"https://api.example.com/users/1\")"
-  [url & {:keys [headers query-params timeout]
-          :or {timeout *default-timeout*}}]
-  (request :delete url
-           :headers headers
-           :query-params query-params
-           :timeout timeout
-           :async? false))
-
-;; ============================================================
-;; 异步便捷方法
-;; ============================================================
-
-(defn get-async
-  "异步 GET 请求
-
-   示例:
-   (get-async \"https://api.example.com/users\"
-     (fn [resp]
-       (println \"Status:\" (:status resp))))"
-  [url callback & {:keys [headers query-params timeout]
-                   :or {timeout *default-timeout*}}]
-  (request :get url
-           :headers headers
-           :query-params query-params
-           :timeout timeout
-           :async? true
-           :callback callback))
-
-(defn post-async
-  "异步 POST 请求
-
-   示例:
-   (post-async \"https://api.example.com/users\"
-     (fn [resp]
-       (if (:success? resp)
-         (println \"Created:\" (:body resp))
-         (println \"Error:\" (:error resp))))
-   :body {:name \"张三\"})"
-  [url callback & {:keys [headers body query-params timeout]
-                   :or {timeout *default-timeout*}}]
-  (request :post url
-           :headers headers
-           :body body
-           :query-params query-params
-           :timeout timeout
-           :async? true
-           :callback callback))
-
-(defn put-async
-  "异步 PUT 请求
-
-   示例:
-   (put-async \"https://api.example.com/users/1\"
-     (fn [resp] ...)
-     :body {:name \"updated\"})"
-  [url callback & {:keys [headers body query-params timeout]
-                   :or {timeout *default-timeout*}}]
-  (request :put url
-           :headers headers
-           :body body
-           :query-params query-params
-           :timeout timeout
-           :async? true
-           :callback callback))
-
-(defn patch-async
-  "异步 PATCH 请求
-
-   示例:
-   (patch-async \"https://api.example.com/users/1\"
-     (fn [resp] ...)
-     :body {:name \"patched\"})"
-  [url callback & {:keys [headers body query-params timeout]
-                   :or {timeout *default-timeout*}}]
-  (request :patch url
-           :headers headers
-           :body body
-           :query-params query-params
-           :timeout timeout
-           :async? true
-           :callback callback))
-
-(defn delete-async
-  "异步 DELETE 请求
-
-   示例:
-   (delete-async \"https://api.example.com/users/1\"
-     (fn [resp] ...))"
-  [url callback & {:keys [headers query-params timeout]
-                   :or {timeout *default-timeout*}}]
-  (request :delete url
-           :headers headers
-           :query-params query-params
-           :timeout timeout
-           :async? true
-           :callback callback))
+(defhttp-methods
+  [get false]
+  [post true]
+  [put true]
+  [patch true]
+  [delete false])
 
 ;; ============================================================
 ;; JSON 便捷方法

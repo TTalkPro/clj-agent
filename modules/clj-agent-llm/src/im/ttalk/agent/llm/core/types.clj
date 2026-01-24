@@ -27,9 +27,11 @@
 
 (def make-tool-call types/make-tool-call)
 (def tool-call? types/tool-call?)
-(def tool-call-id types/tool-call-id)
-(def tool-call-name types/tool-call-name)
-(def tool-call-input types/tool-call-input)
+
+;; 内联实现（core 模块已删除单行访问器，推荐直接用关键字访问）
+(defn tool-call-id [tc] (:id tc))
+(defn tool-call-name [tc] (:name tc))
+(defn tool-call-input [tc] (:input tc))
 
 ;;; ============================================================
 ;;; Re-export 响应类型
@@ -37,8 +39,11 @@
 
 (def make-response types/make-response)
 (def response? types/response?)
-(def response-text types/response-text)
-(def response-tool-calls types/response-tool-calls)
+
+;; 内联实现（core 模块已删除单行访问器，推荐直接用关键字访问）
+(defn response-text [resp] (:text resp ""))
+(defn response-tool-calls [resp] (:tool-calls resp []))
+
 (def has-text? types/has-text?)
 (def has-tool-calls? types/has-tool-calls?)
 

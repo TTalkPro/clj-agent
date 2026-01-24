@@ -38,8 +38,11 @@
 ;;; ============================================================
 
 (def error? errors/error?)
-(def retryable? errors/retryable?)
-(def error-type errors/error-type)
+
+;; 内联实现（core 模块已删除单行访问器，推荐直接用关键字访问）
+(defn retryable? [err] (boolean (:retryable? err)))
+(defn error-type [err] (:type err))
+
 (def http-error? errors/http-error?)
 (def auth-error? errors/auth-error?)
 (def rate-limit-error? errors/rate-limit-error?)
@@ -72,10 +75,10 @@
 (def safe-execute errors/safe-execute)
 
 ;;; ============================================================
-;;; Re-export Result 类型辅助
+;;; Result 类型辅助（内联实现，core 模块已删除此类封装）
 ;;; ============================================================
 
-(def ok errors/ok)
-(def err errors/err)
-(def ok? errors/ok?)
-(def err? errors/err?)
+(defn ok [value] [:ok value])
+(defn err [error] [:error error])
+(defn ok? [result] (and (vector? result) (= :ok (first result))))
+(defn err? [result] (and (vector? result) (= :error (first result))))

@@ -91,10 +91,10 @@
 (defn test-query-api []
   (separator "测试 1: Query API")
   (println "  list-functions:" (kernel/list-functions app-kernel))
-  (println "  get-tools count:" (count (kernel/get-tools app-kernel)))
+  (println "  get-tools count:" (count (:tools app-kernel)))
   (println "  find-function :get-weather:" (boolean (kernel/find-function app-kernel :get-weather)))
   (println "  find-function :nonexistent:" (boolean (kernel/find-function app-kernel :nonexistent)))
-  (println "  get-service:" (boolean (kernel/get-service app-kernel)))
+  (println "  get-service:" (boolean (:service app-kernel)))
   (println "  ✓ Query API 正常"))
 
 (defn test-invoke-tool []

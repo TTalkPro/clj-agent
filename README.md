@@ -108,10 +108,10 @@ Kernel 提供三类 API：
 (kernel/invoke-chat-with-tools kernel messages opts)         ;; 工具调用循环
 
 ;; Query API - 查询状态
-(kernel/get-tools kernel)            ;; 所有 tool schema
+(:tools kernel)                      ;; 所有 tool schema（直接关键字访问）
 (kernel/find-function kernel :name)  ;; 查找函数
 (kernel/list-functions kernel)       ;; 列出所有函数名
-(kernel/get-service kernel)          ;; 获取 service
+(:service kernel)                    ;; 获取 service（直接关键字访问）
 ```
 
 ### deftool 宏

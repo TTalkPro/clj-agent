@@ -54,38 +54,6 @@
        (contains? x :name)
        (contains? x :input)))
 
-(defn tool-call-id
-  "获取工具调用 ID
-
-   参数：
-   - tc: 工具调用 map
-
-   返回：
-   字符串"
-  [tc]
-  (:id tc))
-
-(defn tool-call-name
-  "获取工具名称
-
-   参数：
-   - tc: 工具调用 map
-
-   返回：
-   关键字"
-  [tc]
-  (:name tc))
-
-(defn tool-call-input
-  "获取工具输入参数
-
-   参数：
-   - tc: 工具调用 map
-
-   返回：
-   map"
-  [tc]
-  (:input tc))
 
 ;;; ============================================================
 ;;; 响应类型
@@ -129,49 +97,15 @@
        (contains? x :text)
        (contains? x :tool-calls)))
 
-(defn response-text
-  "获取响应文本
-
-   参数：
-   - resp: 响应 map
-
-   返回：
-   字符串"
-  [resp]
-  (:text resp ""))
-
-(defn response-tool-calls
-  "获取响应中的工具调用
-
-   参数：
-   - resp: 响应 map
-
-   返回：
-   工具调用列表"
-  [resp]
-  (:tool-calls resp []))
-
 (defn has-text?
-  "检查响应是否包含文本
-
-   参数：
-   - resp: 响应 map
-
-   返回：
-   boolean"
+  "检查响应是否包含文本"
   [resp]
-  (not (str/blank? (response-text resp))))
+  (not (str/blank? (:text resp ""))))
 
 (defn has-tool-calls?
-  "检查响应是否包含工具调用
-
-   参数：
-   - resp: 响应 map
-
-   返回：
-   boolean"
+  "检查响应是否包含工具调用"
   [resp]
-  (seq (response-tool-calls resp)))
+  (boolean (seq (:tool-calls resp))))
 
 ;;; ============================================================
 ;;; 消息类型辅助

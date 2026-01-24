@@ -167,17 +167,6 @@
   [plugin tool-name]
   (get (:functions plugin) (keyword tool-name)))
 
-(defn supports-tool?
-  "检查 Plugin 是否包含指定工具
-
-   参数:
-   - plugin:    KernelPlugin 实例
-   - tool-name: 工具名称
-
-   返回: boolean"
-  [plugin tool-name]
-  (contains? (:functions plugin) (keyword tool-name)))
-
 (defn execute-tool
   "通过 Plugin 执行工具
 
@@ -202,28 +191,3 @@
            {:success false :error (str "参数验证失败: " (first errors))}))
        {:success false :error (str "函数未找到: " tool-name)}))))
 
-(defn invoke-function
-  "通过 Plugin 调用函数（返回原始结果）
-
-   与 execute-tool 的区别：
-   - execute-tool: 返回 {:success :result :error} 包装
-   - invoke-function: 返回函数的原始返回值
-
-   参数:
-   - plugin:  KernelPlugin 实例
-   - fn-name: 函数名（关键字）
-   - args:    参数 map
-
-   返回:
-   函数的原始返回值
-
-   异常:
-   函数未找到时抛出异常"
-  [plugin fn-name args]
-  (let [fn-key (keyword fn-name)]
-    (if-let [v (get-tool-var plugin fn-key)]
-      ((var-get v) (or args {}))
-      (throw (ex-info (str "Plugin 中未找到函数: " fn-name)
-                      {:plugin (:plugin-name plugin)
-                       :function fn-name
-                       :available (list-function-names plugin)})))))

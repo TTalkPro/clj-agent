@@ -108,9 +108,9 @@
           p (make-test-provider response)
           result (provider/call-with-tools p {} [] [])]
       (is (types/response? result))
-      (is (= "Hello" (types/response-text result)))
+      (is (= "Hello" (:text result)))
       (is (= [{:id "t1" :name :foo :input {}}]
-             (types/response-tool-calls result))))))
+             (:tool-calls result))))))
 
 (deftest test-call-simple
   (testing "call-simple returns text string"
@@ -286,29 +286,29 @@
   (testing "make-tool-call creates proper structure"
     (let [tc (types/make-tool-call "id1" "calc" {:x 1})]
       (is (types/tool-call? tc))
-      (is (= "id1" (types/tool-call-id tc)))
-      (is (= :calc (types/tool-call-name tc)))
-      (is (= {:x 1} (types/tool-call-input tc)))))
+      (is (= "id1" (:id tc)))
+      (is (= :calc (:name tc)))
+      (is (= {:x 1} (:input tc)))))
 
   (testing "make-tool-call with keyword name"
     (let [tc (types/make-tool-call "id2" :search {:q "test"})]
-      (is (= :search (types/tool-call-name tc)))))
+      (is (= :search (:name tc)))))
 
   (testing "make-tool-call with nil input"
     (let [tc (types/make-tool-call "id3" :foo nil)]
-      (is (= {} (types/tool-call-input tc))))))
+      (is (= {} (:input tc))))))
 
 (deftest test-make-response
   (testing "make-response creates proper structure"
     (let [r (types/make-response :text "hello" :tool-calls [])]
       (is (types/response? r))
-      (is (= "hello" (types/response-text r)))
-      (is (= [] (types/response-tool-calls r)))))
+      (is (= "hello" (:text r)))
+      (is (= [] (:tool-calls r)))))
 
   (testing "make-response with defaults"
     (let [r (types/make-response)]
-      (is (= "" (types/response-text r)))
-      (is (= [] (types/response-tool-calls r)))))
+      (is (= "" (:text r)))
+      (is (= [] (:tool-calls r)))))
 
   (testing "has-text? and has-tool-calls?"
     (is (types/has-text? (types/make-response :text "hi")))
@@ -343,12 +343,12 @@
   (testing "error creates proper structure"
     (let [e (errors/error :timeout-error "timed out")]
       (is (errors/error? e))
-      (is (= :timeout-error (errors/error-type e)))
-      (is (errors/retryable? e))))
+      (is (= :timeout-error (:type e)))
+      (is (:retryable? e))))
 
   (testing "non-retryable error"
     (let [e (errors/error :auth-error "unauthorized")]
-      (is (not (errors/retryable? e)))))
+      (is (not (:retryable? e)))))
 
   (testing "error with opts"
     (let [e (errors/error :network-error "failed" {:status 502 :provider :openai})]
@@ -370,18 +370,12 @@
     (is (errors/rate-limit-error? (errors/error :provider-error "err" {:status 429})))))
 
 (deftest test-result-helpers
-  (testing "ok and ok?"
-    (is (errors/ok? (errors/ok 42)))
-    (is (= [:ok 42] (errors/ok 42))))
-
-  (testing "err and err?"
-    (is (errors/err? (errors/err {:type :test})))
-    (is (= [:error {:type :test}] (errors/err {:type :test}))))
-
   (testing "with-error-handling success"
-    (is (= [:ok 42] (errors/with-error-handling #(+ 40 2)))))
+    (let [result (errors/with-error-handling #(+ 40 2))]
+      (is (= :ok (first result)))
+      (is (= 42 (second result)))))
 
   (testing "with-error-handling failure"
     (let [result (errors/with-error-handling #(throw (java.io.IOException. "oops")))]
-      (is (errors/err? result))
-      (is (= :network-error (errors/error-type (second result)))))))
+      (is (= :error (first result)))
+      (is (= :network-error (:type (second result)))))))
