@@ -10,7 +10,6 @@
     :variables   {}        ;; 用户自定义状态 (keyword -> any)
     :messages    []        ;; 工作缓冲（发给 LLM，可 summarize/truncate）
     :history     []        ;; 完整对话日志（只追加）
-    :kernel      nil       ;; Kernel 引用
     :trace       []        ;; 执行跟踪 [{:timestamp :type :data}]
     :metadata    {}}       ;; 元数据
 
@@ -45,7 +44,6 @@
     :variables   (or vars-map {})
     :messages    []
     :history     []
-    :kernel      nil
     :trace       []
     :metadata    {}}))
 
@@ -177,31 +175,6 @@
   (-> ctx
       (append-message msg)
       (add-history msg)))
-
-;;; ============================================================
-;;; Kernel 关联
-;;; ============================================================
-
-(defn with-kernel
-  "关联 Kernel 到 Context
-
-   参数:
-   - ctx:    Context
-   - kernel: Kernel 实例
-
-   返回: 更新后的 Context"
-  [ctx kernel]
-  (assoc ctx :kernel kernel))
-
-(defn get-kernel
-  "获取关联的 Kernel
-
-   参数:
-   - ctx: Context
-
-   返回: Kernel 实例或 nil"
-  [ctx]
-  (:kernel ctx))
 
 ;;; ============================================================
 ;;; Trace 操作

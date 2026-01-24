@@ -18,7 +18,6 @@
       (is (= {} (:variables ctx)))
       (is (= [] (:messages ctx)))
       (is (= [] (:history ctx)))
-      (is (nil? (:kernel ctx)))
       (is (= [] (:trace ctx)))
       (is (= {} (:metadata ctx)))))
 
@@ -123,15 +122,6 @@
       ;; history: q1 + a1 + q2（只追加）
       (is (= 3 (count (context/get-history ctx))))
       (is (= "q1" (:content (first (context/get-history ctx))))))))
-
-(deftest context-kernel-test
-  (testing "关联 kernel"
-    (let [kernel {:test true}
-          ctx (context/with-kernel (context/create) kernel)]
-      (is (= kernel (context/get-kernel ctx)))))
-
-  (testing "无 kernel"
-    (is (nil? (context/get-kernel (context/create))))))
 
 (deftest context-trace-test
   (testing "添加跟踪"
