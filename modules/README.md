@@ -7,14 +7,15 @@ clj-agent 分为多个独立模块：
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # 核心框架（macros, store protocol, common）
-│   ├── clj-agent-llm/          # LLM Provider + Kernel 架构
-│   ├── clj-agent-tools/        # 工具系统（ITool, KernelFunction, KernelPlugin）
-│   ├── clj-agent-memory/       # Memory 系统（Store, SnapshotStore, 长短期记忆）
+│   ├── clj-agent-core/         # 核心框架（Kernel, Plugin, Filter, deftool, Process Runtime）
+│   ├── clj-agent-llm/          # LLM Provider + Service 工厂
+│   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
+│   ├── clj-agent-plugin/       # 预置插件库（File, HTTP, Shell）
+│   ├── clj-agent-memory/       # 记忆系统（Store, SnapshotStore, 长短期记忆）
 │   ├── clj-agent-rag/          # RAG 检索增强生成
-│   └── clj-agent-mcp/          # MCP 服务器
+│   └── clj-agent-mcp/          # MCP 服务器/客户端
 ├── scripts/                     # 构建脚本
-└── deps.edn                     # 根配置（开发用）
+└── deps.edn                     # 根配置
 ```
 
 ---
@@ -23,20 +24,18 @@ clj-agent/
 
 ### 1. clj-agent-core
 
-**职责**: Kernel 框架（Build/Invoke/Query API）
+**职责**: Kernel 编排器、工具系统、Process 运行时
 
 **包含**:
-- `im.ttalk.agent.core.kernel.tool` - deftool 宏（工具函数定义 + var 元数据）
+- `im.ttalk.agent.core.kernel.core` - Kernel（Build/Invoke/Query API）
+- `im.ttalk.agent.core.kernel.tool` - deftool 宏（工具函数定义 + schema 生成）
 - `im.ttalk.agent.core.kernel.plugin` - KernelPlugin（defplugin + 工具管理）
 - `im.ttalk.agent.core.kernel.filter` - Filter 拦截链（Ring-style 中间件）
-- `im.ttalk.agent.core.kernel.context` - 调用上下文构建
-- `im.ttalk.agent.core.kernel.history` - ChatHistory 管理
-- `im.ttalk.agent.core.kernel.core` - Kernel（Build/Invoke/Query API）
-- `im.ttalk.agent.core.http.client` - HTTP 客户端（基于 http-kit）
-- `im.ttalk.agent.core.common` - defdefault 宏（实例管理）
-- `im.ttalk.agent.core.common.result` - Either Monad（Success/Failure）
+- `im.ttalk.agent.core.kernel.context` - Context 共享状态管理
+- `im.ttalk.agent.core.kernel.process.*` - 事件驱动 Process 运行时
+- `im.ttalk.agent.core.http.client` - HTTP 客户端
 
-**依赖**: cheshire, timbre, http-kit
+**依赖**: core.async, cheshire, timbre, http-kit
 
 ---
 
@@ -45,57 +44,86 @@ clj-agent/
 **职责**: LLM Provider 实现 + Service 工厂
 
 **包含**:
-- `im.ttalk.agent.llm.provider.*` - LLM 提供商（Anthropic, OpenAI, Zhipu 等）
+- `im.ttalk.agent.llm.factory.builder` - Provider 创建（手动/环境变量/自动）
+- `im.ttalk.agent.llm.factory.registry` - Provider 注册表
+- `im.ttalk.agent.llm.factory.config` - 配置管理
 - `im.ttalk.agent.llm.kernel.chat` - Service 工厂（create-service）
+- `im.ttalk.agent.llm.provider.*` - Provider 实现（OpenAI, Anthropic, Zhipu, Ollama, Gemini, Mistral）
+- `im.ttalk.agent.llm.schema.*` - 请求 Schema 转换
+- `im.ttalk.agent.llm.stream.*` - 流式响应解析
 
-**依赖**: `clj-agent-core`, 第三方库
+**依赖**: `clj-agent-core`, openai-clojure, clj-http
 
 ---
 
-### 3. clj-agent-tools
+### 3. clj-agent-simpleagent
 
-**职责**: 工具注册和执行系统（高级功能）
+**职责**: 开箱即用的 Agent 封装
 
 **包含**:
-- `im.ttalk.agent.tools.protocol` - IToolRegistry + ITool/IToolProvider 重导出
-- 其他工具注册表实现
+- `im.ttalk.agent.simpleagent.kernel-agent` - KernelAgent（同步有状态）
+- `im.ttalk.agent.simpleagent.process-agent` - ProcessAgent（pause/resume 审批）
+- `im.ttalk.agent.simpleagent.common` - 共享构建逻辑
+
+**依赖**: `clj-agent-core`, `clj-agent-llm`
+
+---
+
+### 4. clj-agent-plugin
+
+**职责**: 预置工具插件库
+
+**包含**:
+- `im.ttalk.agent.plugin.file` - 文件操作（read, write, delete, copy, move）
+- `im.ttalk.agent.plugin.http` - HTTP 请求（GET, POST, PUT, DELETE）
+- `im.ttalk.agent.plugin.shell` - Shell 命令（安全/非安全模式）
+- `im.ttalk.agent.plugin.security` - 安全工具
+- `im.ttalk.agent.plugin.resilience` - 重试/超时
 
 **依赖**: `clj-agent-core`
 
 ---
 
-### 4. clj-agent-memory
+### 5. clj-agent-memory
 
-**职责**: 记忆系统
+**职责**: 记忆与存储系统
 
 **包含**:
 - `im.ttalk.agent.memory.store.*` - 存储后端（InMemory, SQLite, PostgreSQL, Redis）
-- `im.ttalk.agent.memory.snapshot.*` - 快照（StoreBackedSnapshotStore）
-- `im.ttalk.agent.memory.long_term.*` - 长期记忆（语义/情景/程序记忆）
+- `im.ttalk.agent.memory.snapshot.*` - 快照管理（StoreBackedSnapshotStore, Manager）
+- `im.ttalk.agent.memory.short-term.buffer` - 对话缓冲
+- `im.ttalk.agent.memory.long-term.*` - 长期记忆（Semantic, Episodic, Procedural）
+- `im.ttalk.agent.memory.agent-memory` - AgentMemory 统一封装
 
-**依赖**: `clj-agent-core`
+**依赖**: 无内部依赖（独立模块）
 
 ---
 
-### 5. clj-agent-rag
+### 6. clj-agent-rag
 
 **职责**: RAG 检索增强生成
 
 **包含**:
-- `im.ttalk.agent.rag.*` - 文本嵌入、向量存储、RAG 管道
+- `im.ttalk.agent.rag.plugin` - RAG 工具集（Kernel Plugin）
+- `im.ttalk.agent.rag.pipeline` - RAG 执行管道
+- `im.ttalk.agent.rag.splitter` - 文本切分
+- `im.ttalk.agent.rag.embeddings` - Embedding 操作
+- `im.ttalk.agent.rag.vector_store` - 向量存储
 
-**依赖**: 仅第三方库
+**依赖**: `clj-agent-core`
 
 ---
 
-### 6. clj-agent-mcp
+### 7. clj-agent-mcp
 
-**职责**: MCP 服务器
+**职责**: MCP 服务器/客户端
 
 **包含**:
-- `im.ttalk.mcp.*` - MCP 协议实现
+- `im.ttalk.agent.mcp.server.*` - MCP 服务器
+- `im.ttalk.agent.mcp.client.*` - MCP 客户端
+- `im.ttalk.agent.mcp.transport.*` - Stdio/SSE 传输
 
-**依赖**: `clj-agent-core`, `clj-agent-tools`
+**依赖**: `clj-agent-core`, http-kit
 
 ---
 
@@ -106,11 +134,11 @@ clj-agent/
 在根目录开发，可以同时加载所有模块：
 
 ```bash
-# 启动 REPL（加载所有模块）
-clojure -M:dev
-
 # 运行所有测试
 clojure -M:test
+
+# 启动 MCP 服务器
+clojure -M:mcp-server
 ```
 
 ### 方式 2: 单模块开发
@@ -137,40 +165,22 @@ clojure -M:test
 
 ## 依赖关系
 
+```mermaid
+graph LR
+    core[clj-agent-core]
+    llm[clj-agent-llm]
+    sa[clj-agent-simpleagent]
+    plugin[clj-agent-plugin]
+    rag[clj-agent-rag]
+    memory[clj-agent-memory]
+    mcp[clj-agent-mcp]
+
+    llm --> core
+    sa --> core
+    sa --> llm
+    plugin --> core
+    rag --> core
+    mcp --> core
 ```
-clj-agent-llm
-    └── clj-agent-core (kernel framework + protocols)
 
-clj-agent-tools
-    └── clj-agent-core (kernel/protocol)
-
-clj-agent-memory
-    └── clj-agent-core (store protocol)
-
-clj-agent-mcp
-    ├── clj-agent-core
-    └── clj-agent-tools
-
-clj-agent-core      (独立，无内部依赖)
-clj-agent-rag       (独立)
-```
-
-架构图：
-
-```
-┌──────────┐   ┌──────────┐   ┌──────────┐
-│   LLM    │   │  Tools   │   │  Memory  │
-│  (Chat)  │   │(Registry)│   │ (Store)  │
-└────┬─────┘   └────┬─────┘   └────┬─────┘
-     │               │              │
-     ▼               ▼              ▼
-┌──────────────────────────────────────────┐
-│                 Core                      │
-│ (Kernel, Plugin, Filter, Protocol, etc.) │
-└──────────────────────────────────────────┘
-
-独立模块：
-┌──────────┐   ┌──────────┐
-│   RAG    │   │   MCP    │
-└──────────┘   └──────────┘
-```
+`clj-agent-memory` 是独立模块，无内部依赖。

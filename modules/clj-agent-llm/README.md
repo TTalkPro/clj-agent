@@ -1,6 +1,8 @@
 # clj-agent-llm
 
-clj-agent LLM 模块，提供统一的多 Provider 大语言模型调用接口。
+LLM Provider 和 Service 工厂模块
+
+[English](#english) | 中文
 
 ## 架构概览
 
@@ -8,78 +10,181 @@ clj-agent LLM 模块，提供统一的多 Provider 大语言模型调用接口�
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              clj-agent-llm                                   │
 │                                                                              │
-│   Layer 1: Core 核心层                                                       │
-│   ┌────────────────┐ ┌────────────────┐ ┌────────────────┐                  │
-│   │ protocol.clj   │ │ types.clj      │ │ errors.clj     │                  │
-│   │ (ILLMProvider) │ │ (ToolCall等)   │ │ (错误处理)     │                  │
-│   └────────────────┘ └────────────────┘ └────────────────┘                  │
-│                                    ▲                                         │
-│   Layer 2: Provider 实现层 ────────┘                                         │
+│   Layer 1: Provider 实现层                                                   │
 │   ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐         │
 │   │ OpenAI   │ │ Anthropic│ │ Zhipu    │ │ Gemini   │ │ Ollama   │ ...     │
 │   └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘         │
 │                                    ▲                                         │
-│   Layer 3: Factory 工厂层 ─────────┘                                         │
+│   Layer 2: Factory 工厂层 ─────────┘                                         │
 │   ┌────────────────┐ ┌────────────────┐ ┌────────────────┐                  │
 │   │ registry.clj   │ │ config.clj     │ │ builder.clj    │                  │
 │   │ (注册表)       │ │ (配置管理)     │ │ (Provider创建) │                  │
 │   └────────────────┘ └────────────────┘ └────────────────┘                  │
 │                                    ▲                                         │
-│   Layer 4: API 入口层 ─────────────┘                                         │
+│   Layer 3: Service 层 ─────────────┘                                         │
 │   ┌─────────────────────────────────────────────────────────────────┐       │
-│   │                          api.clj                                 │       │
+│   │              kernel/chat.clj (创建 Kernel 兼容 Service)          │       │
 │   └─────────────────────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 设计原则
 
-1. **统一接口** - 所有 Provider 实现相同的 `ILLMProvider` 协议
-2. **可插拔** - 通过注册表机制支持动态添加新 Provider
-3. **配置灵活** - 支持环境变量、代码配置、默认值三级配置
-4. **错误统一** - 统一的错误类型和可重试判断
+1. **可插拔** - Provider 注册表机制支持动态添加
+2. **配置灵活** - 环境变量、代码配置、默认值三级合并
+3. **Kernel 兼容** - 输出标准 `{:chat-fn :build-result-msgs}` Service map
+4. **延迟加载** - Provider 首次使用时才注册，避免循环依赖
+
+## 依赖
+
+```clojure
+;; deps.edn
+{:deps {im.ttalk/clj-agent-llm {:local/root "../clj-agent-llm"}}}
+```
+
+内部依赖：`clj-agent-core`
+
+外部依赖：
+- net.clojars.wkok/openai-clojure 0.21.0
+- clj-http/clj-http 3.12.3
+- cheshire/cheshire 5.12.0
+- com.taoensso/timbre 6.3.0
 
 ## 支持的 Provider
 
-| Provider | 环境变量前缀 | 默认模型 | 功能支持 |
-|----------|-------------|----------|----------|
-| OpenAI | `OPENAI_*` | gpt-4 | 同步/流式/Function Call |
-| Anthropic | `ANTHROPIC_*` | claude-3-5-sonnet-20241022 | 同步/流式/Function Call |
-| 智谱 | `ZHIPU_*` | glm-4 | 同步/流式/Function Call |
-| Gemini | `GOOGLE_*` | gemini-2.0-flash-exp | 同步/流式/Function Call |
-| Mistral | `MISTRAL_*` | mistral-large-latest | 同步/流式/Function Call |
-| Ollama | `OLLAMA_*` | llama2 | 同步/流式 |
-| Mock | - | - | 测试用 |
+| Provider | 关键字 | 环境变量前缀 | 说明 |
+|----------|--------|-------------|------|
+| OpenAI | `:openai` | `OPENAI_*` | GPT 系列，Function Call |
+| Anthropic | `:anthropic` | `ANTHROPIC_*` | Claude 系列，Function Call |
+| 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列，Function Call |
+| Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
+| Mistral | `:mistral` | `MISTRAL_*` | Mistral |
+| Ollama | `:ollama` | `OLLAMA_*` | 本地模型 |
+| OpenAI 兼容 | `:openai-compat` | 自定义 | vLLM、LocalAI 等 |
+| Mock | `:mock` | - | 测试用 |
+
+## 命名空间
+
+| 命名空间 | 说明 |
+|---------|------|
+| `im.ttalk.agent.llm.kernel.chat` | Service 创建（Kernel 兼容） |
+| `im.ttalk.agent.llm.factory.builder` | Provider 构建器 |
+| `im.ttalk.agent.llm.factory.registry` | Provider 注册表 |
+| `im.ttalk.agent.llm.factory.config` | 环境变量配置管理 |
+| `im.ttalk.agent.llm.provider.openai` | OpenAI 实现 |
+| `im.ttalk.agent.llm.provider.anthropic` | Anthropic 实现 |
+| `im.ttalk.agent.llm.provider.zhipu` | Zhipu 实现 |
+| `im.ttalk.agent.llm.provider.ollama` | Ollama 实现 |
+| `im.ttalk.agent.llm.provider.gemini` | Gemini 实现 |
+| `im.ttalk.agent.llm.provider.mistral` | Mistral 实现 |
+| `im.ttalk.agent.llm.provider.openai_compat` | OpenAI 兼容 |
+| `im.ttalk.agent.llm.provider.mock` | Mock Provider |
+| `im.ttalk.agent.llm.schema.openai` | OpenAI Schema 转换 |
+| `im.ttalk.agent.llm.schema.anthropic` | Anthropic Schema 转换 |
+| `im.ttalk.agent.llm.stream.openai` | OpenAI 流式处理 |
+| `im.ttalk.agent.llm.stream.anthropic` | Anthropic 流式处理 |
+| `im.ttalk.agent.llm.response.parser` | 响应归一化 |
+| `im.ttalk.agent.llm.prompt.template` | Prompt 模板 |
+| `im.ttalk.agent.llm.prompt.selector` | Prompt 选择器 |
 
 ## 快速开始
 
 ```clojure
-(require '[im.ttalk.llm.api :as llm])
+(require '[im.ttalk.agent.llm.factory.builder :as factory])
+(require '[im.ttalk.agent.llm.kernel.chat :as chat])
 
-;; 创建 Provider（从环境变量读取 API Key）
-(def provider (llm/create-provider :openai))
+;; 1. 创建 Provider
+(def provider (factory/create-provider-from-env :openai))
 
-;; 同步调用
-(def response
-  (llm/call provider
-            {:model "gpt-4" :max-tokens 1000}
-            [{:role "user" :content "你好，请介绍下自己"}]))
+;; 2. 创建 Kernel 兼容的 Service
+(def service (chat/create-service
+               {:provider provider
+                :model "gpt-4"
+                :max-tokens 4096
+                :temperature 0.7}))
 
-;; 提取文本
-(llm/extract-text provider response)
-;; => "你好！我是一个AI助手..."
-
-;; 流式调用
-(llm/call-stream provider
-                 {:model "gpt-4" :max-tokens 1000}
-                 [{:role "user" :content "你好"}]
-                 []
-                 (fn [{:keys [token]}]
-                   (print token)
-                   (flush)))
+;; 3. 注册到 Kernel
+(-> (kernel/create-kernel-builder)
+    (kernel/add-service service)
+    ...)
 ```
 
-## 环境变量配置
+## API 参考
+
+### Provider 创建
+
+```clojure
+(require '[im.ttalk.agent.llm.factory.builder :as factory])
+
+;; 基本创建
+(factory/create-provider :openai)
+(factory/create-provider :anthropic {:api-key "sk-..."})
+
+;; 从环境变量创建
+(factory/create-provider-from-env :openai)
+;; 使用 OPENAI_API_KEY, OPENAI_BASE_URL 等
+
+;; 使用默认配置 + 用户覆盖
+(factory/create-provider-with-defaults :openai {:model "gpt-4-turbo"})
+
+;; 自动配置（合并：默认 < 环境变量 < 用户参数）
+(factory/create-provider-auto :openai {:model "gpt-4"})
+(factory/create-provider-auto :openai {:api-key "sk-..."} false)  ;; 不读环境变量
+```
+
+### Service 创建
+
+```clojure
+(require '[im.ttalk.agent.llm.kernel.chat :as chat])
+
+(def service (chat/create-service
+               {:provider provider        ;; Provider 实例（必需）
+                :model "gpt-4"            ;; 模型名称（必需）
+                :max-tokens 4096          ;; 最大 token（默认 4096）
+                :temperature 0.7}))       ;; 温度（可选）
+
+;; Service 是一个 map:
+;; {:chat-fn           (fn [messages opts] -> {:text "..." :tool-calls [...] :assistant-msg {...}})
+;;  :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
+```
+
+### Provider 注册表
+
+```clojure
+(require '[im.ttalk.agent.llm.factory.registry :as registry])
+
+;; 注册自定义 Provider
+(registry/register-provider! :my-provider
+  (fn [opts] (create-my-provider opts)))
+
+;; 查询
+(registry/get-providers)          ;; 所有已注册 Provider
+(registry/get-factory :openai)    ;; 获取工厂函数
+(registry/supported-providers)    ;; 支持的类型列表
+```
+
+### 配置管理
+
+```clojure
+(require '[im.ttalk.agent.llm.factory.config :as config])
+
+;; 从环境变量加载
+(config/load-config-from-env :openai)
+;; => {:api-key "sk-..." :base-url "..."}
+
+;; 验证配置
+(config/validate-config :openai config-map)
+;; => [:ok validated-config] 或 [:error errors]
+
+;; 合并解析
+(config/resolve-config :openai user-opts use-env?)
+;; => [:ok merged-config] 或 [:error errors]
+
+;; 默认配置
+(config/get-default-config :openai)
+```
+
+## 环境变量
 
 ```bash
 # OpenAI
@@ -105,273 +210,57 @@ export MISTRAL_API_KEY="..."
 export OLLAMA_BASE_URL="http://localhost:11434"
 ```
 
-## Provider 创建
-
-### 自动配置（推荐）
+## 扩展自定义 Provider
 
 ```clojure
-;; 自动从环境变量加载配置
-(def provider (llm/create-provider-auto :openai))
+;; 1. 实现 Provider 创建函数
+(defn create-my-provider
+  ([] (create-my-provider {}))
+  ([opts]
+   (let [api-key (or (:api-key opts) (System/getenv "MY_API_KEY"))]
+     {:provider-type :my-provider
+      :api-key api-key
+      :base-url (:base-url opts "http://localhost:8000")})))
 
-;; 覆盖部分配置
-(def provider (llm/create-provider-auto :openai {:model "gpt-4-turbo"}))
+;; 2. 注册到 Registry
+(registry/register-provider! :my-provider create-my-provider)
+
+;; 3. 使用
+(def provider (factory/create-provider :my-provider {:api-key "..."}))
+(def service (chat/create-service {:provider provider :model "my-model"}))
 ```
 
-### 手动配置
+---
+
+<a name="english"></a>
+
+## English
+
+### Overview
+
+`clj-agent-llm` provides a unified LLM provider integration layer with:
+
+- **Provider Registry**: Lazy-loaded provider registration
+- **Factory Builder**: Multiple creation methods (manual, env vars, auto-merge)
+- **Service Creation**: Wraps providers into Kernel-compatible `{:chat-fn :build-result-msgs}` maps
+- **Schema Translation**: Request/response format translation for each provider
+
+### Supported Providers
+
+OpenAI, Anthropic, Zhipu, Ollama, Gemini, Mistral, OpenAI-compatible, Mock
+
+### Key APIs
 
 ```clojure
-;; 完全手动配置
-(def provider (llm/create-provider :anthropic
-                {:api-key "sk-ant-..."
-                 :model "claude-3-5-sonnet-20241022"
-                 :max-tokens 4096}))
+(require '[im.ttalk.agent.llm.factory.builder :as factory])
+(require '[im.ttalk.agent.llm.kernel.chat :as chat])
+
+(def provider (factory/create-provider-from-env :openai))
+(def service (chat/create-service {:provider provider :model "gpt-4"}))
 ```
 
-### 查看支持的 Provider
-
-```clojure
-(llm/supported-providers)
-;; => (:openai :anthropic :zhipu :ollama :gemini :mistral :mock)
-```
-
-## 核心 API
-
-### 同步调用
-
-```clojure
-(llm/call provider config messages)
-(llm/call provider config messages tools)
-
-;; config 参数
-{:model "gpt-4"           ; 模型名称
- :max-tokens 4096         ; 最大 token 数
- :temperature 0.7         ; 温度（0-1）
- :top-p 1.0}              ; Top-P 采样
-```
-
-### 流式调用
-
-```clojure
-(llm/call-stream provider config messages tools on-token)
-
-;; on-token 回调参数
-{:token "hello"           ; 当前 token
- :index 0                 ; token 索引
- :accumulated "hello"}    ; 累积文本
-```
-
-### 响应处理
-
-```clojure
-;; 提取文本
-(llm/extract-text provider response)
-
-;; 提取工具调用
-(llm/extract-tool-calls provider response)
-;; => [{:id "call_123" :name :calculator :input {:expression "2+2"}}]
-
-;; 构建工具结果
-(llm/build-tool-result provider "call_123" "4")
-```
-
-## Function Calling
-
-```clojure
-;; 定义工具
-(def tools
-  [{:name :calculator
-    :description "计算数学表达式"
-    :parameters {:type "object"
-                 :properties {:expression {:type "string"
-                                           :description "数学表达式"}}
-                 :required ["expression"]}}])
-
-;; 调用带工具的 LLM
-(def response
-  (llm/call provider
-            {:model "gpt-4"}
-            [{:role "user" :content "计算 2+2"}]
-            tools))
-
-;; 提取工具调用
-(let [tool-calls (llm/extract-tool-calls provider response)]
-  (doseq [{:keys [id name input]} tool-calls]
-    (println "调用工具:" name "参数:" input)))
-```
-
-## 消息构建
-
-```clojure
-;; 使用便捷函数构建消息
-(llm/user-message "你好")
-;; => {:role "user" :content "你好"}
-
-(llm/assistant-message "你好！")
-;; => {:role "assistant" :content "你好！"}
-
-(llm/system-message "你是一个助手")
-;; => {:role "system" :content "你是一个助手"}
-
-(llm/tool-message "call_123" "执行结果")
-;; => {:role "tool" :tool_call_id "call_123" :content "执行结果"}
-```
-
-## 错误处理
-
-### 错误类型
-
-| 类型 | 可重试 | 说明 |
-|------|--------|------|
-| `:network-error` | 是 | 网络连接错误 |
-| `:timeout-error` | 是 | 请求超时 |
-| `:rate-limit-error` | 是 | 速率限制（429） |
-| `:auth-error` | 否 | 认证失败（401/403） |
-| `:validation-error` | 否 | 参数验证失败 |
-| `:parse-error` | 否 | 响应解析失败 |
-| `:provider-error` | 视情况 | Provider 特定错误 |
-
-### 错误处理示例
-
-```clojure
-(require '[im.ttalk.llm.api :as llm])
-
-;; 安全执行
-(let [[status result] (llm/with-error-handling
-                        #(llm/call provider config messages))]
-  (if (= :ok status)
-    (println "成功:" result)
-    (println "失败:" (:message result))))
-
-;; 检查错误
-(when (llm/error? result)
-  (if (llm/retryable? result)
-    (println "可重试错误")
-    (println "不可重试错误")))
-```
-
-## Mock Provider（测试）
-
-```clojure
-(require '[im.ttalk.llm.provider.mock :as mock])
-
-;; 创建返回固定响应的 Mock
-(def mock-provider
-  (mock/create-mock-provider
-    {:response {:role "assistant" :content "模拟响应"}}))
-
-;; 创建模拟工具调用的 Mock
-(def tool-mock
-  (mock/create-calculator-mock))
-
-;; 创建模拟错误的 Mock
-(def error-mock
-  (mock/create-error-mock :rate-limit-error))
-
-;; 获取调用历史
-(mock/get-call-history mock-provider)
-```
-
-## 文件结构
-
-```
-src/im/ttalk/llm/
-├── api.clj                      # 统一 API 入口
-├── core/
-│   ├── protocol.clj             # ILLMProvider 协议定义
-│   ├── types.clj                # ToolCall/Response 类型
-│   └── errors.clj               # 错误类型和处理
-├── provider/
-│   ├── base.clj                 # Provider 基础抽象
-│   ├── openai_compat.clj        # OpenAI 兼容基础
-│   ├── openai.clj               # OpenAI Provider
-│   ├── anthropic.clj            # Anthropic (Claude) Provider
-│   ├── zhipu.clj                # 智谱 Provider
-│   ├── gemini.clj               # Google Gemini Provider
-│   ├── mistral.clj              # Mistral Provider
-│   ├── ollama.clj               # Ollama Provider
-│   └── mock.clj                 # Mock Provider（测试）
-├── factory/
-│   ├── registry.clj             # Provider 注册表
-│   ├── config.clj               # 配置管理
-│   └── builder.clj              # Provider 构建器
-├── stream/
-│   ├── openai.clj               # OpenAI 流式处理
-│   └── anthropic.clj            # Anthropic 流式处理
-├── schema/
-│   ├── openai.clj               # OpenAI Schema 转换
-│   └── anthropic.clj            # Anthropic Schema 转换
-└── response/
-    └── parser.clj               # 响应解析
-```
-
-## 扩展 Provider
-
-### 注册新 Provider
-
-```clojure
-(require '[im.ttalk.llm.factory.registry :as registry])
-
-;; 注册自定义 Provider
-(registry/register-provider! :my-provider
-  (fn [opts]
-    (->MyProvider (:api-key opts))))
-
-;; 使用
-(def provider (llm/create-provider :my-provider {:api-key "..."}))
-```
-
-### 实现 ILLMProvider
-
-```clojure
-(require '[im.ttalk.llm.core.protocol :as proto])
-
-(defrecord MyProvider [api-key]
-  proto/ILLMProvider
-
-  (provider-name [_] :my-provider)
-
-  (call-llm [this config messages tools]
-    ;; 实现 API 调用
-    )
-
-  (call-llm-stream [this config messages tools on-token]
-    ;; 实现流式调用
-    )
-
-  (extract-text [_ response]
-    ;; 从响应提取文本
-    )
-
-  (extract-tool-calls [_ response]
-    ;; 从响应提取工具调用
-    )
-
-  (build-tool-result [_ tool-id content]
-    ;; 构建工具结果消息
-    )
-
-  (supports-function-calling? [_] true)
-  (supports-stream? [_] true)
-
-  (tool->schema [_ tool]
-    ;; 转换工具定义为 Provider 特定格式
-    tool))
-```
-
-## 依赖
-
-```clojure
-;; deps.edn
-{:deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
-        org.clojure/clojure {:mvn/version "1.11.4"}
-        net.clojars.wkok/openai-clojure {:mvn/version "0.21.0"}
-        clj-http/clj-http {:mvn/version "3.12.3"}
-        cheshire/cheshire {:mvn/version "5.12.0"}
-        com.taoensso/timbre {:mvn/version "6.3.0"}}}
-```
-
-## 版本历史
-
-- **2.0.0** - 重构目录结构，统一 API 入口
-- **1.5.0** - 添加 Gemini、Mistral Provider
-- **1.0.0** - 初始版本，支持 OpenAI、Anthropic、智谱、Ollama
+- `factory/create-provider` - Create by type with opts
+- `factory/create-provider-from-env` - Create from environment variables
+- `factory/create-provider-auto` - Smart config resolution
+- `chat/create-service` - Create Kernel-compatible Service
+- `registry/register-provider!` - Register custom providers

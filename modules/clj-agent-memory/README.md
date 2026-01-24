@@ -1,16 +1,12 @@
 # clj-agent-memory
 
-clj-agent 记忆系统模块，提供 Store、SnapshotStore 和 Memory 组件的统一实现。
+记忆与存储模块 - 多后端 Key-Value 存储、快照管理、长短期记忆
+
+[English](#english) | 中文
 
 ## 架构概览
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            clj-agent-core (协议定义)                         │
-│                      IStore  │  ISnapshotStore                               │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ▲
-                                    │ 实现
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            clj-agent-memory                                  │
 │                                                                              │
@@ -21,7 +17,8 @@ clj-agent 记忆系统模块，提供 Store、SnapshotStore 和 Memory 组件的
 │                                    ▲                                         │
 │   Layer 2: SnapshotStore ──────────┘                                         │
 │   ┌──────────────────────────────────────────────────────────────────┐      │
-│   │  UnifiedSnapshotStore (context-store + persistent-store)         │      │
+│   │  StoreBackedSnapshotStore (基于 Store 实现)                       │      │
+│   │  SnapshotManager (时间旅行、分支管理)                             │      │
 │   └──────────────────────────────────────────────────────────────────┘      │
 │                                    ▲                                         │
 │   Layer 3: Memory 组件 ────────────┘                                         │
@@ -29,216 +26,174 @@ clj-agent 记忆系统模块，提供 Store、SnapshotStore 和 Memory 组件的
 │   │ Buffer     │ │ Semantic   │ │ Episodic   │ │ Procedural │               │
 │   │ (短期记忆) │ │ (事实)     │ │ (经验)     │ │ (规则)     │               │
 │   └────────────┘ └────────────┘ └────────────┘ └────────────┘               │
+│                                    ▲                                         │
+│   Layer 4: AgentMemory ────────────┘                                         │
+│   ┌──────────────────────────────────────────────────────────────────┐      │
+│   │  统一封装: save/load + 时间旅行 + 知识库 + 消息管理              │      │
+│   └──────────────────────────────────────────────────────────────────┘      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 设计原则
 
-1. **依赖倒置** - 协议定义在 clj-agent-core，实现在本模块
-2. **可插拔后端** - Store 协议支持多种实现（内存、SQLite、Redis、PostgreSQL）
-3. **组件复用** - SnapshotStore 和 Memory 组件都基于 Store 协议
-4. **双 Store 架构** - 支持热/冷数据分离，可降级为单 Store
+1. **独立模块** - 无内部模块依赖，可独立使用
+2. **可插拔后端** - 统一协议支持多种 Store 实现
+3. **分层复用** - SnapshotStore 和 Memory 组件都基于 Store 协议
+4. **双 Store 架构** - 支持热/冷数据分离（context-store + persistent-store）
+
+## 依赖
+
+```clojure
+;; deps.edn
+{:deps {im.ttalk/clj-agent-memory {:local/root "../clj-agent-memory"}}}
+```
+
+> 本模块无内部模块依赖，可独立使用。
+
+外部依赖：
+- cheshire/cheshire 5.12.0
+- com.github.seancorfield/next.jdbc 1.3.939
+- org.xerial/sqlite-jdbc 3.45.1.0
+- org.postgresql/postgresql 42.7.3
+- com.taoensso/carmine 3.2.0
+
+## 命名空间
+
+| 命名空间 | 说明 |
+|---------|------|
+| `im.ttalk.agent.memory.api` | 统一 API 入口（re-export 所有公开函数） |
+| `im.ttalk.agent.memory.protocol` | 核心协议定义 |
+| `im.ttalk.agent.memory.store.in-memory` | 内存存储 |
+| `im.ttalk.agent.memory.store.sqlite` | SQLite 存储 |
+| `im.ttalk.agent.memory.store.postgresql` | PostgreSQL 存储 |
+| `im.ttalk.agent.memory.store.redis` | Redis 存储 |
+| `im.ttalk.agent.memory.store.embedding` | Embedding 生成 |
+| `im.ttalk.agent.memory.store.vector-memory` | 向量存储 |
+| `im.ttalk.agent.memory.snapshot.store-backed` | Store 支撑的快照 |
+| `im.ttalk.agent.memory.snapshot.manager` | SnapshotManager |
+| `im.ttalk.agent.memory.agent-memory` | AgentMemory 封装 |
+| `im.ttalk.agent.memory.short-term.buffer` | 对话缓冲 |
+| `im.ttalk.agent.memory.long-term.semantic` | 语义记忆 |
+| `im.ttalk.agent.memory.long-term.episodic` | 情景记忆 |
+| `im.ttalk.agent.memory.long-term.procedural` | 程序记忆 |
+| `im.ttalk.agent.memory.retrieval.strategies` | 检索策略 |
 
 ## 快速开始
 
 ```clojure
-(require '[im.ttalk.memory.api :as mem])
-(require '[im.ttalk.graph.state.protocol :as proto])
+(require '[im.ttalk.agent.memory.api :as mem])
 
 ;; 创建存储
 (def store (mem/create-in-memory-store))
 
+;; Key-Value 操作
+(mem/kv-put store "user-123" "preferences" {:lang "zh"})
+(mem/kv-get store "user-123" "preferences")
+;; => {:lang "zh"}
+
 ;; 创建快照存储
-(def snapshot-store (mem/create-snapshot-store store))
+(def ss (mem/create-memory-snapshot-store))
 
 ;; 保存快照
-(proto/snap-put snapshot-store
-              {:thread-id "thread-1"}
-              {:state {:messages []}}
-              {:step 1 :node "start"})
-
-;; 获取快照
-(proto/snap-get-tuple snapshot-store {:thread-id "thread-1"})
-```
-
-## Store 后端
-
-### InMemoryStore（内存）
-
-快速、非持久化，适用于开发测试。
-
-```clojure
-(def store (mem/create-in-memory-store))
-
-;; 基本操作
-(proto/kv-put store "namespace" "key" {:data "value"})
-(proto/kv-get store "namespace" "key")
-(proto/kv-delete store "namespace" "key")
-
-;; 批量操作
-(proto/kv-put-batch store "namespace" [{:key "k1" :value "v1"}
-                                        {:key "k2" :value "v2"}])
-(proto/kv-get-batch store "namespace" ["k1" "k2"])
-
-;; 查询
-(proto/kv-list-keys store "namespace" {:prefix "user:" :limit 100})
-(proto/kv-count store "namespace" {:prefix "user:"})
-```
-
-### SQLiteStore（持久化）
-
-基于 SQLite 的持久化存储，适用于单机部署。
-
-```clojure
-(def store (mem/create-sqlite-store "data.db"))
-
-;; 使用方式与 InMemoryStore 相同
-(proto/kv-put store "users" "user-123" {:name "Alice" :lang "zh"})
-```
-
-### RedisStore（分布式）
-
-基于 Redis 的分布式存储。
-
-```clojure
-(def store (mem/create-redis-store {:host "localhost" :port 6379}))
-```
-
-### PostgresStore（生产）
-
-基于 PostgreSQL 的生产级存储。
-
-```clojure
-(def store (mem/create-postgres-store {:jdbc-url "jdbc:postgresql://localhost/mydb"
-                                        :username "user"
-                                        :password "pass"}))
-```
-
-## SnapshotStore
-
-基于 Store 协议的统一快照管理器，支持 Graph 状态持久化和时间旅行。
-
-### 单 Store 模式
-
-```clojure
-;; 使用内存存储
-(def cp (mem/create-snapshot-store (mem/create-in-memory-store)))
-
-;; 使用 SQLite 存储
-(def cp (mem/create-snapshot-store (mem/create-sqlite-store "snapshots.db")))
-```
-
-### 双 Store 模式
-
-支持热/冷数据分离：
-- **context-store**: 内存存储，用于当前会话（快速）
-- **persistent-store**: 持久化存储，用于历史归档
-
-```clojure
-(def cp (mem/create-snapshot-store
-          (mem/create-in-memory-store)           ; 热数据
-          :persistent-store (mem/create-sqlite-store "archive.db")))  ; 冷数据
-
-;; 检查是否为双 Store 模式
-(mem/dual-store? cp)  ; => true
-```
-
-### 核心操作
-
-```clojure
-;; 保存快照
-(proto/snap-put cp
-              {:thread-id "t1"}
-              {:state {:messages [{:role "user" :content "你好"}]}}
-              {:step 1 :node "chat"})
+(mem/snap-put ss {:thread-id "t1"} {:state {:messages []}} {:step 1})
 
 ;; 获取最新快照
-(proto/snap-get-tuple cp {:thread-id "t1"})
-;; => {:snapshot {:state ...}
-;;     :metadata {:step 1 :node "chat" :created-at ...}
-;;     :parent-config {:thread-id "t1" :snapshot-id "..."}
-;;     :pending-writes [...]}
-
-;; 获取指定快照
-(proto/snap-get-tuple cp {:thread-id "t1" :snapshot-id "snap-123"})
-
-;; 列出快照
-(proto/snap-list cp {:thread-id "t1"} {:limit 10})
-
-;; 获取执行历史
-(proto/snap-get-history cp "t1")
-;; => [{:id "snap-1" :step 1 :node "start" :created-at ...}
-;;     {:id "snap-2" :step 2 :node "process" :created-at ...}]
-
-;; 恢复到指定步骤
-(proto/snap-restore-to-step cp "t1" 2)
+(mem/snap-get ss {:thread-id "t1"})
 ```
 
-### 分支管理
+## API 参考
+
+### Store 创建
 
 ```clojure
-;; 从快照创建分支
-(proto/snap-create-branch cp "t1" "snap-123" "experiment")
-;; => {:branch-id "t1-experiment" :snapshot-id "new-snap-id"}
-
-;; 列出分支
-(proto/snap-list-branches cp "t1")
+(def store (mem/create-in-memory-store))                  ;; 内存（开发/测试）
+(def store (mem/create-sqlite-store "agent.db"))          ;; SQLite
+(def store (mem/create-postgres-store conn-opts))         ;; PostgreSQL
+(def store (mem/create-redis-store {:host "localhost"}))   ;; Redis
 ```
 
-### 归档功能（双 Store 模式）
+### Key-Value 操作
 
 ```clojure
-;; 归档线程到 persistent-store
-(mem/archive-thread! cp "thread-1")
-;; => {:archived-count 5 :thread-id "thread-1"}
+;; 单条操作
+(mem/kv-put store "key" "namespace" {:data "value"})
+(mem/kv-get store "key" "namespace")           ;; => {:data "value"}
+(mem/kv-exists? store "key" "namespace")       ;; => true
+(mem/kv-delete store "key" "namespace")
 
-;; 列出已归档线程
-(mem/list-archived-threads cp)
-;; => [{:thread-id "thread-1" :snapshot-count 5 :archived-at ...}]
+;; 批量操作
+(mem/kv-put-batch store [["k1" "ns" v1] ["k2" "ns" v2]])
+(mem/kv-get-batch store ["k1" "k2"] "ns")
 
-;; 从归档加载线程
-(mem/load-archived-thread! cp "thread-1")
-;; => {:loaded-count 5 :thread-id "thread-1"}
+;; 查询
+(mem/kv-list-keys store)
+(mem/kv-list-values store)
+(mem/kv-count store)
+
+;; 生命周期
+(mem/store-init! store)
+(mem/store-close! store)
+(mem/store-healthy? store)
 ```
 
-### 清理操作
+### SnapshotStore
 
 ```clojure
-;; 删除线程所有快照
-(proto/snap-delete-thread cp "t1")
+;; 创建
+(def ss (mem/create-memory-snapshot-store))               ;; 内存快照
+(def ss (mem/create-sqlite-snapshot-store "snap.db"))     ;; SQLite 快照
+(def ss (mem/create-snapshot-store some-store))           ;; 基于任意 Store
 
-;; 清理旧快照（保留最新 10 个）
-(proto/snap-prune cp "t1" {:keep-count 10})
+;; 保存
+(mem/snap-put ss {:thread-id "t1"} snapshot-data metadata)
 
-;; 清除所有数据
-(proto/snap-clear-all cp)
+;; 获取
+(mem/snap-get ss {:thread-id "t1"})
+(mem/snap-list ss)
+
+;; 版本管理
+(mem/snap-get-next-version ss {:thread-id "t1"})
+(mem/snap-restore-to-step ss {:thread-id "t1"} 3)
+(mem/snap-get-history ss {:thread-id "t1"})
+
+;; 分支
+(mem/snap-create-branch ss {:thread-id "t1"} "branch-name")
+(mem/snap-list-branches ss {:thread-id "t1"})
+
+;; 清理
+(mem/snap-prune ss {:thread-id "t1"} {:keep-last 5})
+(mem/snap-delete-thread ss {:thread-id "t1"})
+(mem/snap-clear-all ss)
 ```
 
-## Memory 组件
+### SnapshotManager（时间旅行）
+
+```clojure
+(def sm (mem/create-snapshot-manager ss {:thread-id "t1"}))
+
+(mem/go-back! sm)                     ;; 回退
+(mem/go-forward! sm)                  ;; 前进
+(mem/goto! sm 3)                      ;; 跳转
+(mem/get-lineage sm)                  ;; 历史链
+(mem/switch-branch! sm "branch")      ;; 切换分支
+```
 
 ### ConversationBuffer（短期记忆）
-
-管理当前对话消息。
 
 ```clojure
 (def buffer (mem/create-conversation-buffer))
 
 ;; 添加消息
 (mem/add-message buffer {:role "user" :content "你好"})
-(mem/add-message buffer {:role "assistant" :content "你好！有什么可以帮你的？"})
-
-;; 便捷方法
 (mem/add-user-message buffer "你好")
 (mem/add-assistant-message buffer "你好！")
-(mem/add-system-message buffer "你是一个助手")
-(mem/add-tool-message buffer "tool-call-id" "执行结果")
+(mem/add-system-message buffer "你是助手")
+(mem/add-tool-message buffer "tool-call-id" "结果")
 
-;; 获取消息
+;; 查询
 (mem/get-messages buffer)
-(mem/get-messages-window buffer 10)  ; 最近 10 条
-(mem/get-messages-by-tokens buffer 4000)  ; 按 token 限制
-
-;; 统计
+(mem/get-messages-window buffer 10)        ;; 最近 N 条
+(mem/get-messages-by-tokens buffer 4000)   ;; 按 token 限制
 (mem/count-messages buffer)
 (mem/count-tokens buffer)
 
@@ -246,183 +201,158 @@ clj-agent 记忆系统模块，提供 Store、SnapshotStore 和 Memory 组件的
 (mem/clear-messages buffer)
 ```
 
-### SemanticMemory（语义记忆）
-
-存储事实和知识。
+### 长期记忆
 
 ```clojure
-(def semantic (mem/create-semantic-memory store))
+;; 语义记忆（事实/知识）
+(def sem (mem/create-semantic-memory store))
+(mem/store-fact sem {:key "k" :value "v" :category "cat"})
+(mem/get-fact sem "k")
+(mem/query-facts sem {:category "cat"})
+(mem/set-profile sem "user-id" {:lang "zh"})
+(mem/get-profile sem "user-id")
 
-;; 存储事实
-(mem/store-fact semantic "user-123"
-                {:type :preference
-                 :content "用户偏好中文"})
+;; 情景记忆（事件/经历）
+(def epi (mem/create-episodic-memory store))
+(mem/store-episode epi {:action "search" :query "weather" :outcome :success})
+(mem/get-recent-episodes epi 5)
+(mem/get-successful-episodes epi)
+(mem/query-similar epi "搜索天气")
 
-;; 查询事实
-(mem/query-facts semantic "user-123" "语言偏好" {:top-k 5})
-
-;; 管理 Profile
-(mem/set-profile semantic "user-123" :preferences {:lang "zh" :theme "dark"})
-(mem/get-profile semantic "user-123" :preferences)
-(mem/update-profile semantic "user-123" :preferences {:theme "light"})
+;; 程序记忆（规则/技能）
+(def proc (mem/create-procedural-memory store))
+(mem/set-system-prompt proc "你是助手")
+(mem/get-system-prompt proc)
+(mem/add-rule proc (mem/create-rule {:id "r1" :content "用中文回答"}))
+(mem/get-active-rules proc)
+(mem/update-from-feedback proc {:type :positive :suggestion "继续这样"})
 ```
 
-### EpisodicMemory（情景记忆）
-
-存储成功经验和案例。
+### AgentMemory（统一封装）
 
 ```clojure
-(def episodic (mem/create-episodic-memory store))
+(def am (mem/create-agent-memory
+          {:context-store in-mem-store
+           :persistent-store sqlite-store}))
 
-;; 存储情景
-(mem/store-episode episodic
-                   {:situation "用户询问如何重构代码"
-                    :action "分步骤解释重构方法"
-                    :outcome :success
-                    :reasoning "降低复杂度，用户易于理解"})
+;; 状态管理
+(mem/save-state am {:context {...}})
+(mem/load-state am)
 
-;; 查询相似情景
-(mem/query-similar episodic "代码重构" {:top-k 3 :outcome-filter :success})
+;; 时间旅行
+(mem/go-back am)
+(mem/go-forward am)
+(mem/goto am 3)
+(mem/list-history am)
 
-;; 获取成功案例
-(mem/get-successful-episodes episodic {:limit 10})
+;; 分支
+(mem/create-branch am "experiment")
+(mem/switch-branch am "experiment")
+(mem/list-branches am)
+
+;; 知识库
+(mem/remember am {:type :fact :content "北京是首都"})
+(mem/recall am "首都")
+(mem/recall-by-type am :fact)
+(mem/search-knowledge am "首都" {:limit 5})
+(mem/forget am "fact-id")
+
+;; 消息管理
+(mem/add-message-to-memory am {:role "user" :content "你好"})
+(mem/get-messages-from-memory am)
+(mem/clear-messages-from-memory am)
+
+;; 归档
+(mem/archive-session! am)
+(mem/load-archived am "session-id")
+(mem/list-archived am)
 ```
 
-### ProceduralMemory（程序记忆）
-
-存储行为规则和系统提示词。
+### 检索策略
 
 ```clojure
-(def procedural (mem/create-procedural-memory store))
+;; 最近消息
+(def s (mem/create-recent-strategy 10))
 
-;; 系统提示词
-(mem/set-system-prompt procedural "user-123" "你是一个友好的助手")
-(mem/get-system-prompt procedural "user-123")
+;; 滑动窗口
+(def s (mem/create-window-strategy 20))
 
-;; 添加规则
-(mem/add-rule procedural "user-123"
-              {:condition "用户说中文"
-               :action "用中文回复"
-               :priority 5})
+;; Token 限制
+(def s (mem/create-token-limit-strategy 4000))
 
-;; 获取激活的规则
-(mem/get-active-rules procedural "user-123" context)
+;; 语义搜索
+(def s (mem/create-semantic-strategy))
 
-;; 从反馈学习
-(mem/update-from-feedback procedural "user-123"
-                          {:type :positive
-                           :context {:query "..."}
-                           :suggestion "继续使用这种方式"})
-```
-
-## 检索策略
-
-```clojure
-;; 最近消息策略
-(def strategy (mem/create-recent-strategy 10))
-
-;; 滑动窗口策略
-(def strategy (mem/create-window-strategy 20 :keep-system true))
-
-;; Token 限制策略
-(def strategy (mem/create-token-limit-strategy 4000))
-
-;; 语义搜索策略
-(def strategy (mem/create-semantic-strategy :top-k 5))
-
-;; 混合策略（推荐）
-(def strategy (mem/create-hybrid-strategy
-                {:recent-n 5
-                 :semantic-top-k 3
-                 :include-episodic true}))
+;; 混合策略
+(def s (mem/create-hybrid-strategy {:recent-n 5 :semantic-top-k 3}))
 
 ;; 执行检索
-(mem/retrieve strategy
-              {:buffer buffer :semantic semantic :episodic episodic}
-              "用户查询"
-              {:namespace "user-123"})
-;; => {:messages [...] :facts [...] :episodes [...] :rules [...]}
+(mem/retrieve s context query opts)
 ```
 
-## 便捷函数
-
-### create-memory-system
-
-一次性创建完整的记忆系统。
+### 便捷创建
 
 ```clojure
-;; 单 Store 模式
+;; 一键创建完整记忆系统
 (def system (mem/create-memory-system))
-(def system (mem/create-memory-system :store-type :sqlite
-                                       :store-opts {:db-path "data.db"}))
+(def system (mem/create-memory-system
+              :store-type :sqlite
+              :store-opts {:db-path "data.db"}))
+;; => {:store ... :snapshot-store ... :vector-store ... :embedder ...}
 
-;; 双 Store 模式
+;; 双 Store 模式（热+冷）
 (def system (mem/create-memory-system
               :store-type :memory
               :archive-store-type :sqlite
               :archive-store-opts {:db-path "archive.db"}))
-
-;; 返回
-;; {:store ...          ; Store 实例
-;;  :snapshot-store ... ; SnapshotStore 实例
-;;  :vector-store ...   ; VectorStore 实例
-;;  :embedder ...}      ; Embedder 实例
 ```
 
-## 类型检查
+### 类型检查
 
 ```clojure
-(mem/store? x)              ; 是否实现 IStore
-(mem/snapshot-store? x)     ; 是否实现 ISnapshotStore
+(mem/store? x)
+(mem/snapshot-store? x)
 (mem/conversation-buffer? x)
 (mem/semantic-memory? x)
 (mem/episodic-memory? x)
 (mem/procedural-memory? x)
 (mem/vector-store? x)
+(mem/embedding? x)
+(mem/snapshot-manager? x)
+(mem/agent-memory? x)
 ```
 
-## 文件结构
+---
+
+<a name="english"></a>
+
+## English
+
+### Overview
+
+`clj-agent-memory` is a standalone storage module (no internal module dependencies) providing:
+
+- **IKeyValueStore**: Unified KV protocol (InMemory / SQLite / PostgreSQL / Redis)
+- **ISnapshotStore**: State snapshot with versioning, branching, time-travel
+- **ConversationBuffer**: Short-term conversation buffering
+- **Long-term Memory**: Semantic (facts), Episodic (experiences), Procedural (rules)
+- **Vector Storage**: Embedding generation and vector search
+- **Retrieval Strategies**: Recent, Window, Token-limit, Semantic, Hybrid
+- **AgentMemory**: Unified wrapper combining all memory components
+
+### Architecture
 
 ```
-src/im/ttalk/memory/
-├── api.clj                      # 统一 API 入口
-├── protocol.clj                 # Memory 协议定义
-├── store/
-│   ├── in_memory.clj            # 内存存储
-│   ├── sqlite.clj               # SQLite 存储
-│   ├── redis.clj                # Redis 存储
-│   ├── postgresql.clj           # PostgreSQL 存储
-│   ├── vector_memory.clj        # 向量存储
-│   └── embedding.clj            # 嵌入生成器
-├── snapshot/
-│   ├── unified.clj              # 统一 SnapshotStore（推荐）
-│   ├── memory_saver.clj         # 内存 Saver（废弃）
-│   └── sqlite_saver.clj         # SQLite Saver（废弃）
-├── short_term/
-│   └── buffer.clj               # 对话缓冲区
-├── long_term/
-│   ├── semantic.clj             # 语义记忆
-│   ├── episodic.clj             # 情景记忆
-│   └── procedural.clj           # 程序记忆
-└── retrieval/
-    └── strategies.clj           # 检索策略
+Layer 1 (Store) → Layer 2 (Snapshot) → Layer 3 (Memory) → Layer 4 (AgentMemory)
 ```
 
-## 依赖
+### Key APIs
 
-```clojure
-;; deps.edn
-{:deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
-        org.clojure/clojure {:mvn/version "1.11.4"}
-        com.github.seancorfield/next.jdbc {:mvn/version "1.3.894"}
-        org.xerial/sqlite-jdbc {:mvn/version "3.43.0.0"}
-        com.taoensso/carmine {:mvn/version "3.3.2"}
-        cheshire/cheshire {:mvn/version "5.12.0"}}}
-```
+All accessed through `im.ttalk.agent.memory.api`:
 
-## 版本历史
-
-- **2.5.0** - 实现双 Store 架构的 UnifiedSnapshotStore，简化 API
-- **2.4.0** - 将 IStore/ISnapshotStore 协议移到 clj-agent-core，删除 IMemoryManager
-- **2.3.0** - 重构目录结构
-- **2.0.0** - 初始版本
+- Store: `create-in-memory-store`, `create-sqlite-store`, `kv-put`, `kv-get`
+- Snapshot: `create-memory-snapshot-store`, `snap-put`, `snap-get`, `snap-restore-to-step`
+- Buffer: `create-conversation-buffer`, `add-message`, `get-messages`
+- Long-term: `create-semantic-memory`, `store-fact`, `create-episodic-memory`, `store-episode`
+- AgentMemory: `create-agent-memory`, `save-state`, `load-state`, `remember`, `recall`
+- System: `create-memory-system` - One-call creation of complete memory system
