@@ -1,9 +1,10 @@
 {:paths ["modules/clj-agent-core/src"
           "modules/clj-agent-llm/src"
-          "modules/clj-agent-plugins/src"
+          "modules/clj-agent-plugin/src"
           "modules/clj-agent-rag/src"
           "modules/clj-agent-mcp/src"
-          "modules/clj-agent-memory/src"]
+          "modules/clj-agent-memory/src"
+          "modules/clj-agent-simpleagent/src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
         ;; LLM 依赖
@@ -33,8 +34,10 @@
  :aliases {:mcp-server {:main-opts ["-m" "im.ttalk.mcp.server.main"]}
 
           :test {:extra-paths ["modules/clj-agent-llm/test"
-                               "modules/clj-agent-plugins/test"
+                               "modules/clj-agent-plugin/test"
                                "modules/clj-agent-core/test"
-                               "modules/clj-agent-rag/test"]
+                               "modules/clj-agent-rag/test"
+                               "modules/clj-agent-memory/test"
+                               "modules/clj-agent-simpleagent/test"]
                  :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
                  :main-opts ["-m" "kaocha.runner"]}}}

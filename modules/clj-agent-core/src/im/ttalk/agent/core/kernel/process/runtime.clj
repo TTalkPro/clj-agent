@@ -53,6 +53,7 @@
                                                    put! close! alt! timeout]]
             [im.ttalk.agent.core.kernel.process.event :as event]
             [im.ttalk.agent.core.kernel.process.step :as step]
+            [im.ttalk.agent.core.kernel.process.snapshot-manager :as sm]
             [im.ttalk.agent.core.kernel.context :as ctx]))
 
 (def ^:private default-timeout-ms
@@ -85,7 +86,7 @@
 
    返回: step-runtime map（含 state atom 和 worker handle）"
   [step-id step-spec input-chan event-chan context in-flight on-pause on-error
-   & {:keys [initial-step-state active-count on-step-done]}]
+   & {:keys [initial-step-state active-count on-step-done on-step-checkpoint]}]
   (let [init-fn (:init step-spec)
         config (or (:config step-spec) {})
         initial-state (if initial-step-state
@@ -176,11 +177,17 @@
                                   (swap! in-flight + (dec (count events)))
                                   ;; 先 dec active-count 再分发事件，避免竞态
                                   (dec-active!)
+                                  ;; Checkpointer: per-step checkpoint
+                                  (when on-step-checkpoint
+                                    (on-step-checkpoint step-id))
                                   (doseq [evt events]
                                     (>! event-chan evt)))
                                 (do
                                   (swap! in-flight dec)
-                                  (dec-active!)))))
+                                  (dec-active!)
+                                  ;; Checkpointer: per-step checkpoint
+                                  (when on-step-checkpoint
+                                    (on-step-checkpoint step-id))))))
 
                           ;; 暂停
                           (:pause result)
@@ -286,6 +293,51 @@
          (recur))))))
 
 ;;; ============================================================
+;;; Checkpointer 辅助
+;;; ============================================================
+
+(defn- capture-snapshot-from-atoms
+  "从运行时 atoms 捕获当前快照（纯数据）
+
+   参数:
+   - process-spec: process 定义
+   - steps:        {step-id step-runtime}
+   - context-atom: context atom
+   - extra:        额外合并的字段
+
+   返回: 纯数据 snapshot map"
+  [process-spec steps context-atom extra]
+  (let [step-states (reduce-kv
+                      (fn [acc step-id step-rt]
+                        (let [state-data @(:state-atom step-rt)]
+                          (assoc acc step-id
+                                 {:state (:state state-data)
+                                  :activation-count (:activation-count state-data)})))
+                      {}
+                      steps)]
+    (merge {:process-name (:name process-spec)
+            :status       :running
+            :paused-step  nil
+            :pause-reason nil
+            :context      @context-atom
+            :step-states  step-states
+            :created-at   (System/currentTimeMillis)}
+           extra)))
+
+(defn- do-checkpoint!
+  "执行 checkpoint 保存（静默忽略异常）
+
+   参数:
+   - checkpointer: IProcessSnapshotManager 实例
+   - thread-id:    线程标识
+   - snapshot:     快照数据
+   - metadata:     元数据"
+  [checkpointer thread-id snapshot metadata]
+  (try
+    (sm/save-checkpoint checkpointer thread-id snapshot metadata)
+    (catch Exception _e nil)))
+
+;;; ============================================================
 ;;; Process 生命周期
 ;;; ============================================================
 
@@ -297,11 +349,18 @@
    参数:
    - process-spec: 编译后的 process 定义
    - opts:        选项 map
-     :context      Context 对象（可选）
-     :timeout-ms   全局超时毫秒（默认 60000）
-     :step-states  恢复的 step 状态 {step-id {:state any :activation-count int}}
-     :on-quiescent 静止点回调 (fn [snapshot] ...)
-                   当所有并发 step 执行完毕时触发，snapshot 格式同 create-process-snapshot
+     :context       Context 对象（可选）
+     :timeout-ms    全局超时毫秒（默认 60000）
+     :step-states   恢复的 step 状态 {step-id {:state any :activation-count int}}
+     :on-quiescent  静止点回调 (fn [snapshot] ...)
+                    当所有并发 step 执行完毕时触发，snapshot 格式同 create-process-snapshot
+     :checkpointer  IProcessSnapshotManager 实例（可选）
+                    提供时自动在关键节点保存检查点
+     :thread-id     执行线程标识（可选，默认自动生成 UUID）
+     :checkpoint-policy 检查点策略（可选，默认 :on-pause-only）
+                    :every-step    每个 step 完成时保存
+                    :on-pause-only 仅暂停/完成时保存
+                    :on-quiescent  暂停/完成/静止点时保存
 
    返回:
    runtime map，包含 result-chan（完成时放入结果）
@@ -318,6 +377,11 @@
         context-atom (atom (or (:context opts) (ctx/create)))
         timeout-ms (or (:timeout-ms opts) default-timeout-ms)
         on-quiescent (:on-quiescent opts)
+        ;; Checkpointer 支持
+        checkpointer (:checkpointer opts)
+        thread-id (or (:thread-id opts)
+                      (when checkpointer (str (java.util.UUID/randomUUID))))
+        checkpoint-policy (or (:checkpoint-policy opts) :on-pause-only)
         event-chan (chan 256)
         control-chan (chan 16)
         result-chan (chan 1)
@@ -326,9 +390,11 @@
         error-atom (atom nil)
         paused-step-atom (atom nil)
         pause-reason-atom (atom nil)
+        ;; steps-ref 用于 on-quiescent 和 checkpointer
+        need-steps-ref (or on-quiescent checkpointer)
         ;; on-quiescent 支持
         active-count (when on-quiescent (atom 0))
-        steps-ref (when on-quiescent (atom nil))
+        steps-ref (when need-steps-ref (atom nil))
         on-step-done (when on-quiescent
                        (fn [_step-id]
                          (when (and (= :running @status)
@@ -342,19 +408,44 @@
                                               {:state (:state sd)
                                                :activation-count (:activation-count sd)})))
                                    {}
-                                   steps)]
-                             (try
-                               (on-quiescent {:process-name (:name process-spec)
-                                              :reason       :quiescent
-                                              :status       :running
-                                              :step-states  snapshot
-                                              :context      @context-atom
-                                              :created-at   (System/currentTimeMillis)})
-                               (catch Exception _e nil))))))
+                                   steps)
+                                 quiescent-snapshot {:process-name (:name process-spec)
+                                                    :reason       :quiescent
+                                                    :status       :running
+                                                    :step-states  snapshot
+                                                    :context      @context-atom
+                                                    :created-at   (System/currentTimeMillis)}]
+                             (try (on-quiescent quiescent-snapshot)
+                                  (catch Exception _e nil))
+                             ;; Checkpointer: on-quiescent 策略时保存
+                             (when (and checkpointer (= checkpoint-policy :on-quiescent))
+                               (do-checkpoint! checkpointer thread-id quiescent-snapshot
+                                               {:reason :quiescent
+                                                :created-at (System/currentTimeMillis)}))))))
+
+        ;; Checkpointer: per-step 回调（:every-step 策略）
+        on-step-checkpoint (when (and checkpointer (= checkpoint-policy :every-step))
+                             (fn [step-id]
+                               (when steps-ref
+                                 (let [snapshot (capture-snapshot-from-atoms
+                                                  process-spec @steps-ref context-atom
+                                                  {:status :running})]
+                                   (do-checkpoint! checkpointer thread-id snapshot
+                                                   {:step step-id
+                                                    :reason :step-done
+                                                    :created-at (System/currentTimeMillis)})))))
 
         ;; 完成回调
         on-idle (fn []
                   (when (compare-and-set! status :running :completed)
+                    ;; Checkpointer: 完成时保存
+                    (when (and checkpointer steps-ref)
+                      (let [snapshot (capture-snapshot-from-atoms
+                                      process-spec @steps-ref context-atom
+                                      {:status :completed})]
+                        (do-checkpoint! checkpointer thread-id snapshot
+                                        {:reason :completed
+                                         :created-at (System/currentTimeMillis)})))
                     (put! result-chan
                            {:status       :completed
                             :context      @context-atom
@@ -367,6 +458,17 @@
                    (when (compare-and-set! status :running :paused)
                      (reset! paused-step-atom step-id)
                      (reset! pause-reason-atom reason)
+                     ;; Checkpointer: 暂停时保存
+                     (when (and checkpointer steps-ref)
+                       (let [snapshot (capture-snapshot-from-atoms
+                                        process-spec @steps-ref context-atom
+                                        {:status :paused
+                                         :paused-step step-id
+                                         :pause-reason reason})]
+                         (do-checkpoint! checkpointer thread-id snapshot
+                                         {:step step-id
+                                          :reason :paused
+                                          :created-at (System/currentTimeMillis)})))
                      ;; 触发 on-quiescent（reason :paused）
                      (when (and on-quiescent steps-ref)
                        (let [steps @steps-ref
@@ -430,6 +532,7 @@
                                   context-atom in-flight on-pause on-error
                                   :initial-step-state saved-state
                                   :active-count active-count
+                                  :on-step-checkpoint on-step-checkpoint
                                   :on-step-done on-step-done)]
                     (assoc acc step-id step-rt)))
                 {}
@@ -458,7 +561,9 @@
                  :paused-step  paused-step-atom
                  :pause-reason pause-reason-atom
                  :result-chan  result-chan
-                 :router       router}]
+                 :router       router
+                 :thread-id   thread-id
+                 :checkpointer checkpointer}]
 
     ;; 放入初始事件
     (let [initial-events (:initial-events process-spec)]

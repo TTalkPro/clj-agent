@@ -1,14 +1,7 @@
 {:paths ["src"]
 
- :deps {org.clojure/clojure {:mvn/version "1.11.4"}
-
-        ;; HTTP 客户端
-        clj-http/clj-http {:mvn/version "3.12.3"}
-
-        ;; JSON
+ :deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
         cheshire/cheshire {:mvn/version "5.12.0"}
-
-        ;; 日志
         com.taoensso/timbre {:mvn/version "6.3.0"}}
 
  :aliases
@@ -17,10 +10,5 @@
                      cider/cider-nrepl {:mvn/version "0.30.0"}}}
 
   :test {:extra-paths ["test"]
-         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}
-                      lambdaisland/kaocha-cloverage {:mvn/version "1.1.89"}}
-         :main-opts ["-m" "kaocha.runner"]}
-
-  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
-                 slipset/deps-deploy {:mvn/version "0.2.2"}}
-          :ns-default build}}}
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}

@@ -3,4 +3,6 @@
           :test-paths ["modules/clj-agent-llm/test"
                        "modules/clj-agent-tools/test"
                        "modules/clj-agent-core/test"
-                       "modules/clj-agent-rag/test"]}]}
+                       "modules/clj-agent-rag/test"
+                       "modules/clj-agent-memory/test"
+                       "modules/clj-agent-simpleagent/test"]}]}
