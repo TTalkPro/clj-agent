@@ -993,10 +993,8 @@
                                     (swap! quiescent-count inc))})]
       (is (= :completed (:status result)))
       (is (= 3 (ctx/get-var (:context result) :final)))
-      ;; step-1/step-2 完成后触发（step-3 是最后一步，不触发）
-      ;; 由于 go-loop 调度时序，至少触发 1 次
-      (is (pos? @quiescent-count))
-      (is (<= @quiescent-count 2)))))
+      ;; step-1 和 step-2 完成后各触发一次（step-3 是最后一步，不触发）
+      (is (= 2 @quiescent-count)))))
 
 (deftest runtime-on-quiescent-not-called-without-option-test
   (testing "未设置 on-quiescent 时不影响正常执行"

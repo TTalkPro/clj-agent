@@ -135,12 +135,19 @@
                           (catch Exception e
                             {:error (.getMessage e)})))]
                   ;; 等待执行结果
-                  (let [exec-result (<! result-ch)]
+                  (let [exec-result (<! result-ch)
+                        ;; active-count 辅助：dec 并检查是否触发 on-step-done
+                        dec-active! (fn []
+                                      (when active-count
+                                        (let [n (swap! active-count dec)]
+                                          (when (and (zero? n) on-step-done)
+                                            (on-step-done step-id)))))]
                     (cond
                       ;; 执行异常
                       (:error exec-result)
                       (do
                         (swap! in-flight dec)
+                        (dec-active!)
                         (on-error step-id (:error exec-result)))
 
                       ;; 正常结果
@@ -166,12 +173,14 @@
                             (let [events (or (:events result) [])]
                               (if (seq events)
                                 (do
-                                  ;; 新事件产出：先 dec 自己的 in-flight，再 inc 新事件的
                                   (swap! in-flight + (dec (count events)))
+                                  ;; 先 dec active-count 再分发事件，避免竞态
+                                  (dec-active!)
                                   (doseq [evt events]
                                     (>! event-chan evt)))
-                                ;; 无事件产出
-                                (swap! in-flight dec))))
+                                (do
+                                  (swap! in-flight dec)
+                                  (dec-active!)))))
 
                           ;; 暂停
                           (:pause result)
@@ -180,6 +189,7 @@
                               (swap! state-atom assoc :state
                                      (get-in result [:pause :state])))
                             (swap! in-flight dec)
+                            (dec-active!)
                             (on-pause step-id
                                       (get-in result [:pause :reason])
                                       @state-atom))
@@ -188,6 +198,7 @@
                           (:error result)
                           (do
                             (swap! in-flight dec)
+                            (dec-active!)
                             (on-error step-id (get-in result [:error :reason])))
 
                           ;; 无事件产出（正常结束）
@@ -203,12 +214,8 @@
                                                    (:variables (:context result)))
                                            (assoc :messages (:messages (:context result)))
                                            (assoc :history (:history (:context result)))))))
-                            (swap! in-flight dec)))))
-                    ;; active-count 跟踪：step 执行完毕
-                    (when active-count
-                      (let [n (swap! active-count dec)]
-                        (when (and (zero? n) on-step-done)
-                          (on-step-done step-id)))))))
+                            (swap! in-flight dec)
+                            (dec-active!))))))))
                 ;; 未激活 → dec in-flight（输入已收集但 step 未执行）
                 (swap! in-flight dec))
             (recur))))]
