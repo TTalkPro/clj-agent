@@ -1,5 +1,5 @@
 (ns kernel-test
-  "Kernel 功能测试 - 使用 GLM-4 Anthropic 兼容接口
+  "Kernel 功能测试 - 使用 GLM-4.7 Anthropic 兼容接口
 
    运行: clojure -M -e \"(load-file \\\"examples/kernel_test.clj\\\")\"
 
@@ -8,6 +8,7 @@
             [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
+            [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]))
 
 ;;; ============================================================
@@ -46,7 +47,8 @@
   (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
       (kernel/add-service service)
       (kernel/add-plugin test-tools)
-      (kernel/add-filter filters/logging-filter)
+      (kernel/add-filter filters/logging-pre-filter)
+      (kernel/add-filter filters/logging-post-filter)
       (kernel/build-kernel)))
 
 (def quiet-kernel
@@ -92,59 +94,65 @@
   (println "  get-service:" (boolean (kernel/get-service app-kernel)))
   (println "  ✓ Query API 正常"))
 
-(defn test-invoke []
-  (separator "测试 2: invoke 函数调用（经过 Filter）")
-  (let [result (kernel/invoke app-kernel :get-weather {:city "深圳"})]
-    (println "  结果:" result)
+(defn test-invoke-tool []
+  (separator "测试 2: invoke-tool 函数调用（经过 Filter）")
+  (let [result (kernel/invoke-tool app-kernel :get-weather {:city "深圳"} (ctx/create))]
+    (println "  结果:" (:value result))
     (println "  ✓ 函数调用成功")))
 
-(defn test-single-turn-no-tools []
-  (separator "测试 3: 单轮对话（无工具）")
+(defn test-invoke-chat []
+  (separator "测试 3: invoke-chat 单轮对话（无工具）")
   (safe-call "单轮对话"
     (fn []
-      (let [r (kernel/invoke-chat quiet-kernel
-                [{:role "user" :content "你好，用一句话介绍自己"}] {})]
-        (println "  回复:" (:text r))))))
+      (let [{:keys [response]} (kernel/invoke-chat quiet-kernel
+                                 [{:role "user" :content "你好，用一句话介绍自己"}] {})]
+        (println "  回复:" (:text response))))))
 
-(defn test-multi-turn-no-tools []
-  (separator "测试 4: 多轮对话（无工具）")
+(defn test-multi-turn-invoke-chat []
+  (separator "测试 4: invoke-chat 多轮对话（无工具）")
   (safe-call "多轮对话"
     (fn []
-      (let [r1 (kernel/invoke-chat quiet-kernel
-                 [{:role "user" :content "我叫小明，记住。简短回复。"}] {})]
-        (println "  轮次1:" (:text r1))
+      (let [{:keys [response]} (kernel/invoke-chat quiet-kernel
+                                 [{:role "user" :content "我叫小明，记住。简短回复。"}] {})]
+        (println "  轮次1:" (:text response))
         (wait 2000)
-        (let [r2 (kernel/invoke-chat quiet-kernel
-                   [{:role "user" :content "我叫小明，记住。简短回复。"}
-                    {:role "assistant" :content (:text r1)}
-                    {:role "user" :content "我叫什么名字？直接回答。"}] {})]
-          (println "  轮次2:" (:text r2)))))))
+        (let [{:keys [response]} (kernel/invoke-chat quiet-kernel
+                                   [{:role "user" :content "我叫小明，记住。简短回复。"}
+                                    {:role "assistant" :content (:text response)}
+                                    {:role "user" :content "我叫什么名字？直接回答。"}] {})]
+          (println "  轮次2:" (:text response)))))))
 
-(defn test-single-turn-with-tools []
-  (separator "测试 5: 单轮对话 + 工具调用")
+(defn test-invoke-with-tools []
+  (separator "测试 5: invoke 工具调用循环")
   (safe-call "工具调用"
     (fn []
-      (let [r (kernel/invoke-chat-with-tools app-kernel
-                [{:role "user" :content "北京天气怎么样？"}] {})]
-        (println "  text:" (:text r))
+      (let [result (kernel/invoke app-kernel
+                     [{:role "user" :content "北京天气怎么样？"}] {})]
+        (println "  text:" (get-in result [:response :text]))
         (println "  tools:" (mapv (fn [tc] [(:name tc) (:result tc)])
-                                  (:tool-calls-made r)))))))
+                                  (:tool-calls-made result)))))))
 
-(defn test-multi-turn-with-tools []
-  (separator "测试 6: 多轮对话 + 工具调用")
-  (safe-call "轮次1-天气"
+(defn test-invoke-with-context []
+  (separator "测试 6: invoke 带 context 累积")
+  (safe-call "带 context 的工具调用"
     (fn []
-      (let [r (kernel/invoke-chat-with-tools quiet-kernel
-                [{:role "user" :content "上海天气"}] {})]
-        (println "  text:" (:text r))
-        (println "  tools:" (mapv :name (:tool-calls-made r))))))
-  (wait 3000)
-  (safe-call "轮次2-计算"
+      (let [my-ctx (ctx/create {:user "test-user"})
+            result (kernel/invoke quiet-kernel
+                     [{:role "user" :content "现在几点了？"}]
+                     {:context my-ctx})]
+        (println "  text:" (get-in result [:response :text]))
+        (println "  tools:" (mapv :name (:tool-calls-made result)))
+        (println "  context.messages count:" (count (ctx/get-messages (:context result))))
+        (println "  context.history count:" (count (ctx/get-history (:context result))))))))
+
+(defn test-invoke-with-system-prompts []
+  (separator "测试 7: invoke 带 system-prompts")
+  (safe-call "system-prompts"
     (fn []
-      (let [r (kernel/invoke-chat-with-tools quiet-kernel
-                [{:role "user" :content "计算 (+ 100 200)"}] {})]
-        (println "  text:" (:text r))
-        (println "  tools:" (mapv :name (:tool-calls-made r)))))))
+      (let [result (kernel/invoke quiet-kernel
+                     [{:role "user" :content "你是谁？用一句话回答。"}]
+                     {:system-prompts [{:role "system" :content "你是一个数学助手，只回答数学问题。"}]})]
+        (println "  text:" (get-in result [:response :text]))))))
 
 ;;; ============================================================
 ;;; 运行
@@ -153,18 +161,20 @@
 (defn run-all []
   (println)
   (println "╔═══════════════════════════════════════════════════════════╗")
-  (println "║         Kernel 功能测试 (GLM-4 Anthropic 兼容)          ║")
+  (println "║       Kernel 功能测试 (GLM-4.7 Anthropic 兼容)          ║")
   (println "╚═══════════════════════════════════════════════════════════╝")
 
   (test-query-api)
-  (test-invoke)
-  (test-single-turn-no-tools)
+  (test-invoke-tool)
+  (test-invoke-chat)
   (wait 3000)
-  (test-multi-turn-no-tools)
+  (test-multi-turn-invoke-chat)
   (wait 3000)
-  (test-single-turn-with-tools)
+  (test-invoke-with-tools)
   (wait 3000)
-  (test-multi-turn-with-tools)
+  (test-invoke-with-context)
+  (wait 3000)
+  (test-invoke-with-system-prompts)
 
   (separator "完成"))
 

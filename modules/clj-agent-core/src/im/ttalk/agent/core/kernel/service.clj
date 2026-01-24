@@ -34,7 +34,8 @@
   (let [tool-choice (:tool-choice opts)
         ;; :none 时不传 tools，让 LLM 纯文本回复
         tools (when (not= tool-choice :none)
-                (:tools opts))]
+                (:tools opts))
+        system-prompt (:system-prompt opts)]
     (cond-> config
       (seq tools)
       (assoc :tools tools)
@@ -43,7 +44,9 @@
              (case tool-choice
                :auto {:type "auto"}
                :required {:type "any"}
-               tool-choice)))))
+               tool-choice))
+      system-prompt
+      (assoc :system-prompt system-prompt))))
 
 ;;; ============================================================
 ;;; Service 工厂

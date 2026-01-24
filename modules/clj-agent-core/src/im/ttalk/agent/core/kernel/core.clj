@@ -1,20 +1,19 @@
 (ns im.ttalk.agent.core.kernel.core
   "Kernel 核心 - 中央编排器
 
-   参考 beamai_kernel.erl 设计，Kernel 提供三类 API：
+   参考 beamai_kernel 设计，Kernel 提供三类 API：
 
    Build API - 构建 Kernel:
      (-> (create-kernel-builder)
          (add-plugin weather-plugin)
          (add-service my-service)
-         (add-filter logging-filter)
+         (add-filter logging-pre-filter)
          (build-kernel))
 
    Invoke API - 调用函数/LLM:
-     (invoke kernel :get-weather {:city \"北京\"})
-     (invoke kernel :get-weather {:city \"北京\"} context)
+     (invoke-tool kernel :get-weather {:city \"北京\"} context)
      (invoke-chat kernel messages opts)
-     (invoke-chat-with-tools kernel messages opts)
+     (invoke kernel messages opts)
 
    Query API - 查询 Kernel 状态:
      (get-tools kernel)
@@ -26,11 +25,12 @@
      {:chat-fn           (fn [messages opts] -> {:text \"...\" :tool-calls [...] :assistant-msg {...}})
       :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
 
-   其中:
-   - chat-fn: 调用 LLM，返回归一化响应
-   - build-result-msgs: 将 assistant 消息和工具执行结果转为消息列表，
-     用于追加到对话历史后再次调用 LLM"
-  (:require [im.ttalk.agent.core.kernel.plugin :as kp]
+   返回值格式:
+     invoke-tool: {:value v :context ctx}
+     invoke-chat: {:response r :context ctx}
+     invoke:      {:response r :context ctx :tool-calls-made [...]}"
+  (:require [clojure.string]
+            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]))
 
@@ -88,16 +88,17 @@
 (defn add-filter
   "添加 Filter 到 builder
 
-   Filter 签名: (fn [context next-fn] -> result)
+   Filter 是一个 map（由 filters/create-filter 创建）：
+   {:name :filter-name :type :pre-invocation :handler fn :priority 0}
 
    参数:
-   - builder:   kernel builder
-   - filter-fn: filter 函数
+   - builder:    kernel builder
+   - filter-def: filter 定义 map
 
    返回:
    更新后的 builder"
-  [builder filter-fn]
-  (update builder :filters conj filter-fn))
+  [builder filter-def]
+  (update builder :filters conj filter-def))
 
 ;;; ============================================================
 ;;; 构建 Kernel
@@ -156,7 +157,6 @@
 
    支持:
    - 关键字或字符串名称
-   - \"plugin.func\" 格式（从指定 Plugin 查找）
    - 短名格式（遍历所有 Plugin）
 
    参数:
@@ -181,241 +181,297 @@
   (vec (mapcat kp/list-function-names (:plugins kernel))))
 
 ;;; ============================================================
-;;; Invoke API - invoke（函数调用，经过 Filter 管道）
+;;; Invoke API - invoke-tool（函数调用，经过 Filter 管道）
 ;;; ============================================================
 
-(defn- run-invoke-pipeline
-  "执行函数调用管道：Filter 链 → 函数执行
+(defn- build-func-def
+  "构建传给 filter 的函数定义信息"
+  [fn-name tool-var]
+  (let [schema (when tool-var
+                 (:tool/schema (meta tool-var)))]
+    {:name      fn-name
+     :schema    schema
+     :sensitive (when tool-var
+                  (boolean (:tool/sensitive (meta tool-var))))}))
 
-   参数:
-   - kernel:  Kernel 实例
-   - fn-name: 函数名（keyword）
-   - args:    参数 map
-   - context: Context 对象
+(defn invoke-tool
+  "调用 Kernel 中注册的函数（经过 pre/post invocation filter 管道）
 
-   返回:
-   {:success bool :result any :error string :context ctx}"
-  [kernel fn-name args context]
-  (let [filter-fns (:filters kernel)
-        ;; 最终执行函数
-        exec-fn (fn [filter-ctx]
-                  (if-let [{:keys [plugin]} (find-function kernel fn-name)]
-                    (kp/execute-tool plugin fn-name args (:context filter-ctx))
-                    {:success false
-                     :error (str "函数未找到: " fn-name)}))
-        ;; 构建 filter context
-        filter-ctx (ctx/create-invocation-context
-                     (ctx/create-tool-context fn-name args nil)
-                     kernel
-                     (ctx/get-history context)
-                     context)]
-    (if (seq filter-fns)
-      (let [chain (filters/build-filter-chain filter-fns exec-fn)]
-        (chain filter-ctx))
-      (exec-fn filter-ctx))))
-
-(defn invoke
-  "调用 Kernel 中注册的函数（经过 Filter 管道）
-
-   执行流程：查找函数 → Filter 链 → 函数执行 → 返回结果。
-   等同于 Erlang beamai_kernel:invoke/3,4。
+   执行流程：
+   1. 查找函数
+   2. apply-pre-invocation-filters → 可修改 args/context 或跳过
+   3. 执行函数
+   4. apply-post-invocation-filters → 可修改 result/context
 
    参数:
    - kernel:  Kernel 实例
    - fn-name: 函数名（关键字或字符串）
    - args:    参数 map
-   - context: (可选) Context 对象
+   - context: Context 对象
 
    返回:
-   {:success bool :result any :error string :context ctx}"
-  ([kernel fn-name args]
-   (invoke kernel fn-name args (ctx/create)))
-  ([kernel fn-name args context]
-   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-     (run-invoke-pipeline kernel fn-key args context))))
+   {:value result :context updated-ctx}
+
+   错误:
+   抛 ex-info"
+  [kernel fn-name args context]
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))
+        found (find-function kernel fn-key)
+        _ (when-not found
+            (throw (ex-info (str "函数未找到: " fn-key)
+                            {:fn-name fn-key
+                             :available (list-functions kernel)})))
+        {:keys [plugin tool-var]} found
+        func-def (build-func-def fn-key tool-var)
+        all-filters (:filters kernel)
+
+        ;; 1. Pre-invocation filters
+        pre-result (filters/apply-pre-invocation-filters
+                     all-filters func-def args context)]
+
+    (cond
+      ;; Filter 跳过执行
+      (contains? pre-result :skip)
+      {:value (:skip pre-result) :context context}
+
+      ;; Filter 报错
+      (contains? pre-result :error)
+      (throw (ex-info (str "Filter 错误: " (:error pre-result))
+                      {:fn-name fn-key :error (:error pre-result)}))
+
+      ;; 正常继续
+      :else
+      (let [{:keys [args context]} (:ok pre-result)
+            ;; 2. 执行函数（带超时支持）
+            timeout-ms (:timeout-ms pre-result)
+            exec-result (try
+                          (let [do-exec #(kp/execute-tool plugin fn-key args context)]
+                            (if timeout-ms
+                              (let [result (deref (future (do-exec))
+                                                  timeout-ms ::timeout)]
+                                (if (= result ::timeout)
+                                  {:success false :error (str "工具调用超时（" timeout-ms "ms）")}
+                                  result))
+                              (do-exec)))
+                          (catch Exception e
+                            {:success false :error (.getMessage e)}))
+            ;; 提取结果
+            result-value (if (:success exec-result)
+                           (:result exec-result)
+                           (str "错误: " (:error exec-result)))
+            result-ctx (or (:context exec-result) context)
+
+            ;; 3. Post-invocation filters
+            post-result (filters/apply-post-invocation-filters
+                          all-filters func-def args result-value result-ctx)]
+
+        (cond
+          (contains? post-result :error)
+          (throw (ex-info (str "Post-filter 错误: " (:error post-result))
+                          {:fn-name fn-key :error (:error post-result)}))
+
+          :else
+          (let [{:keys [result context]} (:ok post-result)]
+            {:value result :context context}))))))
 
 ;;; ============================================================
-;;; Invoke API - invoke-chat（纯 LLM 调用）
+;;; Invoke API - invoke-chat（纯 LLM 调用，带 pre/post chat filter）
 ;;; ============================================================
 
 (defn invoke-chat
-  "发送 Chat Completion 请求（不含工具调用循环）
+  "发送 Chat Completion 请求（带 pre/post chat filter，不含工具调用循环）
 
-   纯 LLM 调用，不自动执行工具。
-   等同于 Erlang beamai_kernel:invoke_chat/3。
+   执行流程：
+   1. apply-pre-chat-filters → 可修改 messages/context
+   2. 调用 LLM (chat-fn)
+   3. apply-post-chat-filters → 可修改 response/context
 
    参数:
    - kernel:   Kernel 实例（需已配置 service）
    - messages: 消息列表
    - opts:     选项 map（传递给 service 的 chat-fn）
-     {:tools       工具 schema 列表（可选，默认不传）
-      :tool-choice :auto/:none/:required（可选）}
+     {:tools       工具 schema 列表（可选）
+      :tool-choice :auto/:none/:required（可选）
+      :context     Context 对象（可选）}
 
    返回:
-   {:text \"...\" :tool-calls [...] :assistant-msg {...}} 或抛出异常"
+   {:response {:text \"...\" :tool-calls [...] :assistant-msg {...}}
+    :context  updated-ctx}"
   [kernel messages opts]
-  (let [service (:service kernel)]
-    (when-not service
-      (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
-                      {:kernel-keys (keys kernel)})))
-    (let [chat-fn (:chat-fn service)]
-      (when-not chat-fn
-        (throw (ex-info "Service 缺少 :chat-fn"
-                        {:service-keys (keys service)})))
-      (chat-fn messages opts))))
+  (let [service (:service kernel)
+        _ (when-not service
+            (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
+                            {:kernel-keys (keys kernel)})))
+        chat-fn (:chat-fn service)
+        _ (when-not chat-fn
+            (throw (ex-info "Service 缺少 :chat-fn"
+                            {:service-keys (keys service)})))
+        context (or (:context opts) (ctx/create))
+        all-filters (:filters kernel)
+        chat-opts (dissoc opts :context)
+
+        ;; 1. Pre-chat filters
+        pre-result (filters/apply-pre-chat-filters all-filters messages context)]
+
+    (cond
+      (contains? pre-result :error)
+      (throw (ex-info (str "Pre-chat filter 错误: " (:error pre-result))
+                      {:error (:error pre-result)}))
+
+      :else
+      (let [{:keys [messages context]} (:ok pre-result)
+            ;; 2. 调用 LLM
+            response (chat-fn messages chat-opts)
+            ;; 3. Post-chat filters
+            post-result (filters/apply-post-chat-filters all-filters response context)]
+
+        (cond
+          (contains? post-result :error)
+          (throw (ex-info (str "Post-chat filter 错误: " (:error post-result))
+                          {:error (:error post-result)}))
+
+          :else
+          (let [{:keys [response context]} (:ok post-result)]
+            {:response response :context context}))))))
 
 ;;; ============================================================
-;;; Invoke API - invoke-chat-with-tools（工具调用循环）
+;;; Invoke API - invoke（工具调用循环，主入口）
 ;;; ============================================================
 
 (def ^:private default-max-iterations
   "工具调用循环默认最大次数"
   10)
 
-(defn- execute-tool-calls
-  "批量执行工具调用（经过 Filter 链），传递 context
+(defn- encode-tool-result
+  "将工具执行结果编码为 tool message"
+  [tool-call result-value]
+  {:role         "tool"
+   :tool_call_id (:id tool-call)
+   :content      (if (string? result-value)
+                   result-value
+                   (pr-str result-value))})
 
-   使用 reduce 使 context 在多个工具调用间逐步传递。
+(defn invoke
+  "工具调用循环主入口
 
-   参数:
-   - kernel:     Kernel 实例
-   - tool-calls: [{:id \"...\" :name \"...\" :input {...}}]
-   - messages:   当前消息历史
-   - context:    Context 对象
+   组合 context.messages + 新 messages，驱动 LLM + 工具调用循环，
+   直到 LLM 返回文本响应或达到最大迭代次数。
 
-   返回:
-   {:results [{:tool-id ... :name ... :result ... :error ... :context ...} ...]
-    :context <updated-context>}"
-  [kernel tool-calls messages context]
-  (let [filter-fns (:filters kernel)]
-    (reduce
-      (fn [{:keys [results ctx]} tc]
-        (let [fn-name (keyword (:name tc))
-              args    (:input tc)
-              tool-id (:id tc)
-              ;; 最终执行函数
-              exec-fn (fn [filter-ctx]
-                        (if-let [{:keys [plugin]} (find-function kernel fn-name)]
-                          (let [{:keys [success result error context]}
-                                (kp/execute-tool plugin fn-name args (:context filter-ctx))]
-                            (cond-> {:tool-id tool-id
-                                     :name    fn-name
-                                     :result  (when success result)
-                                     :error   error}
-                              context (assoc :context context)))
-                          {:tool-id tool-id
-                           :name    fn-name
-                           :result  nil
-                           :error   (str "函数未找到: " (name fn-name))}))
-              ;; 构建 filter context
-              filter-ctx (ctx/create-invocation-context
-                           (ctx/create-tool-context fn-name args tool-id)
-                           kernel
-                           messages
-                           ctx)
-              ;; 执行（经过 filter 链或直接执行）
-              result (if (seq filter-fns)
-                       (let [chain (filters/build-filter-chain filter-fns exec-fn)]
-                         (chain filter-ctx))
-                       (exec-fn filter-ctx))
-              ;; 提取更新后的 context
-              new-ctx (or (:context result) ctx)]
-          {:results (conj results result)
-           :ctx     new-ctx}))
-      {:results [] :ctx context}
-      tool-calls)))
-
-(defn- tool-calling-loop
-  "工具调用循环
-
-   LLM 返回 tool_calls 时自动执行对应函数，
-   将结果拼入消息后再次请求 LLM，
-   循环直到 LLM 返回文本响应或达到最大迭代次数。
+   执行流程:
+   1. 组合 context.messages + 新 messages
+   2. 记录新消息到 context（track-message）
+   3. tool-calling-loop:
+      a. system-prompts ++ conversation-msgs → LLM（经过 pre/post chat filter）
+      b. 如果返回 tool_calls:
+         - 逐个执行 invoke-tool（经过 pre/post invocation filter）
+         - track-message: assistant msg + tool result msgs
+         - 继续循环
+      c. 如果返回文本:
+         - track-message: assistant msg
+         - 返回结果
 
    参数:
-   - kernel:   Kernel 实例
-   - messages: 消息列表
-   - opts:     chat 选项
-   - max-iter: 剩余最大迭代次数
-   - context:  Context 对象
+   - kernel:   Kernel 实例（需注册函数和 LLM 服务）
+   - messages: 新消息列表
+   - opts:     选项 map
+     {:context          Context 对象（可选，默认创建空 Context）
+      :system-prompts   系统提示消息列表（每次 LLM 调用前拼接）
+      :max-iterations   最大循环次数（默认 10）
+      :tool-choice      :auto/:none/:required（默认 :auto）}
 
    返回:
-   {:text \"...\" :tool-calls-made [...] :raw-response ... :context ctx}"
-  [kernel messages opts max-iter context]
-  (let [service    (:service kernel)
-        chat-fn    (:chat-fn service)
-        build-msgs (:build-result-msgs service)]
-    (loop [msgs           messages
+   {:response final-response :context updated-ctx :tool-calls-made [...]}"
+  [kernel messages opts]
+  (when-not (:service kernel)
+    (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
+                    {:kernel-keys (keys kernel)})))
+  (let [context (or (:context opts) (ctx/create))
+        system-prompts (or (:system-prompts opts) [])
+        ;; 将 system-prompts 消息列表合并为单个 system-prompt 字符串
+        system-prompt-str (when (seq system-prompts)
+                            (->> system-prompts
+                                 (map :content)
+                                 (clojure.string/join "\n")))
+        max-iter (or (:max-iterations opts)
+                     (get-in kernel [:settings :max-tool-iterations])
+                     default-max-iterations)
+        tool-schemas (get-tools kernel)
+        tool-choice (or (:tool-choice opts) :auto)
+        service (:service kernel)
+        chat-fn (:chat-fn service)
+        build-msgs (:build-result-msgs service)
+
+        ;; 组合 context.messages + 新 messages
+        existing-msgs (ctx/get-messages context)
+        ;; 记录新消息到 context
+        ctx-with-new (reduce ctx/track-message context messages)
+        ;; 构建完整对话消息
+        conv-msgs (into (vec existing-msgs) messages)]
+
+    (loop [conv-msgs      conv-msgs
            remaining      max-iter
            all-tool-calls []
-           ctx            context]
+           ctx            ctx-with-new]
 
       (when (zero? remaining)
         (throw (ex-info "工具调用循环次数超过上限"
                         {:max-iterations max-iter
                          :tool-calls-made all-tool-calls})))
 
-      (let [response (chat-fn msgs opts)]
+      (let [;; 调用 invoke-chat（经过 pre/post chat filter）
+            chat-opts (cond-> {:tools tool-schemas
+                               :tool-choice tool-choice
+                               :context ctx}
+                        system-prompt-str (assoc :system-prompt system-prompt-str))
+            {:keys [response context]} (invoke-chat kernel conv-msgs chat-opts)
+            ctx context]
+
         (if (seq (:tool-calls response))
           ;; 工具调用分支
           (let [tool-calls (:tool-calls response)
-                ;; 执行工具（经过 Filter 链），传递 context
-                {:keys [results ctx]} (execute-tool-calls kernel tool-calls msgs ctx)
+                assistant-msg (:assistant-msg response)
+                ;; track assistant message
+                ctx (ctx/track-message ctx assistant-msg)
+                ;; 逐个执行 invoke-tool，累积 context
+                {:keys [results ctx tool-records]}
+                (reduce
+                  (fn [acc tc]
+                    (let [fn-name (keyword (:name tc))
+                          args (:input tc)
+                          ;; invoke-tool 经过 filter 管道
+                          {:keys [value context]}
+                          (try
+                            (invoke-tool kernel fn-name args (:ctx acc))
+                            (catch Exception e
+                              {:value (str "错误: " (.getMessage e))
+                               :context (:ctx acc)}))
+                          ;; 编码为 tool message
+                          tool-msg (encode-tool-result tc value)
+                          ;; track tool message
+                          new-ctx (ctx/track-message context tool-msg)]
+                      {:results (conj (:results acc)
+                                      {:tool-id (:id tc)
+                                       :name fn-name
+                                       :result value})
+                       :ctx new-ctx
+                       :tool-records (conj (:tool-records acc)
+                                           {:name fn-name
+                                            :args args
+                                            :result value})}))
+                  {:results [] :ctx ctx :tool-records []}
+                  tool-calls)
                 ;; 构建追加消息（由 service 的 build-result-msgs 负责格式化）
-                new-msgs (build-msgs (:assistant-msg response) results)
-                ;; 追加到历史
-                updated-msgs (into msgs new-msgs)]
-            (recur updated-msgs
+                new-msgs (build-msgs assistant-msg results)
+                ;; 追加到对话历史
+                updated-conv-msgs (into conv-msgs new-msgs)]
+            (recur updated-conv-msgs
                    (dec remaining)
-                   (into all-tool-calls
-                         (mapv (fn [tc r]
-                                 {:name   (:name tc)
-                                  :args   (:input tc)
-                                  :result (:result r)
-                                  :error  (:error r)})
-                               tool-calls results))
+                   (into all-tool-calls tool-records)
                    ctx))
 
           ;; 文本响应分支
-          {:text            (:text response)
-           :tool-calls-made all-tool-calls
-           :raw-response    response
-           :context         ctx})))))
-
-(defn invoke-chat-with-tools
-  "发送 Chat Completion 请求并驱动工具调用循环
-
-   自动将 Kernel 中所有注册函数的 tool schema 传给 LLM。
-   LLM 返回 tool_calls 时自动执行对应函数，将结果拼入消息后再次请求 LLM，
-   循环直到 LLM 返回文本响应或达到最大迭代次数。
-
-   等同于 Erlang beamai_kernel:invoke_chat_with_tools/3。
-
-   参数:
-   - kernel:   Kernel 实例（需注册函数和 LLM 服务）
-   - messages: 消息列表
-   - opts:     选项 map
-     {:tool-choice        :auto/:none/:required（默认 :auto）
-      :max-iterations     最大循环次数（默认 10）
-      :context            Context 对象（可选，默认创建空 Context）
-      :on-tool-call       工具调用回调 (fn [tool-call] ...)
-      :on-tool-result     工具结果回调 (fn [result] ...)}
-
-   返回:
-   {:text            最终文本回答
-    :tool-calls-made 已执行的工具调用记录列表
-    :raw-response    最后一次归一化响应
-    :context         最终 Context 对象}"
-  [kernel messages opts]
-  (when-not (:service kernel)
-    (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
-                    {:kernel-keys (keys kernel)})))
-  (let [tool-schemas (get-tools kernel)
-        max-iter     (or (:max-iterations opts)
-                         (get-in kernel [:settings :max-tool-iterations])
-                         default-max-iterations)
-        context      (or (:context opts) (ctx/create))
-        chat-opts    (assoc (dissoc opts :context :max-iterations)
-                            :tools tool-schemas
-                            :tool-choice (or (:tool-choice opts) :auto))]
-    (tool-calling-loop kernel messages chat-opts max-iter context)))
+          (let [assistant-msg (:assistant-msg response)
+                ctx (ctx/track-message ctx assistant-msg)]
+            {:response response
+             :context ctx
+             :tool-calls-made all-tool-calls}))))))
