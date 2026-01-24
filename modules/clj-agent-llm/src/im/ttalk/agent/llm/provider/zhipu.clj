@@ -23,7 +23,7 @@
   "默认智谱 AI 配置"
   (base/make-config
     :zhipu
-    "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    "https://open.bigmodel.cn/api/paas/v4"
     "ZHIPU_API_KEY"
     :timeout 120000
     :default-model "glm-4"))

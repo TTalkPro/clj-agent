@@ -24,7 +24,7 @@
   "默认 Ollama API 配置"
   (base/make-config
     :ollama
-    "http://localhost:11434/v1/chat/completions"
+    "http://localhost:11434/v1"
     "OLLAMA_API_KEY"  ;; Ollama 不需要 API key，但为了统一接口保留
     :timeout 120000))
 
@@ -115,15 +115,24 @@
 ;;; 辅助函数
 ;;; ============================================================
 
+(defn- ollama-host
+  "从 base-url 提取 Ollama 服务地址（scheme://host:port）"
+  []
+  (let [url (or (:base-url @default-config) "http://localhost:11434")
+        uri (java.net.URI. url)
+        port (.getPort uri)]
+    (str (.getScheme uri) "://" (.getHost uri)
+         (when (pos? port) (str ":" port)))))
+
 (defn list-models
   "列出 Ollama 上可用的模型
 
    返回：
    模型列表 map（成功时）或 {:error \"...\"}"
   []
-  (let [base-url (or (:base-url @default-config) "http://localhost:11434")]
+  (let [host (ollama-host)]
     (try
-      (let [response (http/get (str base-url "/api/tags"))]
+      (let [response (http/get (str host "/api/tags"))]
         (if (:success? response)
           (:body response)
           {:error (str "HTTP " (:status response))}))
@@ -139,9 +148,9 @@
    返回：
    拉取结果 map（成功时）或 {:error \"...\"}"
   [model-name]
-  (let [base-url (or (:base-url @default-config) "http://localhost:11434")]
+  (let [host (ollama-host)]
     (try
-      (let [response (http/post (str base-url "/api/pull")
+      (let [response (http/post (str host "/api/pull")
                                 :body {:name model-name}
                                 :timeout 600000)]
         (if (:success? response)

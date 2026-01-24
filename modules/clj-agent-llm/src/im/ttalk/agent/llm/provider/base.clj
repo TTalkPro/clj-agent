@@ -16,7 +16,7 @@
    ;; 创建配置
    (def config (base/make-config
                  :openai
-                 \"https://api.openai.com/v1/chat/completions\"
+                 \"https://api.openai.com/v1\"
                  \"OPENAI_API_KEY\"))
 
    ;; 创建 Provider
@@ -36,21 +36,24 @@
 
    参数：
    - provider-name: Provider 名称 (keyword)
-   - base-url:      API 基础 URL
+   - base-url:      API 基础 URL（不含 endpoint 路径）
    - env-key:       API Key 的环境变量名
 
    可选参数：
+   - :endpoint      API 端点路径 (默认 \"/chat/completions\")
    - :timeout       请求超时 (毫秒, 默认 120000)
    - :default-model 默认模型名称
 
    返回：
    配置 atom"
-  [provider-name base-url env-key & {:keys [timeout default-model]
-                                      :or {timeout 120000}}]
+  [provider-name base-url env-key & {:keys [endpoint timeout default-model]
+                                      :or {endpoint "/chat/completions"
+                                           timeout 120000}}]
   (atom {:provider-name provider-name
          :api-key (System/getenv env-key)
          :env-key env-key
          :base-url base-url
+         :endpoint endpoint
          :timeout timeout
          :default-model default-model}))
 
@@ -74,6 +77,25 @@
   (or (:api-key @config)
       (System/getenv (:env-key @config))))
 
+(defn get-api-url
+  "构建完整 API URL
+
+   将 base-url 和 endpoint 拼接为完整的 API 请求地址。
+   去除 base-url 尾部斜线以避免重复。
+
+   参数：
+   - config: Provider 配置 atom
+
+   返回：
+   完整的 API URL 字符串"
+  [config]
+  (let [{:keys [base-url endpoint]} @config
+        base (str/replace (or base-url "") #"/+$" "")
+        ep (if (str/starts-with? (or endpoint "") "/")
+             endpoint
+             (str "/" endpoint))]
+    (str base ep)))
+
 ;;; ============================================================
 ;;; 通用 API 调用
 ;;; ============================================================
@@ -92,7 +114,7 @@
   [config llm-config messages tools]
   (let [cfg @config]
     (compat/call-api
-      (:base-url cfg)
+      (get-api-url config)
       (get-api-key config)
       llm-config
       messages
@@ -114,7 +136,7 @@
   [config llm-config messages tools on-token]
   (let [cfg @config]
     (compat/call-api-stream
-      (:base-url cfg)
+      (get-api-url config)
       (get-api-key config)
       llm-config
       messages
@@ -137,7 +159,7 @@
   [config llm-config messages tools callback]
   (let [cfg @config]
     (compat/call-api-async
-      (:base-url cfg)
+      (get-api-url config)
       (get-api-key config)
       llm-config
       messages
@@ -162,7 +184,7 @@
   [config llm-config messages tools on-token on-complete & [on-error]]
   (let [cfg @config]
     (compat/call-api-stream-async
-      (:base-url cfg)
+      (get-api-url config)
       (get-api-key config)
       llm-config
       messages
@@ -253,16 +275,18 @@
 
    用法：
    (defprovider openai
-     :base-url \"https://api.openai.com/v1/chat/completions\"
+     :base-url \"https://api.openai.com/v1\"
      :env-key \"OPENAI_API_KEY\"
+     :endpoint \"/chat/completions\"
      :timeout 120000)
 
    将生成：
    - default-config atom
    - call-openai, call-openai-stream 等函数
    - create-provider 函数"
-  [provider-name & {:keys [base-url env-key timeout default-model]
-                    :or {timeout 120000}}]
+  [provider-name & {:keys [base-url env-key endpoint timeout default-model]
+                    :or {endpoint "/chat/completions"
+                         timeout 120000}}]
   (let [name-str (name provider-name)
         config-sym (symbol "default-config")
         call-fn (symbol (str "call-" name-str))
@@ -274,6 +298,7 @@
        (def ~config-sym
          ~(str "默认 " name-str " 配置")
          (make-config ~(keyword provider-name) ~base-url ~env-key
+                      :endpoint ~endpoint
                       :timeout ~timeout
                       :default-model ~default-model))
 

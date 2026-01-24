@@ -25,7 +25,7 @@
   "默认 Mistral API 配置"
   (base/make-config
     :mistral
-    "https://api.mistral.ai/v1/chat/completions"
+    "https://api.mistral.ai/v1"
     "MISTRAL_API_KEY"
     :timeout 120000
     :default-model "mistral-large-latest"))

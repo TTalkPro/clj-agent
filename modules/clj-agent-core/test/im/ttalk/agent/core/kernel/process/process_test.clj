@@ -1,5 +1,5 @@
 (ns im.ttalk.agent.core.kernel.process.process-test
-  "Process Framework 综合测试"
+  "Process Framework 综合测试（Channel-based 并行 Runtime）"
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string]
             [im.ttalk.agent.core.kernel.process.event :as event]
@@ -7,6 +7,9 @@
             [im.ttalk.agent.core.kernel.process.builder :as builder]
             [im.ttalk.agent.core.kernel.process.runtime :as runtime]
             [im.ttalk.agent.core.kernel.context :as ctx]))
+
+;; 默认测试超时
+(def ^:private test-timeout 5000)
 
 ;; ============================================================
 ;; Phase 1: Event 创建与路由
@@ -206,9 +209,7 @@
                                   :state (assoc state :waiting false)})}
           state (-> (step/init-step step-def)
                     (step/collect-input :input "x"))
-          ;; 先执行到暂停
           {:keys [step-state]} (step/execute state (ctx/create))
-          ;; 恢复
           {:keys [result step-state]} (step/resume-step step-state "approved" (ctx/create))]
       (is (= "approved" (:data (first (:events result)))))
       (is (= {:waiting false} (:state step-state)))))
@@ -297,7 +298,7 @@
               (builder/build))))))
 
 ;; ============================================================
-;; Phase 4: Runtime 执行
+;; Phase 4: Runtime 执行（Channel-based 并行）
 ;; ============================================================
 
 (deftest runtime-linear-flow-test
@@ -323,13 +324,14 @@
                           (builder/on-event :b-done :step-c :input)
                           (builder/set-initial-event :start "hello")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (= "hello-A-B" (ctx/get-var (:context result) :result))))))
 
 (deftest runtime-fan-out-test
-  (testing "Fan-out：一个事件触发多个 step"
-    (let [process-def (-> (builder/builder :fan-out)
+  (testing "Fan-out：一个事件触发多个 step（并行执行）"
+    (let [execution-log (atom [])
+          process-def (-> (builder/builder :fan-out)
                           (builder/add-step
                             {:id :source
                              :on-activate (fn [inputs _state _ctx]
@@ -337,20 +339,24 @@
                           (builder/add-step
                             {:id :consumer-a
                              :on-activate (fn [inputs _state ctx]
+                                            (swap! execution-log conj :consumer-a)
                                             {:context (ctx/set-var ctx :a-got (:input inputs))})})
                           (builder/add-step
                             {:id :consumer-b
                              :on-activate (fn [inputs _state ctx]
+                                            (swap! execution-log conj :consumer-b)
                                             {:context (ctx/set-var ctx :b-got (:input inputs))})})
                           (builder/on-event :start :source :input)
                           (builder/on-event :data-ready :consumer-a :input)
                           (builder/on-event :data-ready :consumer-b :input)
                           (builder/set-initial-event :start "shared")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (= "shared" (ctx/get-var (:context result) :a-got)))
-      (is (= "shared" (ctx/get-var (:context result) :b-got))))))
+      (is (= "shared" (ctx/get-var (:context result) :b-got)))
+      ;; 验证两个 consumer 都执行了
+      (is (= 2 (count @execution-log))))))
 
 (deftest runtime-fan-in-test
   (testing "Fan-in：多个输入汇聚到一个 step"
@@ -375,7 +381,7 @@
                           (builder/on-event :b-ready :aggregator :from-b)
                           (builder/set-initial-event :start "X")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (= "X-A+X-B" (ctx/get-var (:context result) :combined))))))
 
@@ -385,7 +391,7 @@
                           (builder/add-step
                             {:id :counter
                              :init (fn [_] {:count 0})
-                             :on-activate (fn [inputs state _ctx]
+                             :on-activate (fn [_inputs state _ctx]
                                             (let [n (inc (:count state))]
                                               (if (>= n 3)
                                                 {:events [{:name :done :data n}]
@@ -401,7 +407,7 @@
                           (builder/on-event :done :collector :input)
                           (builder/set-initial-event :start "go")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (= 3 (ctx/get-var (:context result) :final-count))))))
 
@@ -427,12 +433,12 @@
                           (builder/set-initial-event :start "deploy v2.0")
                           (builder/build))
           ;; 运行到暂停
-          paused (runtime/run-process process-def)]
+          paused (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :paused (:status paused)))
       (is (= :approval-step (:paused-step paused)))
       (is (= "需要审批" (:pause-reason paused)))
       ;; 恢复
-      (let [result (runtime/resume paused "approved")]
+      (let [result (runtime/run-resume paused "approved")]
         (is (= :completed (:status result)))
         (is (= {:request "deploy v2.0" :decision "approved"}
                (ctx/get-var (:context result) :outcome)))))))
@@ -447,7 +453,7 @@
                           (builder/on-event :start :bad-step :input)
                           (builder/set-initial-event :start "go")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :failed (:status result)))
       (is (= "oops" (get-in result [:error :reason])))))
 
@@ -467,7 +473,7 @@
                           (builder/set-error-handler :error-handler)
                           (builder/set-initial-event :start "go")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (= "oops" (ctx/get-var (:context result) :handled))))))
 
@@ -481,24 +487,24 @@
                           (builder/on-event :start :thrower :input)
                           (builder/set-initial-event :start "go")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :failed (:status result)))
       (is (= "kaboom" (get-in result [:error :reason]))))))
 
-(deftest runtime-max-iterations-test
-  (testing "超过最大迭代次数"
-    (let [process-def (-> (builder/builder :infinite)
+(deftest runtime-timeout-test
+  (testing "全局超时"
+    (let [process-def (-> (builder/builder :slow)
                           (builder/add-step
-                            {:id :loop-step
+                            {:id :slow-step
                              :on-activate (fn [_ _ _]
-                                            {:events [{:name :again :data nil}]})})
-                          (builder/on-event :start :loop-step :input)
-                          (builder/on-event :again :loop-step :input)
+                                            (Thread/sleep 3000)
+                                            {:events [{:name :done :data nil}]})})
+                          (builder/on-event :start :slow-step :input)
                           (builder/set-initial-event :start nil)
                           (builder/build))
-          result (runtime/run-process process-def {:max-iterations 10})]
+          result (runtime/run-process process-def {:timeout-ms 500})]
       (is (= :failed (:status result)))
-      (is (= 10 (get-in result [:error :max-iterations]))))))
+      (is (clojure.string/includes? (str (:reason (:error result))) "超时")))))
 
 (deftest runtime-step-state-persistence-test
   (testing "Step 状态在多次激活间持久化"
@@ -527,7 +533,7 @@
                           (builder/on-event :done :result :input)
                           (builder/set-initial-event :start 3)
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (>= (ctx/get-var (:context result) :total) 10)))))
 
@@ -548,7 +554,7 @@
                           (builder/on-event :next :step-b :input)
                           (builder/set-initial-event :start nil)
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (true? (ctx/get-var (:context result) :a-was-here)))
       (is (true? (ctx/get-var (:context result) :b-saw-a))))))
@@ -569,21 +575,20 @@
                                             (fn [data] (clojure.string/upper-case data)))
                           (builder/set-initial-event :start "hello")
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (= :completed (:status result)))
       (is (= "HELLO" (ctx/get-var (:context result) :result))))))
 
 (deftest runtime-idle-start-test
-  (testing "没有初始事件时状态为 idle"
+  (testing "没有初始事件时状态为 completed"
     (let [process-def (-> (builder/builder :idle-test)
                           (builder/add-step
                             {:id :s1
                              :on-activate (fn [_ _ _] {})})
                           (builder/on-event :start :s1 :input)
                           (builder/build))
-          result (runtime/run-process process-def)]
-      ;; 没有初始事件，队列为空，应立即 completed
-      (is (#{:idle :completed} (:status result))))))
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
+      (is (= :completed (:status result))))))
 
 (deftest runtime-resume-not-paused-test
   (testing "对非 paused 状态调用 resume 抛异常"
@@ -594,24 +599,60 @@
                           (builder/on-event :start :s1 :input)
                           (builder/set-initial-event :start nil)
                           (builder/build))
-          result (runtime/run-process process-def)]
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
       (is (thrown-with-msg? Exception #"只能恢复"
-            (runtime/resume result "data"))))))
+            (runtime/run-resume result "data"))))))
 
-(deftest runtime-step-forward-test
-  (testing "单步执行"
-    (let [process-def (-> (builder/builder :step-fwd)
+(deftest runtime-parallel-execution-test
+  (testing "Fan-out step 实际并行执行"
+    (let [start-times (atom {})
+          process-def (-> (builder/builder :parallel-test)
                           (builder/add-step
-                            {:id :s1
-                             :on-activate (fn [inputs _ ctx]
-                                            {:context (ctx/set-var ctx :done true)})})
-                          (builder/on-event :start :s1 :input)
-                          (builder/set-initial-event :start "go")
+                            {:id :trigger
+                             :on-activate (fn [_ _ _]
+                                            {:events [{:name :go :data nil}]})})
+                          (builder/add-step
+                            {:id :slow-a
+                             :on-activate (fn [_ _ ctx]
+                                            (swap! start-times assoc :a (System/currentTimeMillis))
+                                            (Thread/sleep 200)
+                                            {:context (ctx/set-var ctx :a-done true)})})
+                          (builder/add-step
+                            {:id :slow-b
+                             :on-activate (fn [_ _ ctx]
+                                            (swap! start-times assoc :b (System/currentTimeMillis))
+                                            (Thread/sleep 200)
+                                            {:context (ctx/set-var ctx :b-done true)})})
+                          (builder/on-event :start :trigger :input)
+                          (builder/on-event :go :slow-a :input)
+                          (builder/on-event :go :slow-b :input)
+                          (builder/set-initial-event :start nil)
                           (builder/build))
-          rt (runtime/init-runtime process-def {})
-          rt2 (runtime/step-forward rt)]
-      (is (= :running (:status rt)))
-      (is (true? (ctx/get-var (:context rt2) :done)))
-      ;; 队列空了，再 step-forward 应该 completed
-      (let [rt3 (runtime/step-forward rt2)]
-        (is (= :completed (:status rt3)))))))
+          t0 (System/currentTimeMillis)
+          result (runtime/run-process process-def {:timeout-ms test-timeout})
+          elapsed (- (System/currentTimeMillis) t0)]
+      (is (= :completed (:status result)))
+      (is (true? (ctx/get-var (:context result) :a-done)))
+      (is (true? (ctx/get-var (:context result) :b-done)))
+      ;; 如果真正并行，总耗时应 < 400ms（两个 200ms 串行需要 400ms+）
+      ;; 允许一些调度开销，检查 < 380ms
+      (is (< elapsed 380)
+          (str "并行执行耗时应 < 380ms，实际: " elapsed "ms")))))
+
+(deftest runtime-multiple-initial-events-test
+  (testing "多个初始事件"
+    (let [process-def (-> (builder/builder :multi-init)
+                          (builder/add-step
+                            {:id :collector
+                             :required-inputs [:a :b]
+                             :on-activate (fn [inputs _state ctx]
+                                            {:context (ctx/set-var ctx :got
+                                                        (str (:a inputs) "+" (:b inputs)))})})
+                          (builder/on-event :event-a :collector :a)
+                          (builder/on-event :event-b :collector :b)
+                          (builder/set-initial-event :event-a "hello")
+                          (builder/set-initial-event :event-b "world")
+                          (builder/build))
+          result (runtime/run-process process-def {:timeout-ms test-timeout})]
+      (is (= :completed (:status result)))
+      (is (= "hello+world" (ctx/get-var (:context result) :got))))))

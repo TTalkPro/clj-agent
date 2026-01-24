@@ -1,5 +1,5 @@
 (ns kernel-test
-  "Kernel 功能测试 - 使用 GLM-4.7 Anthropic 兼容接口
+  "Kernel 功能测试 - 使用 GLM-4.7 OpenAI 兼容接口
 
    运行: clojure -M -e \"(load-file \\\"examples/kernel_test.clj\\\")\"
 
@@ -9,7 +9,8 @@
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.llm.kernel.chat :as chat]))
+            [im.ttalk.agent.llm.kernel.chat :as chat]
+            [im.ttalk.agent.llm.provider.zhipu :as zhipu]))
 
 ;;; ============================================================
 ;;; 工具定义
@@ -38,9 +39,11 @@
 
 (def service
   (chat/create-service
-    {:model "glm-4.7"
-     :base-url "https://open.bigmodel.cn/api/anthropic"
-     :api-key (System/getenv "ZHIPU_API_KEY")
+    {:provider (zhipu/create-provider
+                 {:api-key (System/getenv "ZHIPU_API_KEY")
+                  :base-url "https://open.bigmodel.cn/api/coding/paas/v4"
+                  :endpoint "/chat/completions"})
+     :model "glm-4.7"
      :max-tokens 1024}))
 
 (def app-kernel
@@ -77,7 +80,7 @@
     (let [result (f)]
       (println (str "  ✓ " label))
       result)
-    (catch Exception e
+    (catch Throwable e
       (println (str "  ✗ " label " 失败: " (.getMessage e)))
       nil)))
 
@@ -161,7 +164,7 @@
 (defn run-all []
   (println)
   (println "╔═══════════════════════════════════════════════════════════╗")
-  (println "║       Kernel 功能测试 (GLM-4.7 Anthropic 兼容)          ║")
+  (println "║       Kernel 功能测试 (GLM-4.7 OpenAI 兼容)             ║")
   (println "╚═══════════════════════════════════════════════════════════╝")
 
   (test-query-api)

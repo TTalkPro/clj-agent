@@ -31,7 +31,7 @@
   "默认 OpenAI API 配置"
   (base/make-config
     :openai
-    "https://api.openai.com/v1/chat/completions"
+    "https://api.openai.com/v1"
     "OPENAI_API_KEY"
     :timeout 120000
     :default-model "gpt-4"))

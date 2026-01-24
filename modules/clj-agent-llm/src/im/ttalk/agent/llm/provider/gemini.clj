@@ -24,7 +24,7 @@
   "默认 Gemini API 配置"
   (base/make-config
     :gemini
-    "https://generativelanguage.googleapis.com/v1beta/chat/completions"
+    "https://generativelanguage.googleapis.com/v1beta"
     "GOOGLE_API_KEY"
     :timeout 120000
     :default-model "gemini-2.0-flash-exp"))

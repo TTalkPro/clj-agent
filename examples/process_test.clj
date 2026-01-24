@@ -1,5 +1,5 @@
 (ns process-test
-  "Process Framework 功能测试 - 使用 GLM-4.7 Anthropic 兼容接口
+  "Process Framework 功能测试 - 使用 GLM-4.7 OpenAI 兼容接口
 
    覆盖场景:
    1. 基本线性流程
@@ -21,7 +21,8 @@
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.process.builder :as builder]
             [im.ttalk.agent.core.kernel.process.runtime :as runtime]
-            [im.ttalk.agent.llm.kernel.chat :as chat]))
+            [im.ttalk.agent.llm.kernel.chat :as chat]
+            [im.ttalk.agent.llm.provider.zhipu :as zhipu]))
 
 ;;; ============================================================
 ;;; 工具定义
@@ -57,9 +58,11 @@
 
 (def service
   (chat/create-service
-    {:model "glm-4.7"
-     :base-url "https://open.bigmodel.cn/api/anthropic"
-     :api-key (System/getenv "ZHIPU_API_KEY")
+    {:provider (zhipu/create-provider
+                 {:api-key (System/getenv "ZHIPU_API_KEY")
+                  :base-url "https://open.bigmodel.cn/api/coding/paas/v4"
+                  :endpoint "/chat/completions"})
+     :model "glm-4.7"
      :max-tokens 1024}))
 
 (def app-kernel
@@ -88,7 +91,7 @@
     (let [result (f)]
       (println (str "  ✓ " label))
       result)
-    (catch Exception e
+    (catch Throwable e
       (println (str "  ✗ " label " 失败: " (.getMessage e)))
       (when-let [d (ex-data e)]
         (println (str "    详情: " (pr-str d))))
@@ -128,7 +131,7 @@
                 (builder/on-event :b-done :step-c :input)
                 (builder/set-initial-event :start "原始数据")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    结果: " (ctx/get-var (:context result) :final-result)))
         (assert (= :completed (:status result)))
@@ -165,7 +168,7 @@
                 (builder/on-event :chat-done :result-step :input)
                 (builder/set-initial-event :start "用一句话介绍中国的首都。")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    回答: " (ctx/get-var (:context result) :answer)))
         (assert (= :completed (:status result)))
@@ -222,7 +225,7 @@
                 (builder/on-event :done :final :input)
                 (builder/set-initial-event :start "中国有多少个省份？简短回答。")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    最终结果: " (ctx/get-var (:context result) :multi-turn-result)))
         (println (str "    messages 数量: " (count (ctx/get-messages (:context result)))))
@@ -279,7 +282,7 @@
                 (builder/on-event :enriched :summary-step :input)
                 (builder/set-initial-event :start nil)
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    trace: " (ctx/get-var (:context result) :step-trace)))
         (println (str "    summary: " (ctx/get-var (:context result) :summary)))
@@ -325,8 +328,10 @@
                 (builder/on-event :answered :collect-step :input)
                 (builder/set-initial-event :start "现在几点了？")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 60000})]
         (println (str "    状态: " (:status result)))
+        (when (= :failed (:status result))
+          (println (str "    错误: " (:error result))))
         (println (str "    工具调用: " (ctx/get-var (:context result) :tools-used)))
         (assert (= :completed (:status result)))
         (assert (some? (ctx/get-var (:context result) :answer)))))))
@@ -406,7 +411,7 @@
                 (builder/on-event :tool-done :chat-step :input)
                 (builder/set-initial-event :start nil)
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    Filter 日志:"))
         (doseq [entry @call-log]
@@ -475,7 +480,7 @@
                 (builder/build))
 
             ;; 运行到暂停
-            paused (runtime/run-process process-def)]
+            paused (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    --- 状态: " (:status paused)))
         (println (str "    --- 暂停原因: " (:pause-reason paused)))
         (assert (= :paused (:status paused)))
@@ -483,7 +488,7 @@
 
         ;; 模拟审批通过
         (println (str "    --- 模拟审批: approved"))
-        (let [result (runtime/resume paused "approved")]
+        (let [result (runtime/run-resume paused "approved")]
           (println (str "    --- 恢复后状态: " (:status result)))
           (assert (= :completed (:status result)))
           (assert (true? (ctx/get-var (:context result) :executed)))
@@ -492,8 +497,8 @@
         ;; 再次运行，模拟审批拒绝
         (println)
         (println (str "    --- 再次运行，模拟审批拒绝 ---"))
-        (let [paused2 (runtime/run-process process-def)
-              result (runtime/resume paused2 "rejected")]
+        (let [paused2 (runtime/run-process process-def {:timeout-ms 10000})
+              result (runtime/run-resume paused2 "rejected")]
           (println (str "    --- 恢复后状态: " (:status result)))
           (assert (= :completed (:status result)))
           (assert (true? (ctx/get-var (:context result) :rejected)))
@@ -560,7 +565,7 @@
                 (builder/on-event :b-result :aggregator :from-b)
                 (builder/set-initial-event :start ["北京" "上海"])
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (let [report (ctx/get-var (:context result) :weather-report)]
           (println (str "    城市数: " (count (:cities report))))
@@ -608,7 +613,7 @@
                 (builder/on-event :loop-done :final :input)
                 (builder/set-initial-event :start "测试城市")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (let [loop-result (ctx/get-var (:context result) :loop-result)]
           (println (str "    迭代次数: " (:iterations loop-result)))
@@ -644,7 +649,7 @@
                 (builder/set-error-handler :error-handler)
                 (builder/set-initial-event :start "go")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (println (str "    错误处理: " (ctx/get-var (:context result) :error-handled)))
         (assert (= :completed (:status result)))
@@ -688,7 +693,7 @@
                                   (fn [data] (str "城市: " (:city data))))
                 (builder/set-initial-event :start "go")
                 (builder/build))
-            result (runtime/run-process process-def)]
+            result (runtime/run-process process-def {:timeout-ms 30000})]
         (println (str "    状态: " (:status result)))
         (assert (= :completed (:status result)))
         (assert (= "张三" (ctx/get-var (:context result) :got-name)))
@@ -701,7 +706,7 @@
 (defn run-all []
   (println)
   (println "╔═══════════════════════════════════════════════════════════╗")
-  (println "║   Process Framework 功能测试 (GLM-4.7 Anthropic 兼容)   ║")
+  (println "║   Process Framework 功能测试 (GLM-4.7 OpenAI 兼容)      ║")
   (println "╚═══════════════════════════════════════════════════════════╝")
 
   ;; 纯逻辑测试（无 LLM 调用）
