@@ -28,7 +28,7 @@
   (:require [im.ttalk.agent.llm.factory.builder :as builder]
             [im.ttalk.agent.llm.factory.registry :as registry]
             [im.ttalk.agent.llm.factory.config :as config]
-            [im.ttalk.agent.llm.core.protocol :as proto]
+            [im.ttalk.agent.core.kernel.provider :as proto]
             [im.ttalk.agent.llm.core.types :as types]
             [im.ttalk.agent.llm.core.errors :as errors]))
 

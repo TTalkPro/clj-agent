@@ -17,6 +17,7 @@
    (def store (create-redis-store {:host \"localhost\" :port 6379}))
    (proto/put store \"user-123\" \"preference\" {:lang \"zh\"})"
   (:require [im.ttalk.agent.memory.protocol :as proto]
+            [im.ttalk.agent.memory.store.base :as base]
             [taoensso.carmine :as car]
             [cheshire.core :as json]))
 
@@ -54,9 +55,6 @@
 ;; 辅助函数
 ;; =============================================================================
 
-(defn- now []
-  (System/currentTimeMillis))
-
 (defn- serialize [value]
   (json/generate-string value))
 
@@ -81,7 +79,7 @@
 
   (put [this namespace key value]
     (let [rkey (redis-key namespace key)
-          timestamp (now)
+          timestamp (base/now)
           record {:namespace namespace
                   :key key
                   :value value
@@ -103,9 +101,7 @@
       record))
 
   (put-batch [this namespace items]
-    (mapv (fn [{:keys [key value]}]
-            (proto/put this namespace key value))
-          items))
+    (base/default-put-batch this namespace items))
 
   (get-value [this namespace key]
     (when-let [data (wcar* conn-spec
@@ -182,23 +178,9 @@
              (vec)))))
 
   (search [this namespace query opts]
-    ;; Redis 简单实现：遍历所有值进行字符串匹配
-    (let [{:keys [top-k] :or {top-k 10}} opts
-          query-str (:query query)
-          all-keys (proto/list-keys this namespace {:limit 1000})]
-      (->> all-keys
-           (map (fn [k]
-                  (when-let [v (proto/get-value this namespace k)]
-                    (let [value-str (pr-str v)
-                          score (if (and query-str
-                                         (.contains ^String value-str ^String query-str))
-                                  1.0
-                                  0.0)]
-                      {:key k :value v :score score}))))
-           (filter some?)
-           (filter #(pos? (:score %)))
-           (take top-k)
-           (vec))))
+    ;; Redis 简单实现：使用 base 模块的默认搜索实现
+    (base/default-search this namespace query opts
+      (fn [] (proto/list-keys this namespace {:limit 1000}))))
 
   (count-keys [this namespace opts]
     (let [{:keys [prefix]} opts

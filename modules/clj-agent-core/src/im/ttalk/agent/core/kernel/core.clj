@@ -416,12 +416,10 @@
         tool-choice (or (:tool-choice opts) :auto)
         service (:service kernel)
 
-        ;; 组合 context.messages + 新 messages
-        existing-msgs (ctx/get-messages context)
         ;; 记录新消息到 context
         ctx-with-new (reduce ctx/track-message context messages)
-        ;; 构建完整对话消息
-        conv-msgs (into (vec existing-msgs) messages)]
+        ;; 从更新后的 context 获取完整对话消息（避免重复追加）
+        conv-msgs (ctx/get-messages ctx-with-new)]
 
     (loop [conv-msgs      conv-msgs
            remaining      max-iter

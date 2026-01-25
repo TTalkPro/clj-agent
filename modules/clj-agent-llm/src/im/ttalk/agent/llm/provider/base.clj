@@ -22,7 +22,7 @@
    ;; 创建 Provider
    (def provider (base/create-provider config))"
   (:require [clojure.string :as str]
-            [im.ttalk.agent.llm.core.protocol :as proto]
+            [im.ttalk.agent.core.kernel.provider :as proto]
             [im.ttalk.agent.llm.schema.openai :as schema]
             [im.ttalk.agent.llm.response.parser :as parser]
             [im.ttalk.agent.llm.provider.openai-compat :as compat]))

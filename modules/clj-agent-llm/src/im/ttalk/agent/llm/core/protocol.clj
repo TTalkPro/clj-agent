@@ -1,20 +1,14 @@
 (ns im.ttalk.agent.llm.core.protocol
-  "LLM Provider 协议定义（向后兼容层）
+  "LLM Provider 协议定义（已弃用 - 向后兼容层）
 
-   此命名空间从 im.ttalk.agent.core.kernel.provider re-export 所有定义。
-   新代码建议直接使用 im.ttalk.agent.core.kernel.provider。
+   ⚠️ 此命名空间已弃用，将在未来版本中删除。
+   请直接使用 im.ttalk.agent.core.kernel.provider。
 
-   使用示例：
-
-   (defrecord MyProvider [api-key]
-     ILLMProvider
-     (provider-name [_] :my-provider)
-     (call-llm [this config messages tools] ...)
-     (extract-tool-calls [_ response] ...)
-     (extract-text [_ response] ...)
-     (build-tool-result [_ tool-id content] ...)
-     (build-assistant-message [_ response] ...)
-     (build-result-messages [_ assistant-msg tool-results] ...))"
+   迁移指南：
+   将 (require '[im.ttalk.agent.llm.core.protocol :as proto])
+   改为 (require '[im.ttalk.agent.core.kernel.provider :as proto])"
+  {:deprecated "1.0.0"
+   :superseded-by 'im.ttalk.agent.core.kernel.provider}
   (:require [im.ttalk.agent.core.kernel.provider :as provider]))
 
 ;;; ============================================================

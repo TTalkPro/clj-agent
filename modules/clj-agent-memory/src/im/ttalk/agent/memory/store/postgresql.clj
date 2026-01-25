@@ -23,6 +23,7 @@
                  :user \"postgres\"
                  :password \"secret\"}))"
   (:require [im.ttalk.agent.memory.protocol :as proto]
+            [im.ttalk.agent.memory.store.base :as base]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]
             [cheshire.core :as json]))
@@ -51,12 +52,6 @@
 ;; =============================================================================
 ;; 辅助函数
 ;; =============================================================================
-
-(defn- generate-id []
-  (str (java.util.UUID/randomUUID)))
-
-(defn- now []
-  (System/currentTimeMillis))
 
 (defn- init-db! [ds]
   (doseq [sql schema-sql]
@@ -95,8 +90,8 @@
   proto/IKeyValueStore
 
   (put [this namespace key value]
-    (let [id (generate-id)
-          timestamp (now)
+    (let [id (base/generate-id)
+          timestamp (base/now)
           value-json (serialize value)]
       (jdbc/execute! datasource
                      ["INSERT INTO kv_store (id, namespace, key, value, created_at, updated_at)
@@ -112,9 +107,7 @@
        :updated-at timestamp}))
 
   (put-batch [this namespace items]
-    (mapv (fn [{:keys [key value]}]
-            (proto/put this namespace key value))
-          items))
+    (base/default-put-batch this namespace items))
 
   (get-value [this namespace key]
     (when-let [row (jdbc/execute-one! datasource
@@ -124,12 +117,7 @@
       (deserialize (:value row))))
 
   (get-batch [this namespace keys]
-    (reduce (fn [result k]
-              (if-let [v (proto/get-value this namespace k)]
-                (assoc result k v)
-                result))
-            {}
-            keys))
+    (base/default-get-batch this namespace keys))
 
   (delete [this namespace key]
     (let [result (jdbc/execute! datasource

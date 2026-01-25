@@ -18,37 +18,8 @@
    (def store (create-in-memory-store))
    (proto/put store \"user-123\" \"preference\" {:lang \"zh\"})
    (proto/get-value store \"user-123\" \"preference\")"
-  (:require [im.ttalk.agent.memory.protocol :as proto]))
-
-;; =============================================================================
-;; 内部辅助函数
-;; =============================================================================
-
-(defn- generate-id []
-  (str (java.util.UUID/randomUUID)))
-
-(defn- now []
-  (System/currentTimeMillis))
-
-(defn- make-storage-key
-  "构建内部存储 key: namespace:key"
-  [namespace key]
-  (str namespace ":" key))
-
-(defn- parse-storage-key
-  "解析内部存储 key，返回 [namespace key]"
-  [storage-key]
-  (let [idx (.indexOf ^String storage-key ":")]
-    (when (pos? idx)
-      [(.substring ^String storage-key 0 idx)
-       (.substring ^String storage-key (inc idx))])))
-
-(defn- matches-prefix?
-  "检查 key 是否匹配前缀"
-  [key prefix]
-  (if (empty? prefix)
-    true
-    (.startsWith ^String key ^String prefix)))
+  (:require [im.ttalk.agent.memory.protocol :as proto]
+            [im.ttalk.agent.memory.store.base :as base]))
 
 ;; =============================================================================
 ;; InMemoryStore 实现
@@ -62,18 +33,13 @@
   ;; -------------------------------------------------------------------------
 
   (put [this namespace key value]
-    (let [storage-key (make-storage-key namespace key)
-          timestamp (now)
-          record {:namespace namespace
-                  :key key
-                  :value value
-                  :created-at timestamp
-                  :updated-at timestamp}]
+    (let [storage-key (base/make-storage-key namespace key)
+          record (base/make-record namespace key value)]
       (swap! data-atom
              (fn [data]
                (let [existing (get-in data [:records storage-key])
                      final-record (if existing
-                                    (assoc record :created-at (:created-at existing))
+                                    (base/update-record existing value)
                                     record)]
                  (-> data
                      (assoc-in [:records storage-key] final-record)
@@ -81,25 +47,18 @@
       record))
 
   (put-batch [this namespace items]
-    (mapv (fn [{:keys [key value]}]
-            (proto/put this namespace key value))
-          items))
+    (base/default-put-batch this namespace items))
 
   (get-value [this namespace key]
-    (let [storage-key (make-storage-key namespace key)
+    (let [storage-key (base/make-storage-key namespace key)
           record (get-in @data-atom [:records storage-key])]
       (:value record)))
 
   (get-batch [this namespace keys]
-    (reduce (fn [result k]
-              (if-let [v (proto/get-value this namespace k)]
-                (assoc result k v)
-                result))
-            {}
-            keys))
+    (base/default-get-batch this namespace keys))
 
   (delete [this namespace key]
-    (let [storage-key (make-storage-key namespace key)
+    (let [storage-key (base/make-storage-key namespace key)
           existed? (contains? (:records @data-atom) storage-key)]
       (when existed?
         (swap! data-atom
@@ -110,15 +69,10 @@
       existed?))
 
   (delete-batch [this namespace keys]
-    (reduce (fn [count k]
-              (if (proto/delete this namespace k)
-                (inc count)
-                count))
-            0
-            keys))
+    (base/default-delete-batch this namespace keys))
 
   (exists? [this namespace key]
-    (let [storage-key (make-storage-key namespace key)]
+    (let [storage-key (base/make-storage-key namespace key)]
       (contains? (:records @data-atom) storage-key)))
 
   ;; -------------------------------------------------------------------------
@@ -130,7 +84,7 @@
            :or {limit 100 offset 0}} opts
           ns-keys (get-in @data-atom [:namespaces namespace] #{})
           filtered (if prefix
-                     (filter #(matches-prefix? % prefix) ns-keys)
+                     (filter #(base/matches-prefix? % prefix) ns-keys)
                      ns-keys)]
       (->> filtered
            (sort)
@@ -143,11 +97,11 @@
            :or {limit 100 offset 0}} opts
           ns-keys (get-in @data-atom [:namespaces namespace] #{})
           filtered (if prefix
-                     (filter #(matches-prefix? % prefix) ns-keys)
+                     (filter #(base/matches-prefix? % prefix) ns-keys)
                      ns-keys)]
       (->> filtered
            (map (fn [k]
-                  (let [storage-key (make-storage-key namespace k)]
+                  (let [storage-key (base/make-storage-key namespace k)]
                     (get-in @data-atom [:records storage-key]))))
            (filter some?)
            (sort-by :updated-at >)
@@ -156,36 +110,14 @@
            (vec))))
 
   (search [this namespace query opts]
-    ;; 简单实现：基于字符串匹配
-    ;; 高级实现需要向量搜索支持
-    (let [{:keys [top-k] :or {top-k 10}} opts
-          query-str (:query query)
-          ns-keys (get-in @data-atom [:namespaces namespace] #{})]
-      (->> ns-keys
-           (map (fn [k]
-                  (let [storage-key (make-storage-key namespace k)
-                        record (get-in @data-atom [:records storage-key])]
-                    (when record
-                      (let [value-str (pr-str (:value record))
-                            ;; 简单的包含匹配
-                            score (if (and query-str
-                                           (.contains ^String value-str ^String query-str))
-                                    1.0
-                                    0.0)]
-                        {:key k
-                         :value (:value record)
-                         :score score})))))
-           (filter some?)
-           (filter #(pos? (:score %)))
-           (sort-by :score >)
-           (take top-k)
-           (vec))))
+    (base/default-search this namespace query opts
+      (fn [] (get-in @data-atom [:namespaces namespace] #{}))))
 
   (count-keys [this namespace opts]
     (let [{:keys [prefix]} opts
           ns-keys (get-in @data-atom [:namespaces namespace] #{})]
       (if prefix
-        (count (filter #(matches-prefix? % prefix) ns-keys))
+        (count (filter #(base/matches-prefix? % prefix) ns-keys))
         (count ns-keys))))
 
   ;; -------------------------------------------------------------------------
@@ -225,11 +157,6 @@
                           {:records {}
                            :namespaces {}})]
      (->InMemoryStore (atom initial-data) config))))
-
-;; 向后兼容别名
-(def create-memory-store
-  "创建内存存储（向后兼容别名）"
-  create-in-memory-store)
 
 ;; =============================================================================
 ;; 便捷函数
