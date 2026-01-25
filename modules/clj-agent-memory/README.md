@@ -101,6 +101,73 @@
 (mem/snap-get ss {:thread-id "t1"})
 ```
 
+## 与 Agent 集成使用
+
+### 保存和恢复 Agent 对话状态
+
+```clojure
+(require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
+(require '[im.ttalk.agent.memory.store.in-memory :as mem-store])
+(require '[im.ttalk.agent.memory.snapshot.manager :as snap-mgr])
+(require '[im.ttalk.agent.memory.protocol :as mem-proto])
+(require '[im.ttalk.agent.core.kernel.context :as ctx])
+
+;; 1. 创建存储和快照管理器
+(def store (mem-store/create-in-memory-store))
+(def snap-manager (snap-mgr/create-snapshot-manager store))
+(def session-id "chat-session-001")
+
+;; 2. 创建 Agent 并对话
+(def agent (ka/create-agent
+             {:provider provider
+              :model "gpt-4"
+              :system-prompt "你是助手。"}))
+
+(ka/chat agent "我叫张三，在北京工作")
+(ka/chat agent "我喜欢编程")
+
+;; 3. 保存当前状态
+(mem-proto/snap-put snap-manager
+                    {:thread-id session-id}
+                    {:context (ka/get-context agent)}
+                    {:reason :user-save})
+
+;; 4. 后续恢复（如重启应用后）
+(let [loaded (mem-proto/snap-get snap-manager {:thread-id session-id})
+      new-agent (ka/create-agent {:provider provider :model "gpt-4"})]
+  ;; 恢复 context
+  (reset! (:context-atom new-agent) (:context (:snapshot loaded)))
+  ;; 继续对话
+  (ka/chat new-agent "我叫什么名字？"))
+;; => Agent 记得用户叫张三
+```
+
+### 使用 AgentMemory 统一管理
+
+```clojure
+;; AgentMemory 提供一站式记忆管理
+(def am (mem/create-agent-memory
+          {:context-store (mem/create-in-memory-store)
+           :persistent-store (mem/create-sqlite-store "data.db")}))
+
+;; 状态管理
+(mem/save-state am {:messages [...] :variables {...}})
+(mem/load-state am)
+
+;; 时间旅行
+(mem/go-back am)      ;; 回退
+(mem/go-forward am)   ;; 前进
+(mem/goto am 3)       ;; 跳转到版本 3
+
+;; 知识库
+(mem/remember am {:type :fact :content "用户偏好中文"})
+(mem/recall am "用户偏好")
+
+;; 消息管理
+(mem/add-message-to-memory am {:role "user" :content "你好"})
+(mem/get-messages-from-memory am)
+```
+
 ## API 参考
 
 ### Store 创建

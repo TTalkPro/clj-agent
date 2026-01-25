@@ -418,7 +418,9 @@ See [docs/process-framework-design.md](docs/process-framework-design.md) and [do
 
 ## Memory Storage
 
-Multi-backend storage for conversation history and snapshot persistence:
+Multi-backend storage for conversation history, snapshot persistence, and long/short-term memory management.
+
+### Basic Storage Operations
 
 ```clojure
 (require '[im.ttalk.agent.memory.api :as mem])
@@ -430,13 +432,128 @@ Multi-backend storage for conversation history and snapshot persistence:
 (def store (mem/create-redis-store redis-opts))    ;; Redis (distributed cache)
 
 ;; Key-Value operations
-(mem/kv-put store "key" "namespace" {:data "value"})
-(mem/kv-get store "key" "namespace")
-(mem/kv-list-keys store)
+(mem/kv-put store "user-123" "preferences" {:lang "en" :theme "dark"})
+(mem/kv-get store "user-123" "preferences")
+;; => {:lang "en" :theme "dark"}
 
-;; Snapshot operations (Process state save/restore)
-(mem/snap-put snapshot-store {:thread-id "t1"} snapshot metadata)
-(mem/snap-get snapshot-store {:thread-id "t1"})
+(mem/kv-list-keys store "preferences")
+(mem/kv-exists? store "user-123" "preferences")
+(mem/kv-delete store "user-123" "preferences")
+```
+
+### Agent Conversation State Save & Restore
+
+Use SnapshotManager to persist conversation state, enabling resume-from-checkpoint and time-travel:
+
+```clojure
+(require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
+(require '[im.ttalk.agent.memory.store.in-memory :as mem-store])
+(require '[im.ttalk.agent.memory.snapshot.manager :as snap-mgr])
+(require '[im.ttalk.agent.memory.protocol :as mem-proto])
+(require '[im.ttalk.agent.core.kernel.context :as ctx])
+
+;; 1. Create SnapshotManager
+(def store (mem-store/create-in-memory-store))
+(def snap-manager (snap-mgr/create-snapshot-manager store))
+(def thread-id "session-001")
+
+;; 2. Create Agent and chat
+(def agent (ka/create-agent
+             {:provider provider
+              :model "gpt-4"
+              :system-prompt "You are an assistant."}))
+
+(ka/chat agent "My name is John, I work in New York.")
+(ka/chat agent "I love programming.")
+
+;; 3. Save current conversation state
+(let [context (ka/get-context agent)
+      snapshot {:context context
+                :settings {:model "gpt-4"}}]
+  (mem-proto/snap-put snap-manager
+                      {:thread-id thread-id}
+                      snapshot
+                      {:reason :user-save
+                       :created-at (System/currentTimeMillis)}))
+
+;; 4. Restore state in new Agent (resume conversation)
+(let [loaded (mem-proto/snap-get snap-manager {:thread-id thread-id})
+      restored-context (:context (:snapshot loaded))
+      new-agent (ka/create-agent {:provider provider :model "gpt-4"})]
+  ;; Restore context
+  (reset! (:context-atom new-agent) restored-context)
+  ;; Continue conversation, Agent retains previous memory
+  (ka/chat new-agent "What's my name?"))
+;; => Agent remembers the user is named John
+```
+
+### AgentMemory Unified Wrapper
+
+AgentMemory provides one-stop memory management, integrating snapshots, time-travel, knowledge base, and message management:
+
+```clojure
+(require '[im.ttalk.agent.memory.api :as mem])
+
+;; Create complete memory system
+(def am (mem/create-agent-memory
+          {:context-store (mem/create-in-memory-store)      ;; Hot data
+           :persistent-store (mem/create-sqlite-store "data.db")}))  ;; Cold data
+
+;; State management
+(mem/save-state am {:messages [...] :variables {...}})
+(mem/load-state am)
+
+;; Time travel
+(mem/go-back am)           ;; Go to previous state
+(mem/go-forward am)        ;; Go to next state
+(mem/goto am 3)            ;; Jump to version 3
+(mem/list-history am)      ;; View history
+
+;; Branch management (A/B testing, experimental conversations)
+(mem/create-branch am "experiment-a")
+(mem/switch-branch am "experiment-a")
+(mem/list-branches am)
+
+;; Knowledge base (long-term memory)
+(mem/remember am {:type :fact :content "User prefers English"})
+(mem/remember am {:type :episode :content "User asked about weather last time"})
+(mem/recall am "user preference")                  ;; Semantic retrieval
+(mem/recall-by-type am :fact)                      ;; Retrieve by type
+(mem/search-knowledge am "preference" {:limit 5})  ;; Search
+
+;; Message management
+(mem/add-message-to-memory am {:role "user" :content "Hello"})
+(mem/get-messages-from-memory am)
+(mem/clear-messages-from-memory am)
+
+;; Session archiving
+(mem/archive-session! am)
+(mem/list-archived am)
+(mem/load-archived am "session-id")
+```
+
+### Long-term Memory Types
+
+```clojure
+;; Semantic memory (facts/knowledge)
+(def sem (mem/create-semantic-memory store))
+(mem/store-fact sem {:key "capital" :value "Beijing is the capital of China" :category "geography"})
+(mem/get-fact sem "capital")
+(mem/query-facts sem {:category "geography"})
+
+;; Episodic memory (events/experiences)
+(def epi (mem/create-episodic-memory store))
+(mem/store-episode epi {:action "weather-query"
+                        :query "Beijing weather"
+                        :outcome :success
+                        :timestamp (System/currentTimeMillis)})
+(mem/get-recent-episodes epi 5)
+
+;; Procedural memory (rules/skills)
+(def proc (mem/create-procedural-memory store))
+(mem/set-system-prompt proc "You are a professional assistant")
+(mem/add-rule proc (mem/create-rule {:id "r1" :content "Always respond in English"}))
+(mem/get-active-rules proc)
 ```
 
 ## RAG (Retrieval-Augmented Generation)
