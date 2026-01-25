@@ -51,6 +51,25 @@
    :data   {:reason reason}
    :type   :error})
 
+(defn external-event
+  "创建外部事件
+
+   外部事件用于从 process 外部注入事件，使运行中的 process
+   能够接收来自外部系统的输入（如用户输入、webhook 回调等）。
+
+   参数:
+   - name: 事件名称（keyword）
+   - data: 事件数据（可选）
+
+   返回: 外部事件 map"
+  ([name]
+   (external-event name nil))
+  ([name data]
+   {:name   name
+    :source :external
+    :data   data
+    :type   :external}))
+
 (defn with-source
   "为事件标记来源 step
 

@@ -114,6 +114,38 @@
   [b step-id]
   (assoc b :error-handler step-id))
 
+(defn on-external-event
+  "添加外部事件绑定
+
+   将名为 event-name 的外部事件路由到 target-step。
+   用于声明式定义 Step 如何响应外部事件。
+
+   外部事件通过 runtime/send-event 发送，与内部事件使用相同的路由机制。
+   此函数是 on-event 的语义别名，用于明确表示事件来源是外部系统。
+
+   参数:
+   - b:            builder
+   - event-name:   外部事件名称
+   - target-step:  目标 step id
+   - target-input: 目标输入槽名称
+   - transform:    (可选) 数据转换函数
+
+   返回: 更新后的 builder
+
+   示例:
+   (-> (builder :interactive)
+       (add-step {:id :responder
+                  :on-activate (fn [inputs state ctx]
+                                 {:events [{:name :response :data ...}]})})
+       (on-external-event :user-input :responder :input)
+       (build))"
+  ([b event-name target-step target-input]
+   (on-external-event b event-name target-step target-input nil))
+  ([b event-name target-step target-input transform]
+   ;; 外部事件绑定与普通绑定相同，只是语义上区分
+   (update b :bindings conj
+           (event/binding event-name target-step target-input transform))))
+
 ;;; ============================================================
 ;;; 编译验证
 ;;; ============================================================

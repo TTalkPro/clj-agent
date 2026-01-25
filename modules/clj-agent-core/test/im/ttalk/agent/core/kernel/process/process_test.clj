@@ -2,6 +2,7 @@
   "Process Framework 综合测试（Channel-based 并行 Runtime）"
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string]
+            [clojure.core.async :refer [<!! timeout alt!!]]
             [im.ttalk.agent.core.kernel.process.event :as event]
             [im.ttalk.agent.core.kernel.process.step :as step]
             [im.ttalk.agent.core.kernel.process.builder :as builder]
@@ -38,7 +39,20 @@
   (testing "标记事件来源"
     (let [e (-> (event/create :done "result")
                 (event/with-source :step-b))]
-      (is (= :step-b (:source e))))))
+      (is (= :step-b (:source e)))))
+
+  (testing "创建外部事件"
+    (let [e (event/external-event :user-input {:text "hello"})]
+      (is (= :user-input (:name e)))
+      (is (= {:text "hello"} (:data e)))
+      (is (= :external (:source e)))
+      (is (= :external (:type e)))))
+
+  (testing "创建无数据外部事件"
+    (let [e (event/external-event :ping)]
+      (is (= :ping (:name e)))
+      (is (nil? (:data e)))
+      (is (= :external (:type e))))))
 
 (deftest event-binding-test
   (testing "创建基本绑定"
@@ -1061,3 +1075,236 @@
         (when (seq quiescent-snaps)
           (doseq [snap quiescent-snaps]
             (is (= :running (:status snap)))))))))
+
+;; ============================================================
+;; Phase 6: 外部事件支持
+;; ============================================================
+
+(deftest external-event-basic-test
+  (testing "外部事件基本发送/接收"
+    (let [received (atom nil)
+          process-spec (-> (builder/builder :external-basic)
+                          (builder/add-step
+                            {:id :receiver
+                             :on-activate (fn [inputs _state ctx]
+                                            (reset! received (:input inputs))
+                                            ;; 使用 :terminate true 信号 process 完成
+                                            {:context (ctx/set-var ctx :got (:input inputs))
+                                             :terminate true})})
+                          (builder/on-external-event :user-input :receiver :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 初始状态应为 running
+      (is (= :running (runtime/get-status handle)))
+      ;; 发送外部事件
+      (is (true? (runtime/send-event handle :user-input {:text "hello"})))
+      ;; 等待完成
+      (let [result (runtime/wait-for-completion handle 3000)]
+        (is (= :completed (:status result)))
+        (is (= {:text "hello"} @received))
+        (is (= {:text "hello"} (ctx/get-var (:context result) :got)))))))
+
+(deftest external-event-multiple-test
+  (testing "多个外部事件场景"
+    (let [messages (atom [])
+          process-spec (-> (builder/builder :external-multi)
+                          (builder/add-step
+                            {:id :collector
+                             :init (fn [_] {:count 0})
+                             :on-activate (fn [inputs state ctx]
+                                            (let [msg (:input inputs)
+                                                  n (inc (:count state))]
+                                              (swap! messages conj msg)
+                                              (if (>= n 3)
+                                                ;; 收到 3 条消息后终止
+                                                {:context (ctx/set-var ctx :done true)
+                                                 :state {:count n}
+                                                 :terminate true}
+                                                ;; 继续等待
+                                                {:state {:count n}})))})
+                          (builder/on-external-event :message :collector :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 发送多个消息，用同步发送确保事件被处理
+      (runtime/send-event! handle :message "msg-1" 1000)
+      (Thread/sleep 100)
+      (runtime/send-event! handle :message "msg-2" 1000)
+      (Thread/sleep 100)
+      (runtime/send-event! handle :message "msg-3" 1000)
+      ;; 等待完成
+      (let [result (runtime/wait-for-completion handle 3000)]
+        (is (= :completed (:status result)))
+        (is (true? (ctx/get-var (:context result) :done)))
+        (is (= ["msg-1" "msg-2" "msg-3"] @messages))))))
+
+(deftest external-event-mixed-with-internal-test
+  (testing "外部事件与内部事件混合"
+    (let [process-spec (-> (builder/builder :mixed-events)
+                          (builder/add-step
+                            {:id :starter
+                             :on-activate (fn [inputs _state _ctx]
+                                            {:events [{:name :internal-done :data "from-starter"}]})})
+                          (builder/add-step
+                            {:id :combiner
+                             :required-inputs [:internal :external]
+                             :on-activate (fn [inputs _state ctx]
+                                            {:context (ctx/set-var ctx :combined
+                                                        (str (:internal inputs) "+" (:external inputs)))
+                                             :terminate true})})
+                          (builder/on-event :start :starter :input)
+                          (builder/on-event :internal-done :combiner :internal)
+                          (builder/on-external-event :external-input :combiner :external)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 发送外部事件
+      (Thread/sleep 50)  ;; 确保 starter 先执行
+      (runtime/send-event handle :external-input "from-external")
+      ;; 等待完成
+      (let [result (runtime/wait-for-completion handle 3000)]
+        (is (= :completed (:status result)))
+        (is (= "from-starter+from-external" (ctx/get-var (:context result) :combined)))))))
+
+(deftest external-event-get-status-test
+  (testing "状态检查 get-status"
+    (let [process-spec (-> (builder/builder :status-test)
+                          (builder/add-step
+                            {:id :blocker
+                             :on-activate (fn [inputs _state _ctx]
+                                            ;; 等待外部事件来完成
+                                            {:events []})})
+                          (builder/add-step
+                            {:id :finisher
+                             :on-activate (fn [inputs _state ctx]
+                                            {:context (ctx/set-var ctx :finished true)
+                                             :terminate true})})
+                          (builder/on-external-event :start-work :blocker :input)
+                          (builder/on-external-event :complete :finisher :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 初始为 running（无初始事件，但 process 等待外部事件）
+      (is (= :running (runtime/get-status handle)))
+      ;; 发送完成事件
+      (runtime/send-event handle :complete "done")
+      (Thread/sleep 100)
+      ;; 等待一小段时间后检查状态（可能已完成）
+      (let [result (runtime/wait-for-completion handle 1000)]
+        (is (= :completed (:status result)))))))
+
+(deftest external-event-timeout-test
+  (testing "wait-for-completion 超时"
+    (let [process-spec (-> (builder/builder :timeout-test)
+                          (builder/add-step
+                            {:id :waiter
+                             :on-activate (fn [_ _ _]
+                                            ;; 永远等待
+                                            {:events []})})
+                          (builder/on-external-event :trigger :waiter :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms 10000})]
+      ;; 不发送事件，等待超时
+      (let [result (runtime/wait-for-completion handle 200)]
+        (is (= :timeout (:status result)))
+        (is (= "等待超时" (get-in result [:error :reason]))))
+      ;; 清理
+      (runtime/stop-process handle))))
+
+(deftest external-event-stop-process-test
+  (testing "停止运行中的 process"
+    (let [process-spec (-> (builder/builder :stop-test)
+                          (builder/add-step
+                            {:id :worker
+                             :on-activate (fn [_ _ _]
+                                            {:events []})})
+                          (builder/on-external-event :work :worker :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms 10000})]
+      (is (= :running (runtime/get-status handle)))
+      ;; 停止进程
+      (is (true? (runtime/stop-process handle)))
+      ;; 停止后发送事件应返回 false
+      (Thread/sleep 50)
+      (is (false? (runtime/send-event handle :work "data"))))))
+
+(deftest external-event-send-to-completed-test
+  (testing "向已完成的 process 发送事件返回 false"
+    (let [process-spec (-> (builder/builder :completed-send)
+                          (builder/add-step
+                            {:id :quick
+                             :on-activate (fn [inputs _state ctx]
+                                            ;; 使用 :terminate true 来信号 process 完成
+                                            {:context (ctx/set-var ctx :done true)
+                                             :terminate true})})
+                          (builder/on-event :start :quick :input)
+                          (builder/set-initial-event :start "go")
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 等待完成
+      (let [result (runtime/wait-for-completion handle 1000)]
+        (is (= :completed (:status result))))
+      ;; 完成后发送事件应返回 false
+      (is (false? (runtime/send-event handle :after-done "data"))))))
+
+(deftest external-event-send-event-sync-test
+  (testing "同步发送事件 send-event!"
+    (let [received (atom nil)
+          process-spec (-> (builder/builder :sync-send)
+                          (builder/add-step
+                            {:id :receiver
+                             :on-activate (fn [inputs _state ctx]
+                                            (reset! received (:input inputs))
+                                            {:context (ctx/set-var ctx :got true)
+                                             :terminate true})})
+                          (builder/on-external-event :sync-msg :receiver :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 同步发送
+      (is (true? (runtime/send-event! handle :sync-msg {:sync true} 1000)))
+      ;; 等待完成
+      (let [result (runtime/wait-for-completion handle 1000)]
+        (is (= :completed (:status result)))
+        (is (= {:sync true} @received))))))
+
+(deftest external-event-interactive-chat-test
+  (testing "交互式对话模式"
+    (let [history (atom [])
+          process-spec (-> (builder/builder :chat)
+                          (builder/add-step
+                            {:id :chat-handler
+                             :init (fn [_] {:turn 0})
+                             :on-activate (fn [inputs state ctx]
+                                            (let [msg (:input inputs)
+                                                  turn (inc (:turn state))]
+                                              (swap! history conj {:user msg :turn turn})
+                                              (if (= msg "/quit")
+                                                ;; 收到 /quit 终止 process
+                                                {:context (ctx/set-var ctx :ended true)
+                                                 :state {:turn turn}
+                                                 :terminate true}
+                                                {:events [{:name :response
+                                                           :data (str "Echo: " msg)}]
+                                                 :state {:turn turn}})))})
+                          (builder/add-step
+                            {:id :output
+                             :on-activate (fn [inputs _state _ctx]
+                                            ;; 输出响应后等待下一个输入
+                                            (swap! history conj {:bot (:input inputs)})
+                                            {:events []})})
+                          (builder/on-external-event :user-input :chat-handler :input)
+                          (builder/on-event :response :output :input)
+                          (builder/build))
+          handle (runtime/start-process-async process-spec {:timeout-ms test-timeout})]
+      ;; 模拟对话
+      (runtime/send-event handle :user-input "Hello")
+      (Thread/sleep 100)
+      (runtime/send-event handle :user-input "How are you?")
+      (Thread/sleep 100)
+      (runtime/send-event handle :user-input "/quit")
+      ;; 等待完成
+      (let [result (runtime/wait-for-completion handle 2000)]
+        (is (= :completed (:status result)))
+        (is (true? (ctx/get-var (:context result) :ended)))
+        ;; 验证对话历史
+        (is (= 5 (count @history)))  ;; 3 user + 2 bot (quit 没有回复)
+        (is (= "Hello" (:user (first @history))))
+        (is (= "Echo: Hello" (:bot (second @history))))))))

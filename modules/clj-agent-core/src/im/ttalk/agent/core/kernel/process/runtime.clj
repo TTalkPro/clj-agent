@@ -50,11 +50,21 @@
      (when (= :paused (:status rt))
        (run-resume rt resume-data opts)))"
   (:require [clojure.core.async :as async :refer [go go-loop <! >! >!! <!! chan
-                                                   put! close! alt! timeout]]
+                                                   put! close! alt! alt!! timeout]]
             [im.ttalk.agent.core.kernel.process.event :as event]
             [im.ttalk.agent.core.kernel.process.step :as step]
             [im.ttalk.agent.core.kernel.process.snapshot-manager :as sm]
             [im.ttalk.agent.core.kernel.context :as ctx]))
+
+;;; ============================================================
+;;; ProcessHandle - 外部事件交互句柄
+;;; ============================================================
+
+(defrecord ProcessHandle
+  [runtime           ;; 完整 runtime map
+   external-chan     ;; 外部事件通道
+   result-chan       ;; 结果通道
+   status-atom])     ;; 状态 atom
 
 (def ^:private default-timeout-ms
   "默认全局超时（防止无限等待）"
@@ -222,7 +232,10 @@
                                            (assoc :messages (:messages (:context result)))
                                            (assoc :history (:history (:context result)))))))
                             (swap! in-flight dec)
-                            (dec-active!))))))))
+                            (dec-active!)
+                            ;; 如果 step 返回 :terminate true，发送终止信号
+                            (when (:terminate result)
+                              (put! event-chan {:name :__terminate__ :type :internal})))))))))
                 ;; 未激活 → dec in-flight（输入已收集但 step 未执行）
                 (swap! in-flight dec))
             (recur))))]
@@ -236,61 +249,95 @@
 ;;; ============================================================
 
 (defn- start-router
-  "启动事件路由 go-loop
+  "启动事件路由 go-loop（支持外部事件）
 
-   从 event-chan 取事件，根据 bindings 路由到目标 step 的 input-chan。
+   从 event-chan 和 external-chan 取事件，根据 bindings 路由到目标 step 的 input-chan。
    监听 control-chan 的 pause/stop 信号。
 
    参数:
-   - event-chan:   事件总线
-   - control-chan: 控制信号 channel
-   - bindings:     事件绑定列表
-   - steps:        {step-id step-runtime}
-   - in-flight:    进行中计数 atom
-   - on-idle:      空闲回调（event-chan 空且 in-flight=0）
+   - event-chan:    事件总线（内部事件）
+   - external-chan: 外部事件通道（可选，nil 则不监听）
+   - control-chan:  控制信号 channel
+   - bindings:      事件绑定列表
+   - steps:         {step-id step-runtime}
+   - in-flight:     进行中计数 atom
+   - on-idle:       空闲回调（event-chan 空且 in-flight=0）
 
    返回: router go-block handle"
-  [event-chan control-chan bindings steps in-flight on-idle]
-  (go-loop []
-    (alt!
-      ;; 控制信号优先
-      control-chan
-      ([signal]
-       (when signal
-         (case (:action signal)
-           :stop nil  ;; 停止 router
-           :pause nil ;; 暂停 router（不再消费事件）
-           :resume (recur)  ;; 恢复
-           (recur))))
+  [event-chan external-chan control-chan bindings steps in-flight on-idle]
+  (let [;; 构建 alt! 需要监听的 channel 列表
+        route-event!
+        (fn [event]
+          (let [deliveries (event/route event bindings)]
+            (if (seq deliveries)
+              (do
+                ;; 增加 in-flight（每个 delivery 一次，减去原来的 1）
+                (swap! in-flight + (dec (count deliveries)))
+                ;; 投递到目标 step
+                (doseq [{:keys [step-id input-name data]} deliveries]
+                  (when-let [step-rt (get steps step-id)]
+                    (put! (:input-chan step-rt)
+                          {:input-name input-name :data data}))))
+              ;; 无匹配路由 → dec in-flight
+              (swap! in-flight dec))))
+        ;; 跟踪 external-chan 是否已关闭
+        external-closed (atom false)
+        ;; 构建监听的 channel 列表（过滤掉 nil）
+        base-ports [control-chan event-chan]
+        all-ports (if external-chan
+                    (conj base-ports external-chan)
+                    base-ports)]
+    (go-loop []
+      ;; 使用 alts! 支持动态 channel 列表
+      (let [timeout-ch (timeout 10)
+            ports-with-timeout (conj all-ports timeout-ch)
+            [v port] (async/alts! ports-with-timeout :priority true)]
+        (cond
+          ;; 控制信号
+          (= port control-chan)
+          (when v
+            (case (:action v)
+              :stop nil  ;; 停止 router
+              :pause nil ;; 暂停 router
+              :resume (recur)
+              (recur)))
 
-      ;; 事件处理
-      event-chan
-      ([event]
-       (if event
-         (do
-           ;; 路由事件
-           (let [deliveries (event/route event bindings)]
-             (if (seq deliveries)
-               (do
-                 ;; 增加 in-flight（每个 delivery 一次）
-                 (swap! in-flight + (dec (count deliveries)))
-                 ;; 投递到目标 step
-                 (doseq [{:keys [step-id input-name data]} deliveries]
-                   (when-let [step-rt (get steps step-id)]
-                     (put! (:input-chan step-rt)
-                           {:input-name input-name :data data}))))
-               ;; 无匹配路由 → dec in-flight
-               (swap! in-flight dec)))
-           (recur))
-         ;; event-chan 关闭
-         nil))
+          ;; 内部事件
+          (= port event-chan)
+          (if v
+            (do
+              ;; 检查是否是终止信号
+              (if (= :__terminate__ (:name v))
+                (do
+                  (reset! external-closed true)
+                  (recur))
+                (do
+                  (route-event! v)
+                  (recur))))
+            ;; event-chan 关闭
+            nil)
 
-      ;; 空闲检测：短暂等待后检查
-      (timeout 10)
-      ([_]
-       (if (and (zero? @in-flight))
-         (on-idle)
-         (recur))))))
+          ;; 外部事件
+          (and external-chan (= port external-chan))
+          (if v
+            (do
+              (swap! in-flight inc)
+              (route-event! v)
+              (recur))
+            (do
+              (reset! external-closed true)
+              (recur)))
+
+          ;; 超时 - 空闲检测
+          (= port timeout-ch)
+          (if (zero? @in-flight)
+            (if (and external-chan (not @external-closed))
+              (recur)
+              (on-idle))
+            (recur))
+
+          ;; 其他情况
+          :else (recur))))))
 
 ;;; ============================================================
 ;;; Checkpointer 辅助
@@ -545,8 +592,8 @@
         all-bindings (into (vec (:bindings process-spec))
                            (or error-bindings []))
 
-        ;; 启动 router
-        router (start-router event-chan control-chan all-bindings
+        ;; 启动 router（传递 nil 表示不支持外部事件）
+        router (start-router event-chan nil control-chan all-bindings
                              steps in-flight on-idle)
 
         ;; Runtime 结构
@@ -941,3 +988,360 @@
      (when (:event-chan runtime)
        (shutdown-runtime runtime))
      result)))
+
+;;; ============================================================
+;;; 外部事件支持 - 异步 Process 交互
+;;; ============================================================
+
+(defn- start-process-with-external
+  "启动 process（带外部事件通道支持）
+
+   与 start-process 类似，但接受外部事件通道用于接收外部注入的事件。
+
+   参数:
+   - process-spec:  编译后的 process 定义
+   - opts:         选项 map
+   - external-chan: 外部事件通道
+
+   返回: runtime map"
+  [process-spec opts external-chan]
+  (let [step-states (or (:step-states opts) {})
+        context-atom (atom (or (:context opts) (ctx/create)))
+        timeout-ms (or (:timeout-ms opts) default-timeout-ms)
+        on-quiescent (:on-quiescent opts)
+        ;; Checkpointer 支持
+        checkpointer (:checkpointer opts)
+        thread-id (or (:thread-id opts)
+                      (when checkpointer (str (java.util.UUID/randomUUID))))
+        checkpoint-policy (or (:checkpoint-policy opts) :on-pause-only)
+        event-chan (chan 256)
+        control-chan (chan 16)
+        result-chan (chan 1)
+        in-flight (atom 0)
+        status (atom :running)
+        error-atom (atom nil)
+        paused-step-atom (atom nil)
+        pause-reason-atom (atom nil)
+        ;; steps-ref 用于 on-quiescent 和 checkpointer
+        need-steps-ref (or on-quiescent checkpointer)
+        ;; on-quiescent 支持
+        active-count (when on-quiescent (atom 0))
+        steps-ref (when need-steps-ref (atom nil))
+        on-step-done (when on-quiescent
+                       (fn [_step-id]
+                         (when (and (= :running @status)
+                                    (pos? @in-flight))
+                           (let [steps @steps-ref
+                                 snapshot
+                                 (reduce-kv
+                                   (fn [acc sid step-rt]
+                                     (let [sd @(:state-atom step-rt)]
+                                       (assoc acc sid
+                                              {:state (:state sd)
+                                               :activation-count (:activation-count sd)})))
+                                   {}
+                                   steps)
+                                 quiescent-snapshot {:process-name (:name process-spec)
+                                                    :reason       :quiescent
+                                                    :status       :running
+                                                    :step-states  snapshot
+                                                    :context      @context-atom
+                                                    :created-at   (System/currentTimeMillis)}]
+                             (try (on-quiescent quiescent-snapshot)
+                                  (catch Exception _e nil))
+                             ;; Checkpointer: on-quiescent 策略时保存
+                             (when (and checkpointer (= checkpoint-policy :on-quiescent))
+                               (do-checkpoint! checkpointer thread-id quiescent-snapshot
+                                               {:reason :quiescent
+                                                :created-at (System/currentTimeMillis)}))))))
+
+        ;; Checkpointer: per-step 回调（:every-step 策略）
+        on-step-checkpoint (when (and checkpointer (= checkpoint-policy :every-step))
+                             (fn [step-id]
+                               (when steps-ref
+                                 (let [snapshot (capture-snapshot-from-atoms
+                                                  process-spec @steps-ref context-atom
+                                                  {:status :running})]
+                                   (do-checkpoint! checkpointer thread-id snapshot
+                                                   {:step step-id
+                                                    :reason :step-done
+                                                    :created-at (System/currentTimeMillis)})))))
+
+        ;; 完成回调
+        on-idle (fn []
+                  (when (compare-and-set! status :running :completed)
+                    ;; Checkpointer: 完成时保存
+                    (when (and checkpointer steps-ref)
+                      (let [snapshot (capture-snapshot-from-atoms
+                                      process-spec @steps-ref context-atom
+                                      {:status :completed})]
+                        (do-checkpoint! checkpointer thread-id snapshot
+                                        {:reason :completed
+                                         :created-at (System/currentTimeMillis)})))
+                    (put! result-chan
+                           {:status       :completed
+                            :context      @context-atom
+                            :error        nil
+                            :paused-step  nil
+                            :pause-reason nil})))
+
+        ;; 暂停回调
+        on-pause (fn [step-id reason _state]
+                   (when (compare-and-set! status :running :paused)
+                     (reset! paused-step-atom step-id)
+                     (reset! pause-reason-atom reason)
+                     ;; Checkpointer: 暂停时保存
+                     (when (and checkpointer steps-ref)
+                       (let [snapshot (capture-snapshot-from-atoms
+                                        process-spec @steps-ref context-atom
+                                        {:status :paused
+                                         :paused-step step-id
+                                         :pause-reason reason})]
+                         (do-checkpoint! checkpointer thread-id snapshot
+                                         {:step step-id
+                                          :reason :paused
+                                          :created-at (System/currentTimeMillis)})))
+                     ;; 触发 on-quiescent（reason :paused）
+                     (when (and on-quiescent steps-ref)
+                       (let [steps @steps-ref
+                             step-snapshot
+                             (reduce-kv
+                               (fn [acc sid step-rt]
+                                 (let [sd @(:state-atom step-rt)]
+                                   (assoc acc sid
+                                          {:state (:state sd)
+                                           :activation-count (:activation-count sd)})))
+                               {}
+                               steps)]
+                         (try
+                           (on-quiescent {:process-name  (:name process-spec)
+                                          :reason        :paused
+                                          :status        :paused
+                                          :paused-step   step-id
+                                          :pause-reason  reason
+                                          :step-states   step-snapshot
+                                          :context       @context-atom
+                                          :created-at    (System/currentTimeMillis)})
+                           (catch Exception _e nil))))
+                     ;; 停止 router
+                     (put! control-chan {:action :pause})
+                     (put! result-chan
+                            {:status       :paused
+                             :context      @context-atom
+                             :error        nil
+                             :paused-step  step-id
+                             :pause-reason reason})))
+
+        ;; 错误回调
+        on-error (fn [step-id reason]
+                   (let [error-handler-id (:error-handler process-spec)]
+                     (if (and error-handler-id (not= step-id error-handler-id))
+                       ;; 路由到 error-handler step
+                       (do
+                         (swap! in-flight inc)
+                         (put! event-chan (event/error-event step-id reason)))
+                       ;; 无 handler 或 handler 自身出错 → failed
+                       (when (compare-and-set! status :running :failed)
+                         (reset! error-atom {:step step-id :reason reason})
+                         (put! control-chan {:action :stop})
+                         (put! result-chan
+                                {:status       :failed
+                                 :context      @context-atom
+                                 :error        {:step step-id :reason reason}
+                                 :paused-step  nil
+                                 :pause-reason nil})))))
+
+        ;; 创建 step workers
+        steps (reduce-kv
+                (fn [acc step-id step-spec]
+                  (let [input-chan (chan 64)
+                        saved-state (get step-states step-id)
+                        step-rt (start-step-worker
+                                  step-id step-spec input-chan event-chan
+                                  context-atom in-flight on-pause on-error
+                                  :initial-step-state saved-state
+                                  :active-count active-count
+                                  :on-step-checkpoint on-step-checkpoint
+                                  :on-step-done on-step-done)]
+                    (assoc acc step-id step-rt)))
+                {}
+                (:steps process-spec))
+        _ (when steps-ref (reset! steps-ref steps))
+
+        ;; 错误事件绑定（如有 error-handler）
+        error-bindings (when-let [eh (:error-handler process-spec)]
+                         [(event/binding :error eh :error)])
+        all-bindings (into (vec (:bindings process-spec))
+                           (or error-bindings []))
+
+        ;; 启动 router（传递 external-chan）
+        router (start-router event-chan external-chan control-chan all-bindings
+                             steps in-flight on-idle)
+
+        ;; Runtime 结构
+        runtime {:status        status
+                 :process-spec  process-spec
+                 :event-chan    event-chan
+                 :external-chan external-chan
+                 :control-chan  control-chan
+                 :steps         steps
+                 :context       context-atom
+                 :in-flight     in-flight
+                 :error         error-atom
+                 :paused-step   paused-step-atom
+                 :pause-reason  pause-reason-atom
+                 :result-chan   result-chan
+                 :router        router
+                 :thread-id     thread-id
+                 :checkpointer  checkpointer}]
+
+    ;; 放入初始事件
+    (let [initial-events (:initial-events process-spec)]
+      (when (seq initial-events)
+        (reset! in-flight (count initial-events))
+        (doseq [evt initial-events]
+          (put! event-chan evt))))
+
+    ;; 超时保护
+    (go
+      (<! (timeout timeout-ms))
+      (when (compare-and-set! status :running :failed)
+        (reset! error-atom {:reason "全局超时" :timeout-ms timeout-ms})
+        (put! control-chan {:action :stop})
+        (put! result-chan
+               {:status       :failed
+                :context      @context-atom
+                :error        {:reason "全局超时" :timeout-ms timeout-ms}
+                :paused-step  nil
+                :pause-reason nil})))
+
+    ;; 返回 runtime
+    runtime))
+
+(defn start-process-async
+  "异步启动 process，返回 ProcessHandle 用于外部交互
+
+   与 run-process 不同，此函数立即返回 ProcessHandle，
+   允许外部通过 send-event 向运行中的 process 注入事件。
+
+   参数:
+   - process-spec: 编译后的 process 定义
+   - opts:        选项 map（同 start-process）
+
+   返回:
+   ProcessHandle 实例，可用于:
+   - (send-event handle :event-name data) - 发送外部事件
+   - (get-status handle) - 获取当前状态
+   - (wait-for-completion handle) - 等待完成
+   - (stop-process handle) - 停止进程
+
+   示例:
+   (let [handle (start-process-async my-process {})]
+     (send-event handle :user-input {:text \"hello\"})
+     (let [result (wait-for-completion handle)]
+       (println \"Result:\" result)))"
+  ([process-spec]
+   (start-process-async process-spec {}))
+  ([process-spec opts]
+   (let [external-chan (chan 64)
+         runtime (start-process-with-external process-spec opts external-chan)]
+     (->ProcessHandle
+       runtime
+       external-chan
+       (:result-chan runtime)
+       (:status runtime)))))
+
+(defn send-event
+  "向运行中的 process 发送外部事件（非阻塞）
+
+   参数:
+   - handle:     ProcessHandle 实例
+   - event-name: 事件名称（keyword）
+   - data:       事件数据（可选）
+
+   返回:
+   true 如果事件已入队，false 如果 process 已结束
+
+   示例:
+   (send-event handle :user-input {:text \"hello\"})"
+  ([handle event-name]
+   (send-event handle event-name nil))
+  ([handle event-name data]
+   (let [status @(:status-atom handle)]
+     (if (= :running status)
+       (do
+         (put! (:external-chan handle)
+               (event/external-event event-name data))
+         true)
+       false))))
+
+(defn send-event!
+  "向运行中的 process 发送外部事件（同步阻塞版本）
+
+   阻塞直到事件被接受或超时。
+
+   参数:
+   - handle:     ProcessHandle 实例
+   - event-name: 事件名称
+   - data:       事件数据
+   - timeout-ms: 超时毫秒（默认 5000）
+
+   返回:
+   true 如果事件已发送，false 如果超时或 process 已结束"
+  ([handle event-name data]
+   (send-event! handle event-name data 5000))
+  ([handle event-name data timeout-ms]
+   (let [status @(:status-atom handle)]
+     (if (= :running status)
+       (alt!!
+         [[(:external-chan handle) (event/external-event event-name data)]] true
+         (timeout timeout-ms) false)
+       false))))
+
+(defn get-status
+  "获取 process 当前状态
+
+   参数:
+   - handle: ProcessHandle 实例
+
+   返回: :running | :paused | :completed | :failed"
+  [handle]
+  @(:status-atom handle))
+
+(defn wait-for-completion
+  "等待 process 完成（阻塞）
+
+   参数:
+   - handle:     ProcessHandle 实例
+   - timeout-ms: 超时毫秒（可选）
+
+   返回:
+   结果 map {:status :context :error ...}
+   超时时返回 {:status :timeout :error {:reason \"等待超时\"}}"
+  ([handle]
+   (<!! (:result-chan handle)))
+  ([handle timeout-ms]
+   (alt!!
+     (:result-chan handle) ([result] result)
+     (timeout timeout-ms) {:status :timeout
+                           :error {:reason "等待超时"}})))
+
+(defn stop-process
+  "停止运行中的 process
+
+   发送停止信号并关闭外部事件通道。
+
+   参数:
+   - handle: ProcessHandle 实例
+
+   返回: true"
+  [handle]
+  (let [runtime (:runtime handle)
+        status-atom (:status-atom handle)]
+    ;; 标记为停止状态（阻止后续 send-event）
+    (reset! status-atom :stopped)
+    (put! (:control-chan runtime) {:action :stop})
+    (close! (:external-chan handle))
+    ;; 关闭 runtime 资源
+    (shutdown-runtime runtime)
+    true))
