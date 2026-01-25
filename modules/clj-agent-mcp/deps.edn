@@ -3,9 +3,7 @@
         ;; JSON 编解码
         cheshire/cheshire {:mvn/version "5.13.0"}
         ;; HTTP 客户端/服务端
-        http-kit/http-kit {:mvn/version "2.8.0"}
-        ;; 本地模块依赖
-        im.ttalk/clj-agent-tools {:local/root "../clj-agent-tools"}}
+        http-kit/http-kit {:mvn/version "2.8.0"}}
 
  :aliases
  {:test {:extra-paths ["test"]

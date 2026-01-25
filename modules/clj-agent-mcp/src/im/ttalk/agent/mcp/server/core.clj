@@ -5,9 +5,13 @@
    - 初始化握手
    - 消息路由
    - 能力注册
-   - 生命周期管理"
-  (:require [im.ttalk.agent.mcp.protocol :as protocol]
-            [im.ttalk.agent.mcp.json-rpc :as rpc]
+   - 生命周期管理
+
+   本模块使用 registry 和 handler 模块实现核心逻辑，
+   同时保持对外 API 的向后兼容性。"
+  (:require [im.ttalk.agent.mcp.registry :as registry]
+            [im.ttalk.agent.mcp.handler :as handler]
+            [im.ttalk.agent.mcp.protocol :as protocol]
             [im.ttalk.agent.mcp.transport.stdio :as stdio]
             [im.ttalk.agent.mcp.transport.sse :as sse]))
 
@@ -15,126 +19,11 @@
 ;; 服务器状态
 ;; =============================================================================
 
-(defrecord MCPServer [name
-                      version
-                      transport
-                      tools-atom       ;; atom: {tool-name -> tool-def}
-                      resources-atom   ;; atom: {uri -> resource-def}
-                      prompts-atom     ;; atom: {prompt-name -> prompt-def}
-                      running?
-                      message-loop])
+(defrecord MCPServer [registry transport running? message-loop])
 
 ;; =============================================================================
-;; 消息处理
+;; 内部函数
 ;; =============================================================================
-
-(defn- handle-initialize
-  "处理 initialize 请求
-
-   参数:
-   - server: MCPServer 实例
-   - params: 请求参数
-
-   返回: 响应结果"
-  [server params]
-  (let [client-info (:clientInfo params)
-        capabilities {:tools (seq @(:tools-atom server))
-                      :resources (seq @(:resources-atom server))
-                      :prompts (seq @(:prompts-atom server))}]
-    {:protocolVersion protocol/protocol-version
-     :capabilities (cond-> {}
-                     (:tools capabilities) (assoc :tools {})
-                     (:resources capabilities) (assoc :resources {})
-                     (:prompts capabilities) (assoc :prompts {}))
-     :serverInfo {:name (:name server)
-                  :version (:version server)}}))
-
-(defn- handle-tools-list
-  "处理 tools/list 请求
-
-   参数:
-   - server: MCPServer 实例
-
-   返回: 工具列表"
-  [server]
-  {:tools (vec (vals @(:tools-atom server)))})
-
-(defn- handle-tools-call
-  "处理 tools/call 请求
-
-   参数:
-   - server: MCPServer 实例
-   - params: 请求参数 {:name \"tool-name\" :arguments {...}}
-
-   返回: 工具执行结果"
-  [server params]
-  (let [tool-name (:name params)
-        arguments (or (:arguments params) {})
-        tools @(:tools-atom server)
-        tool (get tools tool-name)]
-    (if tool
-      (try
-        (let [handler (:handler tool)
-              result (handler arguments)]
-          (rpc/wrap-result result))
-        (catch Exception e
-          (rpc/wrap-error-result (.getMessage e))))
-      (throw (ex-info "Tool not found" {:tool tool-name})))))
-
-(defn- handle-resources-list
-  "处理 resources/list 请求
-
-   参数:
-   - server: MCPServer 实例
-
-   返回: 资源列表"
-  [server]
-  {:resources (vec (vals @(:resources-atom server)))})
-
-(defn- handle-resources-read
-  "处理 resources/read 请求
-
-   参数:
-   - server: MCPServer 实例
-   - params: 请求参数 {:uri \"...\"}
-
-   返回: 资源内容"
-  [server params]
-  (let [uri (:uri params)
-        resources @(:resources-atom server)
-        resource (get resources uri)]
-    (if resource
-      (let [reader (:reader resource)]
-        {:contents [(reader uri)]})
-      (throw (ex-info "Resource not found" {:uri uri})))))
-
-(defn- handle-prompts-list
-  "处理 prompts/list 请求
-
-   参数:
-   - server: MCPServer 实例
-
-   返回: 提示词列表"
-  [server]
-  {:prompts (vec (vals @(:prompts-atom server)))})
-
-(defn- handle-prompts-get
-  "处理 prompts/get 请求
-
-   参数:
-   - server: MCPServer 实例
-   - params: 请求参数 {:name \"...\" :arguments {...}}
-
-   返回: 提示词内容"
-  [server params]
-  (let [prompt-name (:name params)
-        arguments (or (:arguments params) {})
-        prompts @(:prompts-atom server)
-        prompt (get prompts prompt-name)]
-    (if prompt
-      (let [generator (:generator prompt)]
-        (generator arguments))
-      (throw (ex-info "Prompt not found" {:name prompt-name})))))
 
 (defn- handle-message
   "处理传入消息
@@ -145,31 +34,7 @@
 
    返回: 响应消息或 nil（通知不需要响应）"
   [server message]
-  (let [method (:method message)
-        params (:params message)
-        id (:id message)]
-    (try
-      (let [result (case method
-                     "initialize" (handle-initialize server params)
-                     "initialized" nil  ;; 通知，无需响应
-                     "ping" {}
-                     "tools/list" (handle-tools-list server)
-                     "tools/call" (handle-tools-call server params)
-                     "resources/list" (handle-resources-list server)
-                     "resources/read" (handle-resources-read server params)
-                     "prompts/list" (handle-prompts-list server)
-                     "prompts/get" (handle-prompts-get server params)
-                     ;; 未知方法
-                     (throw (ex-info "Method not found"
-                                     {:method method
-                                      :code :method-not-found})))]
-        (when (and id result)
-          (rpc/make-response id result)))
-      (catch Exception e
-        (let [data (ex-data e)
-              code (or (:code data) :internal-error)]
-          (when id
-            (rpc/make-error id code (.getMessage e) data)))))))
+  (handler/route-request (:registry server) message))
 
 ;; =============================================================================
 ;; 服务器创建与管理
@@ -194,7 +59,8 @@
     :or {name "clj-agent-mcp-server"
          version "1.0.0"
          transport :stdio}}]
-  (let [transport-instance (cond
+  (let [reg (registry/create-registry {:name name :version version})
+        transport-instance (cond
                              (= transport :stdio)
                              (stdio/create-stdio-server-transport)
 
@@ -204,14 +70,54 @@
                              :else
                              (throw (ex-info "Unsupported transport"
                                              {:transport transport})))]
-    (->MCPServer name
-                 version
-                 transport-instance
-                 (atom {})     ;; tools
-                 (atom {})     ;; resources
-                 (atom {})     ;; prompts
-                 (atom false)
-                 (atom nil))))
+    (->MCPServer reg transport-instance (atom false) (atom nil))))
+
+(defn create-server-with-registry
+  "使用已有的 registry 创建 MCP Server 实例
+
+   参数:
+   - registry: MCPRegistry 实例
+   - transport-config: 传输配置
+     :stdio 或 {:type :sse :port 3000}
+
+   返回: MCPServer 实例
+
+   使用场景:
+   - 在 MCP Server 和 HTTP Server 之间共享 registry
+   - 运行时动态切换传输方式
+
+   示例:
+   (def shared-registry (registry/create-registry {:name \"shared\" :version \"1.0.0\"}))
+   (registry/register-tool shared-registry my-tool)
+
+   ;; 创建 stdio MCP Server
+   (def stdio-server (create-server-with-registry shared-registry :stdio))
+
+   ;; 同时创建 HTTP handler 使用相同的 registry
+   (def http-handler (handler/ring-handler shared-registry))"
+  [registry transport-config]
+  (let [transport-instance (cond
+                             (= transport-config :stdio)
+                             (stdio/create-stdio-server-transport)
+
+                             (and (map? transport-config)
+                                  (= (:type transport-config) :sse))
+                             (sse/create-sse-server-transport (:port transport-config))
+
+                             :else
+                             (throw (ex-info "Unsupported transport"
+                                             {:transport transport-config})))]
+    (->MCPServer registry transport-instance (atom false) (atom nil))))
+
+(defn get-registry
+  "获取服务器的 registry
+
+   参数:
+   - server: MCPServer 实例
+
+   返回: MCPRegistry 实例"
+  [server]
+  (:registry server))
 
 (defn start
   "启动 MCP Server
@@ -258,7 +164,7 @@
   @(:running? server))
 
 ;; =============================================================================
-;; 工具注册
+;; 工具注册（委托给 registry）
 ;; =============================================================================
 
 (defn register-tool
@@ -283,14 +189,7 @@
       :handler (fn [{:keys [expression]}]
                  (str (eval (read-string expression))))})"
   [server tool]
-  (let [tool-name (:name tool)
-        mcp-tool {:name tool-name
-                  :description (:description tool)
-                  :inputSchema (or (:inputSchema tool)
-                                   (:parameters tool)
-                                   {:type "object" :properties {}})}]
-    (swap! (:tools-atom server)
-           assoc tool-name (assoc mcp-tool :handler (:handler tool))))
+  (registry/register-tool (:registry server) tool)
   server)
 
 (defn register-tools
@@ -302,8 +201,7 @@
 
    返回: server"
   [server tools]
-  (doseq [tool tools]
-    (register-tool server tool))
+  (registry/register-tools (:registry server) tools)
   server)
 
 (defn unregister-tool
@@ -315,11 +213,11 @@
 
    返回: server"
   [server tool-name]
-  (swap! (:tools-atom server) dissoc tool-name)
+  (registry/unregister-tool (:registry server) tool-name)
   server)
 
 ;; =============================================================================
-;; 资源注册
+;; 资源注册（委托给 registry）
 ;; =============================================================================
 
 (defn register-resource
@@ -336,13 +234,7 @@
 
    返回: server"
   [server resource]
-  (let [uri (:uri resource)
-        mcp-resource {:uri uri
-                      :name (:name resource)
-                      :description (:description resource)
-                      :mimeType (or (:mime-type resource) "text/plain")}]
-    (swap! (:resources-atom server)
-           assoc uri (assoc mcp-resource :reader (:reader resource))))
+  (registry/register-resource (:registry server) resource)
   server)
 
 (defn register-resources
@@ -354,12 +246,11 @@
 
    返回: server"
   [server resources]
-  (doseq [resource resources]
-    (register-resource server resource))
+  (registry/register-resources (:registry server) resources)
   server)
 
 ;; =============================================================================
-;; 提示词注册
+;; 提示词注册（委托给 registry）
 ;; =============================================================================
 
 (defn register-prompt
@@ -375,12 +266,7 @@
 
    返回: server"
   [server prompt]
-  (let [prompt-name (:name prompt)
-        mcp-prompt {:name prompt-name
-                    :description (:description prompt)
-                    :arguments (or (:arguments prompt) [])}]
-    (swap! (:prompts-atom server)
-           assoc prompt-name (assoc mcp-prompt :generator (:generator prompt))))
+  (registry/register-prompt (:registry server) prompt)
   server)
 
 (defn register-prompts
@@ -392,12 +278,11 @@
 
    返回: server"
   [server prompts]
-  (doseq [prompt prompts]
-    (register-prompt server prompt))
+  (registry/register-prompts (:registry server) prompts)
   server)
 
 ;; =============================================================================
-;; clj-agent 工具集成
+;; clj-agent 工具集成（委托给 registry）
 ;; =============================================================================
 
 (defn register-clj-agent-tool
@@ -409,12 +294,8 @@
 
    返回: server"
   [server tool]
-  (register-tool server
-    {:name (name (:name tool))
-     :description (:description tool)
-     :inputSchema (or (:parameters tool)
-                      {:type "object" :properties {}})
-     :handler (:handler tool)}))
+  (registry/register-clj-agent-tool (:registry server) tool)
+  server)
 
 (defn register-clj-agent-tools
   "将 clj-agent 工具列表注册到 MCP Server
@@ -427,9 +308,42 @@
 
    示例:
    (require '[im.ttalk.agent.tools.api :as tools])
-   (def registry (tools/create-tool-registry))
-   (register-clj-agent-tools server (tools/registry-list-tools registry))"
+   (def tool-registry (tools/create-tool-registry))
+   (register-clj-agent-tools server (tools/registry-list-tools tool-registry))"
   [server tools]
-  (doseq [tool tools]
-    (register-clj-agent-tool server tool))
+  (registry/register-clj-agent-tools (:registry server) tools)
   server)
+
+;; =============================================================================
+;; 向后兼容：保留原有的 atom 访问方式
+;; =============================================================================
+
+(defn tools-atom
+  "获取工具 atom（用于向后兼容）
+
+   参数:
+   - server: MCPServer 实例
+
+   返回: tools atom"
+  [server]
+  (:tools-atom (:registry server)))
+
+(defn resources-atom
+  "获取资源 atom（用于向后兼容）
+
+   参数:
+   - server: MCPServer 实例
+
+   返回: resources atom"
+  [server]
+  (:resources-atom (:registry server)))
+
+(defn prompts-atom
+  "获取提示词 atom（用于向后兼容）
+
+   参数:
+   - server: MCPServer 实例
+
+   返回: prompts atom"
+  [server]
+  (:prompts-atom (:registry server)))
