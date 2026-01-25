@@ -4,7 +4,8 @@
           "modules/clj-agent-rag/src"
           "modules/clj-agent-mcp/src"
           "modules/clj-agent-memory/src"
-          "modules/clj-agent-simpleagent/src"]
+          "modules/clj-agent-simpleagent/src"
+          "modules/clj-agent-a2a/src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
         ;; LLM 依赖
@@ -29,8 +30,11 @@
         ;; 日志
         com.taoensso/timbre {:mvn/version "6.3.0"}
 
-        ;; HTTP (MCP)
-        http-kit/http-kit {:mvn/version "2.8.0"}}
+        ;; HTTP (MCP/A2A)
+        http-kit/http-kit {:mvn/version "2.8.0"}
+
+        ;; UUID (A2A)
+        danlentz/clj-uuid {:mvn/version "0.1.9"}}
  :aliases {:mcp-server {:main-opts ["-m" "im.ttalk.mcp.server.main"]}
 
           :test {:extra-paths ["modules/clj-agent-llm/test"

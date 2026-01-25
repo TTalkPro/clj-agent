@@ -48,6 +48,7 @@ Clojure AI Agent Framework - Kernel 中央编排器
 - **多后端存储**：IKeyValueStore + ISnapshotStore 协议（Memory/SQLite/Redis/PostgreSQL）
 - **RAG 支持**：检索增强生成，文档切分、向量存储、语义检索
 - **MCP 协议**：Model Context Protocol 服务端和客户端实现
+- **A2A 协议**：Agent-to-Agent Protocol 服务端和客户端实现
 
 ## 架构概览
 
@@ -94,6 +95,7 @@ graph TB
     subgraph "扩展层 (Extension Layer)"
         RAG[RAG Pipeline<br/>检索增强生成]
         MCP[MCP Server/Client<br/>Model Context Protocol]
+        A2A[A2A Server/Client<br/>Agent-to-Agent Protocol]
         PLG[Plugin Library<br/>File/HTTP/Shell]
     end
 
@@ -111,6 +113,7 @@ graph TB
     RAG --> K
     PLG --> K
     MCP --> K
+    A2A --> K
 ```
 
 ## 模块依赖关系
@@ -124,6 +127,7 @@ graph LR
     rag[clj-agent-rag<br/>RAG Pipeline]
     memory[clj-agent-memory<br/>Store, Snapshot]
     mcp[clj-agent-mcp<br/>MCP Server/Client]
+    a2a[clj-agent-a2a<br/>A2A Server/Client]
 
     llm --> core
     sa --> core
@@ -131,6 +135,7 @@ graph LR
     plugin --> core
     rag --> core
     mcp --> core
+    a2a --> core
 ```
 
 > `clj-agent-memory` 是独立模块，不依赖其他内部模块。
@@ -146,7 +151,8 @@ clj-agent/
 │   ├── clj-agent-plugin/       # 预置插件库（File, HTTP, Shell, Security）
 │   ├── clj-agent-memory/       # 存储实现（InMemory, SQLite, Redis, PostgreSQL）
 │   ├── clj-agent-rag/          # RAG 检索增强生成
-│   └── clj-agent-mcp/          # MCP 服务器/客户端
+│   ├── clj-agent-mcp/          # MCP 服务器/客户端
+│   └── clj-agent-a2a/          # A2A 服务器/客户端
 ├── examples/                   # 使用示例
 ├── docs/                       # 设计文档
 ├── scripts/                    # 开发脚本
@@ -835,20 +841,133 @@ RAG 模块提供文档切分、向量存储和语义检索能力。
 
 ## MCP 协议
 
-Model Context Protocol 服务端/客户端实现：
+Model Context Protocol 服务端/客户端实现。架构分为三层：
+
+- **registry.clj** - 状态管理（工具/资源/提示词注册）
+- **handler.clj** - 纯函数处理层 + Ring 适配器
+- **server/core.clj** - 服务器生命周期管理
+
+### MCP Server 使用
 
 ```clojure
-;; 启动 MCP 服务器
-;; clj -M:mcp-server
+(require '[im.ttalk.agent.mcp.server.core :as mcp])
 
-;; 客户端连接
-(require '[im.ttalk.agent.mcp.client.core :as mcp-client])
-
-(def client (mcp-client/connect {:transport :stdio
-                                  :command ["clj" "-M:mcp-server"]}))
+;; 创建并启动 MCP 服务器
+(def server (mcp/create-server {:name "my-tools"
+                                 :version "1.0.0"
+                                 :transport :stdio}))
+(mcp/register-tool server
+  {:name "echo"
+   :description "Echo tool"
+   :handler (fn [args] (str "Echo: " (:msg args)))})
+(mcp/start server)
 ```
 
-支持 Stdio 和 SSE 两种传输协议。
+### 在自定义 HTTP 服务器中使用 MCP Handler
+
+```clojure
+(require '[im.ttalk.agent.mcp.registry :as registry]
+         '[im.ttalk.agent.mcp.handler :as handler])
+
+;; 创建 registry
+(def reg (registry/create-registry {:name "my-api" :version "1.0.0"}))
+(registry/register-tool reg my-tool)
+
+;; 在任意 HTTP 框架中使用
+(def ring-handler (handler/ring-handler reg))
+```
+
+### MCP Client
+
+```clojure
+(require '[im.ttalk.agent.mcp.client.core :as mcp-client])
+
+;; Stdio 传输（启动子进程）
+(def client (mcp-client/connect
+              {:transport :stdio
+               :command ["clj" "-M:mcp-server"]}))
+
+;; SSE 传输（连接远程服务器）
+(def client (mcp-client/connect
+              {:transport :sse
+               :url "http://localhost:8080/mcp"}))
+```
+
+## A2A 协议
+
+Agent-to-Agent Protocol 服务端/客户端实现。架构与 MCP 一致：
+
+- **handler.clj** - 状态管理 + 纯函数处理层 + Ring 适配器
+- **server/core.clj** - A2A 服务器生命周期管理
+- **client.clj** - 远程 Agent 通信客户端
+
+### A2A Server 使用
+
+```clojure
+(require '[im.ttalk.agent.a2a.server.core :as a2a]
+         '[im.ttalk.agent.a2a.types :as types])
+
+;; 创建并启动 A2A 服务器
+(def server
+  (a2a/create-and-start
+    {:name "my-agent"
+     :description "My Agent"
+     :url "http://localhost:8080"
+     :port 8080
+     :message-handler (fn [reg task msg]
+                        (str "Response: " (types/message-text msg)))}))
+
+;; 停止服务器
+;; ((:stop-fn server))
+```
+
+### 在自定义 HTTP 服务器中使用 A2A Handler
+
+```clojure
+(require '[im.ttalk.agent.a2a.handler :as handler])
+
+;; 创建 registry
+(def reg (handler/create-registry {:name "my-agent"
+                                    :description "Agent"
+                                    :url "http://localhost:8080"}))
+(handler/set-message-handler reg my-handler-fn)
+
+;; 在任意 HTTP 框架中使用
+(def ring-handler (handler/ring-handler reg))
+(def card-handler (handler/agent-card-handler reg))
+
+;; 或使用组合 handler
+(def combined (handler/combined-ring-handler reg))
+```
+
+### A2A Client
+
+```clojure
+(require '[im.ttalk.agent.a2a.client :as client])
+
+;; 创建客户端
+(def c (client/create-client "http://localhost:8080"))
+
+;; 发送消息
+(def task (client/send-text c "Hello, Agent!"))
+
+;; 等待任务完成
+(def result (client/wait-for-completion c (:id task)))
+
+;; 获取结果文本
+(println (client/get-task-result result))
+```
+
+### A2A 协议特性
+
+| 特性 | 说明 |
+|------|------|
+| 协议版本 | 0.3.0 |
+| 发现端点 | `GET /.well-known/agent.json` |
+| JSON-RPC 端点 | `POST /a2a` |
+| 流式端点 | `POST /a2a/stream` (SSE) |
+| 任务状态 | submitted, working, input-required, completed, failed, canceled |
+| 消息类型 | text, file, data |
 
 ## 开发
 
