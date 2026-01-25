@@ -306,6 +306,7 @@ Step 的 on-activate 中使用 Kernel：
 - **Fan-in**: A → C, B → C（C 有多个 required-inputs）
 - **循环**: A → B → A（通过不同事件名）
 - **Human-in-the-loop**: step 返回 {:pause ...}, 外部调用 resume
+- **外部事件驱动**: 运行中的 Process 接收外部注入的事件（如用户输入、webhook 回调）
 
 ## 静止点回调（on-quiescent）
 
@@ -394,3 +395,187 @@ Fan-out A → [B, C] → D:
 ```
 
 注意：恢复时需要提供正确的 initial-events 来驱动后续步骤。
+
+## 外部事件支持
+
+Process Framework 支持从外部向运行中的 Process 注入事件，实现交互式场景（如对话式 Agent、webhook 回调等）。
+
+### 架构
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      External World                           │
+│   (User Input, Webhooks, Timers, Other Processes)            │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+                            ▼
+┌───────────────────────────────────────────────────────────────┐
+│                    Process Handle                              │
+│   (send-event, get-status, wait-for-completion)               │
+└───────────────────────────┬───────────────────────────────────┘
+                            │
+                            ▼
+┌───────────────────────────────────────────────────────────────┐
+│                     external-chan                              │
+│   (Dedicated channel for external events)                     │
+└───────────────────────────┬───────────────────────────────────┘
+                            │
+                            ▼
+┌───────────────────────────────────────────────────────────────┐
+│                        Router                                  │
+│   alts!                                                       │
+│   ├─ control-chan  → pause/stop/resume                        │
+│   ├─ event-chan    → internal events (from steps)             │
+│   └─ external-chan → external events                          │
+└───────────────────────────┬───────────────────────────────────┘
+                            │
+          ┌─────────────────┼─────────────────┐
+          ▼                 ▼                 ▼
+     [step-a]          [step-b]          [step-c]
+```
+
+### ProcessHandle
+
+异步启动 Process 返回 `ProcessHandle`，用于外部交互：
+
+```clojure
+(defrecord ProcessHandle
+  [runtime           ;; 完整 runtime map
+   external-chan     ;; 外部事件通道
+   result-chan       ;; 结果通道
+   status-atom])     ;; 状态 atom
+```
+
+### API
+
+#### 异步启动
+
+```clojure
+(require '[im.ttalk.agent.core.kernel.process.runtime :as runtime])
+
+;; 异步启动，返回 ProcessHandle
+(def handle (runtime/start-process-async process-spec opts))
+```
+
+#### 发送外部事件
+
+```clojure
+;; 非阻塞发送
+(runtime/send-event handle :event-name {:data "..."})
+;; => true（已入队）或 false（Process 已结束）
+
+;; 阻塞发送（带超时）
+(runtime/send-event! handle :event-name {:data "..."} 5000)
+;; => true（已发送）或 false（超时或已结束）
+```
+
+#### 状态查询
+
+```clojure
+;; 获取当前状态
+(runtime/get-status handle)
+;; => :running | :paused | :completed | :failed | :stopped
+
+;; 等待完成（阻塞）
+(runtime/wait-for-completion handle)
+;; => {:status :completed :context ctx ...}
+
+;; 带超时等待
+(runtime/wait-for-completion handle 5000)
+;; => 结果 map 或 {:status :timeout :error {:reason "等待超时"}}
+```
+
+#### 停止 Process
+
+```clojure
+(runtime/stop-process handle)
+;; => true
+```
+
+### 外部事件绑定
+
+使用 `on-external-event` 声明外部事件路由（语义上等同于 `on-event`）：
+
+```clojure
+(-> (builder/builder :interactive)
+    (builder/add-step
+      {:id :handler
+       :on-activate (fn [inputs state ctx]
+                      ;; 处理外部输入
+                      {:events [{:name :processed :data ...}]})})
+    ;; 外部事件 :user-input → handler step 的 :input 槽
+    (builder/on-external-event :user-input :handler :input)
+    (builder/build))
+```
+
+### 终止信号
+
+使用外部事件时，Process 不会因 in-flight=0 而自动完成（会持续等待更多外部事件）。
+Step 需要返回 `:terminate true` 来显式信号 Process 完成：
+
+```clojure
+:on-activate (fn [inputs state ctx]
+               (if (= (:input inputs) "/quit")
+                 ;; 终止 Process
+                 {:context (ctx/set-var ctx :ended true)
+                  :terminate true}
+                 ;; 继续等待
+                 {:events [...]}))
+```
+
+### 示例：交互式对话 Agent
+
+```clojure
+(def chat-process
+  (-> (builder/builder :chat-agent)
+      (builder/add-step
+        {:id :chat-handler
+         :init (fn [_] {:history []})
+         :on-activate
+         (fn [inputs state ctx]
+           (let [user-msg (:input inputs)
+                 history (:history state)]
+             (if (= user-msg "/quit")
+               ;; 用户退出
+               {:context (ctx/set-var ctx :ended true)
+                :terminate true}
+               ;; 调用 LLM 生成回复
+               (let [response (call-llm history user-msg)]
+                 {:events [{:name :response :data response}]
+                  :state {:history (conj history
+                                         {:role "user" :content user-msg}
+                                         {:role "assistant" :content response})}}))))})
+      (builder/add-step
+        {:id :output
+         :on-activate (fn [inputs _ _]
+                        (println "AI:" (:input inputs))
+                        {:events []})})
+      (builder/on-external-event :user-input :chat-handler :input)
+      (builder/on-event :response :output :input)
+      (builder/build)))
+
+;; 使用
+(def handle (runtime/start-process-async chat-process {}))
+
+;; 发送用户消息
+(runtime/send-event handle :user-input "你好！")
+(runtime/send-event handle :user-input "今天天气怎么样？")
+(runtime/send-event handle :user-input "/quit")
+
+;; 等待完成
+(runtime/wait-for-completion handle)
+```
+
+### 与 Pause/Resume 的对比
+
+| 特性 | Pause/Resume | External Events |
+|------|--------------|-----------------|
+| 交互模式 | 阻塞式 | 非阻塞式 |
+| 适用场景 | 单次审批 | 持续交互 |
+| Step 设计 | 需要 on-resume | 正常 on-activate |
+| 外部控制 | 被动等待 | 主动推送 |
+| 完成方式 | resume 后继续 | :terminate true |
+
+两种模式可以共存，根据场景选择：
+- **Pause/Resume**：适合需要明确暂停点的审批流程
+- **External Events**：适合持续交互的对话式场景

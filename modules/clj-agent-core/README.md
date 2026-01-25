@@ -41,7 +41,7 @@
 | `im.ttalk.agent.core.kernel.service` | Service 抽象接口 |
 | `im.ttalk.agent.core.kernel.process.builder` | Process 规格构建器 |
 | `im.ttalk.agent.core.kernel.process.runtime` | Process 事件循环运行时 |
-| `im.ttalk.agent.core.kernel.process.event` | 事件创建和路由 |
+| `im.ttalk.agent.core.kernel.process.event` | 事件创建和路由（含外部事件） |
 | `im.ttalk.agent.core.kernel.process.step` | Step 激活和生命周期 |
 | `im.ttalk.agent.core.kernel.process.snapshot_manager` | 快照管理 |
 | `im.ttalk.agent.core.http.client` | HTTP 客户端工具 |
@@ -208,6 +208,54 @@ Step 生命周期函数：
 | `on-activate` | 主业务逻辑 | 多次 |
 | `on-resume` | 从暂停恢复 | 可选 |
 | `on-terminate` | 清理资源 | 1 次 |
+
+### 外部事件 API
+
+支持向运行中的 Process 注入外部事件，实现交互式场景（对话 Agent、webhook 等）：
+
+```clojure
+;; 构建带外部事件绑定的 Process
+(-> (process/builder :interactive)
+    (process/add-step {:id :handler
+                       :on-activate (fn [inputs state ctx]
+                                      (if (= (:input inputs) "/quit")
+                                        {:terminate true}  ;; 终止信号
+                                        {:events [...]}))})
+    (process/on-external-event :user-input :handler :input)
+    (process/build))
+
+;; 异步启动（返回 ProcessHandle）
+(def handle (runtime/start-process-async spec opts))
+
+;; 发送外部事件
+(runtime/send-event handle :user-input {:text "hello"})
+;; => true（已入队）或 false（Process 已结束）
+
+;; 同步发送（带超时）
+(runtime/send-event! handle :user-input data 5000)
+
+;; 状态查询
+(runtime/get-status handle)
+;; => :running | :paused | :completed | :failed | :stopped
+
+;; 等待完成
+(runtime/wait-for-completion handle)
+(runtime/wait-for-completion handle 5000)  ;; 带超时
+
+;; 停止 Process
+(runtime/stop-process handle)
+```
+
+外部事件 API：
+
+| 函数 | 说明 |
+|------|------|
+| `start-process-async` | 异步启动，返回 ProcessHandle |
+| `send-event` | 非阻塞发送外部事件 |
+| `send-event!` | 阻塞发送（带超时） |
+| `get-status` | 获取当前状态 |
+| `wait-for-completion` | 等待完成（可带超时） |
+| `stop-process` | 停止 Process |
 
 ---
 

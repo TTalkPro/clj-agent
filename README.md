@@ -455,6 +455,7 @@ Context 管理对话中的共享状态：
 
 - 线性/并行/扇入扇出执行模式
 - Human-in-the-loop 暂停/恢复
+- 外部事件注入（交互式 Agent、webhook 回调）
 - 安全快照点（on-quiescent 回调）
 - Step 生命周期管理（init → can-activate? → on-activate → on-terminate）
 
@@ -478,6 +479,34 @@ Context 管理对话中的共享状态：
 
 ;; 执行
 (def result (runtime/run-process spec {:input {:topic "AI"}}))
+```
+
+### 外部事件支持
+
+支持向运行中的 Process 注入外部事件，实现交互式场景（如对话 Agent、webhook 回调）：
+
+```clojure
+;; 构建带外部事件绑定的 Process
+(def interactive-spec
+  (-> (process/builder :chat)
+      (process/add-step
+        {:id :handler
+         :on-activate (fn [inputs state ctx]
+                        (if (= (:input inputs) "/quit")
+                          {:terminate true}  ;; 终止信号
+                          {:events [{:name :response :data "..."}]}))})
+      (process/on-external-event :user-input :handler :input)
+      (process/build)))
+
+;; 异步启动（返回 ProcessHandle）
+(def handle (runtime/start-process-async interactive-spec {}))
+
+;; 发送外部事件
+(runtime/send-event handle :user-input "Hello!")
+(runtime/send-event handle :user-input "/quit")
+
+;; 等待完成
+(runtime/wait-for-completion handle)
 ```
 
 详细设计参见 [docs/process-framework-design.md](docs/process-framework-design.md) 和 [docs/process-parallel-design.md](docs/process-parallel-design.md)。

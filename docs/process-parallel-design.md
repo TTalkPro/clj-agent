@@ -181,3 +181,56 @@ V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-acti
 (resume runtime data)
 ;; -> 返回 channel
 ```
+
+#### 外部事件 API
+
+```clojure
+;; 异步启动（返回 ProcessHandle）
+(start-process-async process-spec opts)
+;; -> ProcessHandle，用于外部交互
+
+;; 发送外部事件
+(send-event handle :event-name data)
+;; -> true/false
+
+;; 同步发送（带超时）
+(send-event! handle :event-name data timeout-ms)
+;; -> true/false
+
+;; 状态查询
+(get-status handle)
+;; -> :running | :paused | :completed | :failed | :stopped
+
+;; 等待完成
+(wait-for-completion handle)
+(wait-for-completion handle timeout-ms)
+;; -> result map
+
+;; 停止
+(stop-process handle)
+;; -> true
+```
+
+#### 外部事件架构
+
+```
+                    ┌──────────────┐
+                    │  event-chan   │  ← 内部事件
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │   router     │  ← alts! 多路复用
+                    └──────┬───────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+        event-chan   external-chan  control-chan
+              │            │            │
+              └────────────┼────────────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+        [step-a]      [step-b]      [step-c]
+```
+
+外部事件通过 `external-chan` 注入，与内部事件统一路由到目标 step。

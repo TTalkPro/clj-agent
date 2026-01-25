@@ -1337,9 +1337,16 @@
    返回: true"
   [handle]
   (let [runtime (:runtime handle)
-        status-atom (:status-atom handle)]
+        status-atom (:status-atom handle)
+        result-chan (:result-chan handle)]
     ;; 标记为停止状态（阻止后续 send-event）
     (reset! status-atom :stopped)
+    ;; 放入停止结果（确保 wait-for-completion 能收到）
+    (put! result-chan {:status       :stopped
+                       :context      @(:context runtime)
+                       :error        nil
+                       :paused-step  nil
+                       :pause-reason nil})
     (put! (:control-chan runtime) {:action :stop})
     (close! (:external-chan handle))
     ;; 关闭 runtime 资源

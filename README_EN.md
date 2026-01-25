@@ -389,6 +389,7 @@ A core.async-based event-driven workflow engine supporting:
 
 - Linear/parallel/fan-in/fan-out execution patterns
 - Human-in-the-loop pause/resume
+- External event injection (interactive Agents, webhook callbacks)
 - Safe snapshot points (on-quiescent callback)
 - Step lifecycle management (init → can-activate? → on-activate → on-terminate)
 
@@ -412,6 +413,34 @@ A core.async-based event-driven workflow engine supporting:
 
 ;; Execute
 (def result (runtime/run-process spec {:input {:topic "AI"}}))
+```
+
+### External Event Support
+
+Inject external events into running Processes for interactive scenarios (chat Agents, webhook callbacks):
+
+```clojure
+;; Build Process with external event bindings
+(def interactive-spec
+  (-> (process/builder :chat)
+      (process/add-step
+        {:id :handler
+         :on-activate (fn [inputs state ctx]
+                        (if (= (:input inputs) "/quit")
+                          {:terminate true}  ;; Termination signal
+                          {:events [{:name :response :data "..."}]}))})
+      (process/on-external-event :user-input :handler :input)
+      (process/build)))
+
+;; Start asynchronously (returns ProcessHandle)
+(def handle (runtime/start-process-async interactive-spec {}))
+
+;; Send external events
+(runtime/send-event handle :user-input "Hello!")
+(runtime/send-event handle :user-input "/quit")
+
+;; Wait for completion
+(runtime/wait-for-completion handle)
 ```
 
 See [docs/process-framework-design.md](docs/process-framework-design.md) and [docs/process-parallel-design.md](docs/process-parallel-design.md) for detailed design.
