@@ -88,17 +88,19 @@ graph LR
     core[clj-agent-core<br/>Kernel, Tool, Filter<br/>Process Runtime]
     llm[clj-agent-llm<br/>Provider, Service]
     sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
-    plugin[clj-agent-tools<br/>File, HTTP, Shell]
+    tools[clj-agent-tools<br/>File, HTTP, Shell]
     rag[clj-agent-rag<br/>RAG Pipeline]
     memory[clj-agent-memory<br/>Store, Snapshot]
     mcp[clj-agent-mcp<br/>MCP Server/Client]
+    a2a[clj-agent-a2a<br/>A2A Server/Client]
 
     llm --> core
     sa --> core
     sa --> llm
-    plugin --> core
+    tools --> core
     rag --> core
     mcp --> core
+    a2a --> core
 ```
 
 > `clj-agent-memory` is a standalone module with no internal module dependencies.
