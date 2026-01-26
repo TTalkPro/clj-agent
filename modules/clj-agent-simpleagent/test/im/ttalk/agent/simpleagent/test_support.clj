@@ -3,7 +3,6 @@
 
    提供 MockProvider、工具定义等共享测试基础设施。"
   (:require [im.ttalk.agent.core.kernel.provider :as provider]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.tool :refer [deftool]]))
 
 ;;; ============================================================
@@ -67,7 +66,9 @@
   [[expr :string "表达式"]]
   (str "结果: 42"))
 
-(kp/defplugin mock-tools "测试工具" mock-get-weather mock-calculate)
+(def mock-tools
+  "Kernel Agent 测试工具集"
+  [#'mock-get-weather #'mock-calculate])
 
 ;;; ============================================================
 ;;; Process Agent 测试工具
@@ -89,4 +90,6 @@
   [[data :string "数据"]]
   (str "处理: " data))
 
-(kp/defplugin test-plugin "测试插件" safe-tool dangerous-tool another-safe-tool)
+(def test-plugin
+  "Process Agent 测试工具集"
+  [#'safe-tool #'dangerous-tool #'another-safe-tool])

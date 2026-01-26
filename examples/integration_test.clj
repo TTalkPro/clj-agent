@@ -11,7 +11,6 @@
 
    环境变量: ZHIPU_API_KEY"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.process.builder :as builder]
@@ -42,25 +41,29 @@
 (deftool get-weather
   "获取指定城市的天气信息"
   [[city :string "城市名称"]]
+  {:tags [:weather :read-only]}
   (str city "：晴天，气温 22°C，湿度 55%"))
 
 (deftool get-stock-price
   "查询股票当前价格"
   [[symbol :string "股票代码"]]
+  {:tags [:finance :read-only]}
   (str symbol " 当前价格: ¥" (+ 100 (rand-int 200)) ".00"))
 
 (deftool calculate
   "计算数学表达式"
   [[expression :string "数学表达式，如 2+3*4"]]
+  {:tags [:utility :compute]}
   (str "计算结果: " (eval (read-string expression))))
 
-(kp/defplugin test-tools "测试工具集"
-  get-weather get-stock-price calculate)
+(def test-tools
+  "测试工具集"
+  [#'get-weather #'get-stock-price #'calculate])
 
 (def app-kernel
   (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
       (kernel/add-service service)
-      (kernel/add-plugin test-tools)
+      (kernel/add-tools test-tools)
       (kernel/build-kernel)))
 
 ;;; ============================================================
@@ -139,7 +142,7 @@
                         :max-tokens 1024})
         tool-kernel (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
                         (kernel/add-service tool-service)
-                        (kernel/add-plugin test-tools)
+                        (kernel/add-tools test-tools)
                         (kernel/build-kernel))
         result (kernel/invoke tool-kernel
                  [{:role "user" :content "帮我查一下北京的天气。"}]

@@ -3,7 +3,6 @@
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.core.kernel.context :as context]
             [im.ttalk.agent.core.kernel.tool :as tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as plugin]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.core :as core]))
 
@@ -368,11 +367,10 @@
      :context (context/set-var ctx :counter (inc c))}))
 
 (deftest invoke-tool-test
-  (let [plugin (plugin/create-plugin :test "测试插件"
-                                     [#'simple-echo #'append-item #'inc-counter])
+  (let [test-tools [#'simple-echo #'append-item #'inc-counter]
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)))]
+                     (core/add-tools test-tools)))]
 
     (testing "invoke-tool 普通 tool 返回 {:value :context}"
       (let [ctx (context/create)
@@ -398,7 +396,7 @@
             (core/invoke-tool kernel :nonexistent {} (context/create)))))))
 
 (deftest invoke-tool-with-filters-test
-  (let [plugin (plugin/create-plugin :test "测试" [#'simple-echo #'append-item])
+  (let [test-tools [#'simple-echo #'append-item]
         ;; pre-invocation filter: 修改参数
         pre-f (filters/create-filter :modify :pre-invocation
                 (fn [filter-ctx]
@@ -414,7 +412,7 @@
                                                         :fn (:name (:function filter-ctx))})}))
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools test-tools)
                      (core/add-filter pre-f)
                      (core/add-filter post-f)))]
 
@@ -429,12 +427,12 @@
         (is (= :invoked (:type (first (context/get-trace (:context result))))))))))
 
 (deftest invoke-tool-skip-filter-test
-  (let [plugin (plugin/create-plugin :test "测试" [#'simple-echo])
+  (let [test-tools [#'simple-echo]
         skip-f (filters/create-filter :blocker :pre-invocation
                  (fn [_] {:action :skip :value "blocked by filter"}))
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools test-tools)
                      (core/add-filter skip-f)))]
 
     (testing "pre-invocation skip 直接返回值"
@@ -446,8 +444,7 @@
 ;; ============================================================
 
 (deftest invoke-test
-  (let [plugin (plugin/create-plugin :cart "购物车插件"
-                                     [#'append-item #'inc-counter])
+  (let [cart-tools [#'append-item #'inc-counter]
         call-count (atom 0)
         mock-service
         {:chat-fn
@@ -478,7 +475,7 @@
                        results)))}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools cart-tools)
                      (core/add-service mock-service)))]
 
     (testing "工具调用循环中 context 逐步累积"
@@ -499,7 +496,7 @@
         (is (= 2 (count (:tool-calls-made result))))))))
 
 (deftest invoke-multi-iteration-test
-  (let [plugin (plugin/create-plugin :counter "计数器插件" [#'inc-counter])
+  (let [counter-tools [#'inc-counter]
         call-count (atom 0)
         mock-service
         {:chat-fn
@@ -525,7 +522,7 @@
                        results)))}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools counter-tools)
                      (core/add-service mock-service)))]
 
     (testing "多轮工具调用中 context 持续累积"
@@ -540,7 +537,7 @@
         (is (= 3 (count (:tool-calls-made result))))))))
 
 (deftest invoke-with-filter-test
-  (let [plugin (plugin/create-plugin :items "项目插件" [#'append-item])
+  (let [items-tools [#'append-item]
         call-count (atom 0)
         ;; post-invocation filter 添加 trace
         tracking-filter (filters/create-filter :track :post-invocation
@@ -572,7 +569,7 @@
                        results)))}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools items-tools)
                      (core/add-filter tracking-filter)
                      (core/add-service mock-service)))]
 
@@ -591,7 +588,7 @@
                (:type (first (context/get-trace (:context result))))))))))
 
 (deftest invoke-no-context-test
-  (let [plugin (plugin/create-plugin :echo "回显插件" [#'simple-echo])
+  (let [echo-tools [#'simple-echo]
         call-count (atom 0)
         mock-service
         {:chat-fn
@@ -615,7 +612,7 @@
                        results)))}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools echo-tools)
                      (core/add-service mock-service)))]
 
     (testing "不传 context 时使用默认空 context"
@@ -629,7 +626,7 @@
         (is (= {} (:variables (:context result))))))))
 
 (deftest invoke-context-messages-accumulation-test
-  (let [plugin (plugin/create-plugin :echo "回显插件" [#'simple-echo])
+  (let [echo-tools2 [#'simple-echo]
         call-count (atom 0)
         mock-service
         {:chat-fn
@@ -653,7 +650,7 @@
                        results)))}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools echo-tools2)
                      (core/add-service mock-service)))]
 
     (testing "invoke 后 context.messages 和 history 累积消息"
@@ -669,7 +666,7 @@
                (count (context/get-history (:context result)))))))))
 
 (deftest invoke-system-prompts-test
-  (let [plugin (plugin/create-plugin :echo "回显" [#'simple-echo])
+  (let [echo-tools3 [#'simple-echo]
         received-opts (atom nil)
         mock-service
         {:chat-fn
@@ -681,7 +678,7 @@
          :build-result-msgs (fn [_ _] [])}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
-                     (core/add-plugin plugin)
+                     (core/add-tools echo-tools3)
                      (core/add-service mock-service)))]
 
     (testing "system-prompts 通过 :system-prompt 传给 chat-fn"

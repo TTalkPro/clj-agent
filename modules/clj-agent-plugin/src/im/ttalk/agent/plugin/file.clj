@@ -1,7 +1,6 @@
 (ns im.ttalk.agent.plugin.file
   "文件操作工具集"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :refer [defplugin]]
             [im.ttalk.agent.plugin.helpers :as helpers]
             [clojure.java.io :as io]
             [clojure.string :as str])
@@ -125,6 +124,7 @@
     (catch Exception e
       (str "移动失败: " (.getMessage e)))))
 
-(defplugin file-tools "文件操作工具集"
-  read-file write-file append-file list-directory file-info
-  file-exists create-directory delete-file copy-file move-file)
+(def all-tools
+  "文件操作工具集（tool vars 列表）"
+  [#'read-file #'write-file #'append-file #'list-directory #'file-info
+   #'file-exists #'create-directory #'delete-file #'copy-file #'move-file])

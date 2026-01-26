@@ -16,7 +16,6 @@
    环境变量:
      ZHIPU_API_KEY - 智谱 AI API Key（必需）"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.simpleagent.kernel-agent :as ka]
             [im.ttalk.agent.simpleagent.process-agent :as pa]
@@ -62,8 +61,9 @@
   {:sensitive true}
   (str "已保存笔记 [" title "]: " content))
 
-(kp/defplugin agent-tools "Agent 工具集"
-  get-weather get-time calculate delete-file save-note)
+(def agent-tools
+  "Agent 工具集"
+  [#'get-weather #'get-time #'calculate #'delete-file #'save-note])
 
 ;;; ============================================================
 ;;; Provider 创建
@@ -207,7 +207,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]
+                     :tools agent-tools
                      :system-prompt "你是助手，需要时调用工具获取信息。"})
             result (ka/chat agent "北京今天天气怎么样？")]
         (println (str "    回复: " (:text result)))
@@ -223,7 +223,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]
+                     :tools agent-tools
                      :system-prompt "你是助手，必要时使用工具。"})]
         ;; 轮次 1: 天气查询
         (let [r1 (ka/chat agent "上海天气怎么样？")]
@@ -248,7 +248,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]})
+                     :tools agent-tools})
             result (pa/chat agent "现在几点了？")]
         (println (str "    状态: " (:status result)))
         (println (str "    回复: " (:text result)))
@@ -263,7 +263,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]
+                     :tools agent-tools
                      :system-prompt "你是助手，需要时调用工具。"})]
         (let [r1 (pa/chat agent "杭州天气如何？")]
           (println (str "    轮次1 状态: " (:status r1)))
@@ -317,7 +317,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]
+                     :tools agent-tools
                      :on-pause (fn [info]
                                  (reset! pause-log info)
                                  (println (str "    [on-pause] " (:reason info))))})]
@@ -342,7 +342,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]})]
+                     :tools agent-tools})]
         (let [result (pa/chat agent "请删除 /home/user/important.dat")]
           (when (= :paused (:status result))
             (let [rejected (pa/resume agent "rejected")]
@@ -358,7 +358,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]
+                     :tools agent-tools
                      :system-prompt "你是助手，用户要求时调用工具。"})]
         ;; 第一次: 保存笔记（sensitive）
         (let [r1 (pa/chat agent "帮我保存一条笔记，标题是'TODO'，内容是'学习Clojure'")]
@@ -443,7 +443,7 @@
                        :model "glm-4.7"
                        :max-tokens 512
                        :system-prompt "回答简短。"
-                       :tools [agent-tools]})]
+                       :tools agent-tools})]
           (let [r1 (pa/chat agent "我的项目叫 clj-agent，是一个 AI Agent 框架。")]
             (println (str "    对话1: " (:text r1))))
           (wait api-delay)
@@ -472,7 +472,7 @@
                         :model "glm-4.7"
                         :max-tokens 512
                         :system-prompt "回答简短。"
-                        :tools [agent-tools]})]
+                        :tools agent-tools})]
           (reset! (:context-atom agent2) restored-context)
           (let [r3 (pa/chat agent2 "我的项目叫什么名字？用什么语言？直接回答。")]
             (println (str "    恢复后状态: " (:status r3)))
@@ -520,7 +520,7 @@
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]})
+                     :tools agent-tools})
             r (ka/chat agent "北京天气怎么样？")]
         (println (str "    回复: " (:text r)))
         (println (str "    工具: " (mapv :name (:tool-calls-made r))))

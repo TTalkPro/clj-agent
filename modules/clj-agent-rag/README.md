@@ -11,7 +11,7 @@ RAG 检索增强生成模块
 - **RAG Pipeline**：文档索引、检索、问答的完整流水线
 - **文本切分**：多种切分策略（按长度、按段落、按语义）
 - **向量存储**：Embedding 生成和向量数据库集成
-- **Kernel Plugin**：将 RAG 操作暴露为 LLM 可调用的工具
+- **Kernel 工具**：将 RAG 操作暴露为 LLM 可调用的工具（导出 `all-tools`）
 
 ## 依赖
 
@@ -30,7 +30,7 @@ RAG 检索增强生成模块
 
 | 命名空间 | 说明 |
 |---------|------|
-| `im.ttalk.agent.rag.plugin` | RAG 工具集（Kernel Plugin） |
+| `im.ttalk.agent.rag.plugin` | RAG 工具集（导出 `all-tools`） |
 | `im.ttalk.agent.rag.pipeline` | RAG 执行管道 |
 | `im.ttalk.agent.rag.embeddings` | Embedding 操作 |
 | `im.ttalk.agent.rag.vector_store` | 向量数据库接口 |
@@ -39,20 +39,20 @@ RAG 检索增强生成模块
 
 ## 使用方式
 
-### 作为 Kernel Plugin
+### 作为 Kernel 工具
 
 将 RAG 工具注册到 Kernel，LLM 可自动调用：
 
 ```clojure
-(require '[im.ttalk.agent.rag.plugin :refer [rag-tools]])
+(require '[im.ttalk.agent.rag.plugin :as rag])
 
 ;; 注册到 Kernel
 (-> (kernel/create-kernel-builder)
-    (kernel/add-plugin rag-tools)
+    (kernel/add-tools rag/all-tools)
     ...)
 
 ;; 或用于 SimpleAgent
-(ka/create-agent {:tools [rag-tools] ...})
+(ka/create-agent {:tools rag/all-tools ...})
 ```
 
 ### 直接使用 Pipeline
@@ -66,7 +66,7 @@ RAG 检索增强生成模块
           :vector-store vs
           :llm-fn llm-fn}))      ;; 可选：用于生成回答
 
-;; 设为默认（供 Plugin 使用）
+;; 设为默认（供工具函数使用）
 (pipeline/set-default-rag-pipeline! p)
 
 ;; 索引文档
@@ -86,7 +86,7 @@ RAG 检索增强生成模块
 ;; => {:embeddings-model "..." :document-count 42 :has-llm true}
 ```
 
-## RAG Plugin 工具列表
+## RAG 工具列表
 
 | 工具 | 说明 | Sensitive |
 |------|------|-----------|
@@ -125,7 +125,7 @@ RAG 检索增强生成模块
 - **RAG Pipeline**: Complete pipeline for document indexing, retrieval, and Q&A
 - **Text Splitting**: Multiple chunking strategies (length, paragraph, semantic)
 - **Vector Storage**: Embedding generation and vector DB integration
-- **Kernel Plugin**: Exposes RAG operations as LLM-callable tools
+- **Kernel Tools**: Exposes RAG operations as LLM-callable tools (exports `all-tools`)
 
 ### Key APIs
 
@@ -133,8 +133,8 @@ RAG 检索增强生成模块
 - `pipeline/index-document`, `pipeline/index-file` - Index content
 - `pipeline/retrieve` - Vector similarity search
 - `pipeline/query` - RAG Q&A (retrieve + generate)
-- `rag-tools` - Pre-built Plugin for Kernel registration
+- `all-tools` - Tool vars for Kernel registration
 
-### Tools (as Plugin)
+### Tools
 
 `rag-index-text`, `rag-index-file`(sensitive), `rag-retrieve`, `rag-query`, `rag-search`, `rag-stats`

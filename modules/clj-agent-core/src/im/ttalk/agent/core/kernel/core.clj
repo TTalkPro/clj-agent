@@ -1,24 +1,35 @@
 (ns im.ttalk.agent.core.kernel.core
   "Kernel 核心 - 中央编排器
 
-   参考 beamai_kernel 设计，Kernel 提供三类 API：
+   Kernel 提供三类 API：
 
    Build API - 构建 Kernel:
      (-> (create-kernel-builder)
-         (add-plugin weather-plugin)
+         (add-tools [#'get-weather #'get-time])
          (add-service my-service)
          (add-filter logging-pre-filter)
          (build-kernel))
+
+   Tool 定义（支持 tags）:
+     (deftool get-weather
+       \"获取天气\"
+       [[city :string \"城市\"]]
+       {:tags [:weather :read-only]}
+       (str city \": 25°C\"))
 
    Invoke API - 调用函数/LLM:
      (invoke-tool kernel :get-weather {:city \"北京\"} context)
      (invoke-chat kernel messages opts)
      (invoke kernel messages opts)
+     (invoke kernel messages {:tags [:weather]})           ;; 只用带 :weather tag 的工具
+     (invoke kernel messages {:exclude-tags [:dangerous]}) ;; 排除危险工具
 
    Query API - 查询 Kernel 状态:
-     (:tools kernel)          ;; 直接关键字访问
+     (:tools kernel)                         ;; 所有 tool schemas
+     (list-functions kernel)                 ;; 所有函数名
+     (list-functions-by-tag kernel :weather) ;; 按 tag 过滤
      (find-function kernel :get-weather)
-     (list-functions kernel)
+     (get-tool-var kernel :get-weather)
 
    Service 格式:
    Service 是一个 map，定义 LLM 调用接口：
@@ -30,15 +41,15 @@
      invoke-chat: {:response r :context ctx}
      invoke:      {:response r :context ctx :tool-calls-made [...]}"
   (:require [clojure.string]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.filter :as filters]
-            [im.ttalk.agent.core.kernel.context :as ctx]))
+            [im.ttalk.agent.core.kernel.context :as ctx]
+            [im.ttalk.agent.core.kernel.tool :as tool]))
 
 ;;; ============================================================
 ;;; Kernel Record
 ;;; ============================================================
 
-(defrecord Kernel [service plugins filters tools settings])
+(defrecord Kernel [service filters tools tool-vars settings])
 
 ;;; ============================================================
 ;;; Build API
@@ -52,22 +63,43 @@
   ([]
    (create-kernel-builder {}))
   ([settings]
-   {:service  nil
-    :plugins  []
-    :filters  []
-    :settings settings}))
+   {:service   nil
+    :tool-vars []
+    :filters   []
+    :settings  settings}))
 
-(defn add-plugin
-  "添加 Plugin 到 builder
+(defn add-tool
+  "添加单个 tool var 到 builder
 
    参数:
-   - builder: kernel builder
-   - plugin:  KernelPlugin 实例
+   - builder:  kernel builder
+   - tool-var: deftool 定义的 var 引用（如 #'get-weather）
 
    返回:
-   更新后的 builder"
-  [builder plugin]
-  (update builder :plugins conj plugin))
+   更新后的 builder
+
+   示例:
+   (-> (create-kernel-builder)
+       (add-tool #'get-weather)
+       (add-tool #'get-time))"
+  [builder tool-var]
+  (update builder :tool-vars conj tool-var))
+
+(defn add-tools
+  "批量添加 tool vars 到 builder
+
+   参数:
+   - builder:   kernel builder
+   - tool-vars: deftool 定义的 var 引用列表
+
+   返回:
+   更新后的 builder
+
+   示例:
+   (-> (create-kernel-builder)
+       (add-tools [#'get-weather #'get-time #'calculate]))"
+  [builder tool-vars]
+  (update builder :tool-vars into tool-vars))
 
 (defn add-service
   "设置 LLM 服务到 builder
@@ -105,9 +137,19 @@
 ;;; ============================================================
 
 (defn- compile-tools
-  "编译所有 Plugin 的 tool schema"
-  [plugins]
-  (vec (mapcat kp/get-schemas plugins)))
+  "编译所有 tool schema"
+  [tool-vars]
+  (vec (for [v tool-vars
+             :when (tool/tool-function? v)]
+         (tool/get-schema v))))
+
+(defn- build-tool-vars-map
+  "构建 tool-vars map：{:fn-name var ...}"
+  [tool-vars]
+  (into {}
+        (for [v tool-vars
+              :when (tool/tool-function? v)]
+          [(keyword (:name (tool/get-schema v))) v])))
 
 (defn build-kernel
   "构建最终 Kernel 实例
@@ -118,11 +160,13 @@
    返回:
    Kernel record"
   [builder]
-  (let [tools (compile-tools (:plugins builder))]
+  (let [tool-vars-list (:tool-vars builder)
+        tools (compile-tools tool-vars-list)
+        tool-vars-map (build-tool-vars-map tool-vars-list)]
     (->Kernel (:service builder)
-              (:plugins builder)
               (:filters builder)
               tools
+              tool-vars-map
               (:settings builder))))
 
 ;;; ============================================================
@@ -130,24 +174,18 @@
 ;;; ============================================================
 
 (defn find-function
-  "在 Kernel 的所有 Plugin 中查找函数
-
-   支持:
-   - 关键字或字符串名称
-   - 短名格式（遍历所有 Plugin）
+  "在 Kernel 中查找函数
 
    参数:
    - kernel:  Kernel 实例
-   - fn-name: 函数名
+   - fn-name: 函数名（关键字或字符串）
 
    返回:
-   {:plugin plugin :tool-var var} 或 nil"
+   {:tool-var var} 或 nil"
   [kernel fn-name]
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (some (fn [plugin]
-            (when-let [v (kp/get-tool-var plugin fn-key)]
-              {:plugin plugin :tool-var v}))
-          (:plugins kernel))))
+    (when-let [v (get (:tool-vars kernel) fn-key)]
+      {:tool-var v})))
 
 (defn list-functions
   "列出 Kernel 中所有注册的函数名称
@@ -155,7 +193,101 @@
    返回:
    关键字列表"
   [kernel]
-  (vec (mapcat kp/list-function-names (:plugins kernel))))
+  (keys (:tool-vars kernel)))
+
+(defn get-tool-var
+  "获取指定名称的 tool var
+
+   参数:
+   - kernel:  Kernel 实例
+   - fn-name: 函数名（关键字或字符串）
+
+   返回:
+   var 引用或 nil"
+  [kernel fn-name]
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
+    (get (:tool-vars kernel) fn-key)))
+
+;;; ============================================================
+;;; Query API - Tag 过滤
+;;; ============================================================
+
+(defn list-functions-by-tag
+  "列出带有指定 tag 的函数名称
+
+   参数:
+   - kernel: Kernel 实例
+   - tag:    标签关键字
+
+   返回:
+   关键字列表"
+  [kernel tag]
+  (vec (for [[fn-name v] (:tool-vars kernel)
+             :when (tool/has-tag? v tag)]
+         fn-name)))
+
+(defn list-functions-by-tags
+  "列出带有任意指定 tags 的函数名称（OR 逻辑）
+
+   参数:
+   - kernel: Kernel 实例
+   - tags:   标签集合
+
+   返回:
+   关键字列表"
+  [kernel tags]
+  (let [tags-set (set tags)]
+    (vec (for [[fn-name v] (:tool-vars kernel)
+               :when (tool/has-any-tag? v tags-set)]
+           fn-name))))
+
+(defn list-functions-with-all-tags
+  "列出同时带有所有指定 tags 的函数名称（AND 逻辑）
+
+   参数:
+   - kernel: Kernel 实例
+   - tags:   标签集合
+
+   返回:
+   关键字列表"
+  [kernel tags]
+  (let [tags-set (set tags)]
+    (vec (for [[fn-name v] (:tool-vars kernel)
+               :let [tool-tags (tool/get-tags v)]
+               :when (and tool-tags
+                          (every? #(contains? tool-tags %) tags-set))]
+           fn-name))))
+
+(defn- filter-tools-by-tags
+  "根据 tags 过滤 tool schemas
+
+   参数:
+   - kernel:       Kernel 实例
+   - tags:         包含的标签（OR 逻辑，nil 表示不过滤）
+   - exclude-tags: 排除的标签（OR 逻辑，nil 表示不排除）
+
+   返回:
+   过滤后的 tool schemas 列表"
+  [kernel {:keys [tags exclude-tags]}]
+  (let [all-tools (:tools kernel)
+        tool-vars-map (:tool-vars kernel)
+        tags-set (when tags (set tags))
+        exclude-tags-set (when exclude-tags (set exclude-tags))]
+    (if (and (nil? tags-set) (nil? exclude-tags-set))
+      ;; 无过滤条件，返回全部
+      all-tools
+      ;; 应用过滤
+      (vec (for [tool-schema all-tools
+                 :let [fn-name (keyword (:name tool-schema))
+                       v (get tool-vars-map fn-name)]
+                 :when (and v
+                            ;; 如果指定了 tags，则必须包含任意一个
+                            (or (nil? tags-set)
+                                (tool/has-any-tag? v tags-set))
+                            ;; 如果指定了 exclude-tags，则不能包含任意一个
+                            (or (nil? exclude-tags-set)
+                                (not (tool/has-any-tag? v exclude-tags-set))))]
+             tool-schema)))))
 
 ;;; ============================================================
 ;;; Invoke API - invoke-tool（函数调用，经过 Filter 管道）
@@ -198,7 +330,7 @@
             (throw (ex-info (str "函数未找到: " fn-key)
                             {:fn-name fn-key
                              :available (list-functions kernel)})))
-        {:keys [plugin tool-var]} found
+        {:keys [tool-var]} found
         func-def (build-func-def fn-key tool-var)
         all-filters (:filters kernel)
 
@@ -222,7 +354,7 @@
             ;; 2. 执行函数（带超时支持）
             timeout-ms (:timeout-ms pre-result)
             exec-result (try
-                          (let [do-exec #(kp/execute-tool plugin fn-key args context)]
+                          (let [do-exec #(tool/invoke tool-var args context)]
                             (if timeout-ms
                               (let [result (deref (future (do-exec))
                                                   timeout-ms ::timeout)]
@@ -394,7 +526,9 @@
      {:context          Context 对象（可选，默认创建空 Context）
       :system-prompts   系统提示消息列表（每次 LLM 调用前拼接）
       :max-iterations   最大循环次数（默认 10）
-      :tool-choice      :auto/:none/:required（默认 :auto）}
+      :tool-choice      :auto/:none/:required（默认 :auto）
+      :tags             只使用带这些 tags 的工具（OR 逻辑）
+      :exclude-tags     排除带这些 tags 的工具（OR 逻辑）}
 
    返回:
    {:response final-response :context updated-ctx :tool-calls-made [...]}"
@@ -412,7 +546,8 @@
         max-iter (or (:max-iterations opts)
                      (get-in kernel [:settings :max-tool-iterations])
                      default-max-iterations)
-        tool-schemas (:tools kernel)
+        ;; 根据 tags 过滤工具
+        tool-schemas (filter-tools-by-tags kernel opts)
         tool-choice (or (:tool-choice opts) :auto)
         service (:service kernel)
 

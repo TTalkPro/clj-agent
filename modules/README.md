@@ -7,7 +7,7 @@ clj-agent 分为多个独立模块：
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # 核心框架（Kernel, Plugin, Filter, deftool, Process Runtime）
+│   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, Process Runtime）
 │   ├── clj-agent-llm/          # LLM Provider + Service 工厂
 │   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
 │   ├── clj-agent-plugin/       # 预置插件库（File, HTTP, Shell）
@@ -30,7 +30,6 @@ clj-agent/
 **包含**:
 - `im.ttalk.agent.core.kernel.core` - Kernel（Build/Invoke/Query API）
 - `im.ttalk.agent.core.kernel.tool` - deftool 宏（工具函数定义 + schema 生成）
-- `im.ttalk.agent.core.kernel.plugin` - KernelPlugin（defplugin + 工具管理）
 - `im.ttalk.agent.core.kernel.filter` - Filter 拦截链（Ring-style 中间件）
 - `im.ttalk.agent.core.kernel.context` - Context 共享状态管理
 - `im.ttalk.agent.core.kernel.process.*` - 事件驱动 Process 运行时
@@ -105,7 +104,7 @@ clj-agent/
 **职责**: RAG 检索增强生成
 
 **包含**:
-- `im.ttalk.agent.rag.plugin` - RAG 工具集（Kernel Plugin）
+- `im.ttalk.agent.rag.plugin` - RAG 工具集（导出 `all-tools`）
 - `im.ttalk.agent.rag.pipeline` - RAG 执行管道
 - `im.ttalk.agent.rag.splitter` - 文本切分
 - `im.ttalk.agent.rag.embeddings` - Embedding 操作

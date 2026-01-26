@@ -49,7 +49,7 @@
                       {:text "北京天气是晴天 25°C" :tool-calls nil}])
           agent (ka/create-agent {:provider provider
                                   :model "test"
-                                  :tools [ts/mock-tools]})]
+                                  :tools ts/mock-tools})]
       (let [result (ka/chat agent "北京天气怎么样？")]
         (is (= "北京天气是晴天 25°C" (:text result)))
         (is (= 1 (count (:tool-calls-made result))))

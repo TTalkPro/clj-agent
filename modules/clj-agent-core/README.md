@@ -1,6 +1,6 @@
 # clj-agent-core
 
-核心模块 - Kernel 编排器、Plugin 系统、Filter 中间件、Process 运行时
+核心模块 - Kernel 编排器、Tool 系统、Filter 中间件、Process 运行时
 
 [English](#english) | 中文
 
@@ -10,7 +10,6 @@
 
 - **Kernel**：中央编排器，统一管理工具调用和 LLM 交互
 - **deftool**：宏，同时定义函数和生成 LLM tool schema
-- **Plugin**：工具集组织和管理
 - **Filter**：Ring-style 中间件（pre/post invocation、pre/post chat）
 - **Context**：对话共享状态管理
 - **Process Runtime**：基于 core.async 的事件驱动工作流引擎
@@ -34,7 +33,6 @@
 |---------|------|
 | `im.ttalk.agent.core.kernel.core` | Kernel 构建、调用、查询 API |
 | `im.ttalk.agent.core.kernel.tool` | `deftool` 宏定义 |
-| `im.ttalk.agent.core.kernel.plugin` | `defplugin` 宏和 Plugin 管理 |
 | `im.ttalk.agent.core.kernel.filter` | Filter 创建和内置 Filter |
 | `im.ttalk.agent.core.kernel.context` | Context 状态管理 |
 | `im.ttalk.agent.core.kernel.types` | ToolCall、Response 数据结构 |
@@ -58,7 +56,7 @@
 (kernel/create-kernel-builder {:max-tool-iterations 10})
 
 ;; 配置 Builder
-(kernel/add-plugin builder plugin)      ;; 添加 Plugin
+(kernel/add-tools builder tools)        ;; 添加工具
 (kernel/add-service builder service)    ;; 设置 LLM Service
 (kernel/add-filter builder filter-def)  ;; 添加 Filter
 
@@ -115,24 +113,6 @@
 
 ;; 支持的参数类型: :string :int :float :boolean :array :object
 ;; 生成的 metadata: :tool/schema :tool/sensitive
-```
-
-### Plugin API
-
-```clojure
-(require '[im.ttalk.agent.core.kernel.plugin :as kp])
-
-;; 宏定义
-(kp/defplugin weather-tools "天气工具" get-weather get-forecast)
-
-;; 函数式 API
-(kp/create-plugin :name "description" [#'get-weather #'get-forecast])
-
-;; 查询
-(kp/get-schemas plugin)           ;; 获取所有 tool schema
-(kp/get-tool-var plugin :name)    ;; 获取 tool var
-(kp/list-function-names plugin)   ;; 列出函数名
-(kp/execute-tool plugin :name args ctx)  ;; 执行工具
 ```
 
 ### Filter API
@@ -269,18 +249,16 @@ Step 生命周期函数：
 
 - **Kernel**: Central orchestrator for tool invocation and LLM interaction
 - **deftool**: Macro that simultaneously defines functions and generates LLM tool schemas
-- **Plugin**: Tool collection organization and management
 - **Filter**: Ring-style middleware (pre/post invocation, pre/post chat)
 - **Context**: Shared conversation state management
 - **Process Runtime**: core.async-based event-driven workflow engine
 
 ### Key APIs
 
-- `kernel/create-kernel-builder` → `add-plugin` → `add-service` → `add-filter` → `build-kernel`
+- `kernel/create-kernel-builder` → `add-tools` → `add-service` → `add-filter` → `build-kernel`
 - `kernel/invoke-tool` - Single tool invocation through Filter pipeline
 - `kernel/invoke-chat` - LLM call through chat Filters
 - `kernel/invoke` - Tool-calling loop (main entry point)
 - `deftool` - Define tool with auto-generated schema
-- `defplugin` - Organize tools into named collections
 - `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/track-message` - Context management
 - `process/builder`, `runtime/run-process` - Event-driven workflows

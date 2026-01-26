@@ -32,6 +32,13 @@
      {:sensitive true}
      (io/delete-file path))
 
+   ;; 带 tags 的工具
+   (deftool get-weather
+     \"获取天气\"
+     [[city :string \"城市名称\"]]
+     {:tags [:weather :external-api :read-only]}
+     (fetch-weather city))
+
    ;; 需要 context 的工具
    (deftool save-note
      \"保存笔记\"
@@ -180,13 +187,14 @@
    - :tool/sensitive 是否为敏感工具
    - :tool/category  工具分类
    - :tool/context   是否需要 context
+   - :tool/tags      标签集合（用于过滤）
    - :tool/function  标记为 tool function"
   {:arglists '([name description params & body]
                [name description params opts-map & body])}
   [fn-name description params & body]
   (let [;; 分离选项 map 和函数体
         [opts body] (if (and (map? (first body))
-                             (some #{:sensitive :timeout :category :context}
+                             (some #{:sensitive :timeout :category :context :tags}
                                    (keys (first body))))
                       [(first body) (rest body)]
                       [{} body])
@@ -200,7 +208,10 @@
         needs-context? (:context opts)
         ;; 生成参数符号
         arg-sym (gensym "args")
-        ctx-sym 'ctx]
+        ctx-sym 'ctx
+        ;; 解析 tags
+        tags-set (when-let [tags (:tags opts)]
+                   (set tags))]
     (if needs-context?
       ;; 需要 context 的 tool：生成 2-arity 函数 [args-map context]
       (if (seq param-names)
@@ -211,6 +222,7 @@
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/category  ~(:category opts :general)
             :tool/context   true
+            :tool/tags      ~tags-set
             :tool/function  true}
            [{:keys [~@param-names] :as ~arg-sym} ~ctx-sym]
            ~@body)
@@ -221,6 +233,7 @@
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/category  ~(:category opts :general)
             :tool/context   true
+            :tool/tags      ~tags-set
             :tool/function  true}
            [~arg-sym ~ctx-sym]
            ~@body))
@@ -233,6 +246,7 @@
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/category  ~(:category opts :general)
             :tool/context   false
+            :tool/tags      ~tags-set
             :tool/function  true}
            [{:keys [~@param-names] :as ~arg-sym}]
            ~@body)
@@ -243,6 +257,7 @@
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/category  ~(:category opts :general)
             :tool/context   false
+            :tool/tags      ~tags-set
             :tool/function  true}
            [~arg-sym]
            ~@body)))))
@@ -310,6 +325,40 @@
    返回: 分类关键字（默认 :general）"
   [v]
   (or (:tool/category (meta v)) :general))
+
+(defn get-tags
+  "获取 tool function 的标签集合
+
+   参数:
+   - v: var 引用
+
+   返回: 标签集合（set）或 nil"
+  [v]
+  (:tool/tags (meta v)))
+
+(defn has-tag?
+  "检查 tool function 是否包含指定标签
+
+   参数:
+   - v:   var 引用
+   - tag: 标签关键字
+
+   返回: boolean"
+  [v tag]
+  (boolean (when-let [tags (get-tags v)]
+             (contains? tags tag))))
+
+(defn has-any-tag?
+  "检查 tool function 是否包含任意一个指定标签
+
+   参数:
+   - v:    var 引用
+   - tags: 标签集合
+
+   返回: boolean"
+  [v tags]
+  (boolean (when-let [tool-tags (get-tags v)]
+             (some tool-tags tags))))
 
 ;;; ============================================================
 ;;; Tool Var 执行辅助

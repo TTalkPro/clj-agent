@@ -15,7 +15,6 @@
 
    注意: Zhipu 免费套餐有速率限制，测试间加了等待间隔。"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
@@ -31,30 +30,35 @@
 (deftool get-weather
   "获取指定城市的天气信息"
   [[city :string "城市名称"]]
+  {:tags [:weather :read-only]}
   (str city "：晴天，气温 25°C，湿度 60%"))
 
 (deftool get-time
   "获取当前时间"
   []
+  {:tags [:utility :read-only]}
   (str (java.time.LocalDateTime/now)))
 
 (deftool translate
   "将文本翻译为目标语言"
   [[text :string "要翻译的文本"]
    [target-lang :string "目标语言"]]
+  {:tags [:utility]}
   (str "[翻译结果] " text " → (" target-lang ")"))
 
 (deftool summarize-text
   "摘要生成（模拟）"
   [[text :string "要摘要的文本"]]
+  {:tags [:utility]}
   (str "摘要: " (subs text 0 (min 50 (count text))) "..."))
 
 ;;; ============================================================
-;;; Plugin & Kernel 构建
+;;; 工具集 & Kernel 构建
 ;;; ============================================================
 
-(kp/defplugin process-tools "Process 测试工具集"
-  get-weather get-time translate summarize-text)
+(def process-tools
+  "Process 测试工具集"
+  [#'get-weather #'get-time #'translate #'summarize-text])
 
 (def service
   (chat/create-service
@@ -68,7 +72,7 @@
 (def app-kernel
   (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
       (kernel/add-service service)
-      (kernel/add-plugin process-tools)
+      (kernel/add-tools process-tools)
       (kernel/build-kernel)))
 
 ;;; ============================================================
@@ -379,7 +383,7 @@
             filtered-kernel
             (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
                 (kernel/add-service service)
-                (kernel/add-plugin process-tools)
+                (kernel/add-tools process-tools)
                 (kernel/add-filter pre-inv-filter)
                 (kernel/add-filter post-inv-filter)
                 (kernel/add-filter pre-chat-filter)

@@ -15,7 +15,6 @@ Clojure AI Agent Framework - Kernel 中央编排器
   - [Kernel API（完全控制）](#方式三kernel-api完全控制)
 - [核心概念](#核心概念)
   - [deftool 宏](#deftool-宏)
-  - [defplugin 宏](#defplugin-宏)
   - [Kernel API](#kernel-api)
   - [Service 接口](#service-接口)
   - [Filter 中间件](#filter-中间件)
@@ -38,7 +37,7 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 `clj-agent` 是一个 Clojure AI Agent 框架，提供从简单对话到复杂工作流的完整解决方案：
 
-- **Kernel + Plugin 编排**：`deftool` 宏定义工具，`defplugin` 组织工具集，Kernel 统一调度
+- **Kernel + Tool 编排**：`deftool` 宏定义工具，Kernel 通过 `add-tools` 统一调度
 - **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）、`invoke`（工具调用循环）
 - **Filter 中间件**：Ring-style 洋葱模型，支持 pre/post invocation 和 pre/post chat 四类拦截
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
@@ -61,7 +60,6 @@ graph TB
 
     subgraph "编排层 (Orchestration Layer)"
         K[Kernel<br/>中央编排器]
-        P[Plugin<br/>工具集管理]
         F[Filter<br/>中间件链]
         T[deftool<br/>工具定义宏]
     end
@@ -96,16 +94,15 @@ graph TB
         RAG[RAG Pipeline<br/>检索增强生成]
         MCP[MCP Server/Client<br/>Model Context Protocol]
         A2A[A2A Server/Client<br/>Agent-to-Agent Protocol]
-        PLG[Plugin Library<br/>File/HTTP/Shell]
+        PLG[Tool Library<br/>File/HTTP/Shell]
     end
 
     KA --> K
     PA --> K
     PA --> RT
-    K --> P
+    K --> T
     K --> F
     K --> S
-    P --> T
     S --> PR
     PR --> AN & OA & ZP & OL & GM & MS
     RT --> SM
@@ -120,7 +117,7 @@ graph TB
 
 ```mermaid
 graph LR
-    core[clj-agent-core<br/>Kernel, Plugin, Filter<br/>Process Runtime]
+    core[clj-agent-core<br/>Kernel, Tool, Filter<br/>Process Runtime]
     llm[clj-agent-llm<br/>Provider, Service]
     sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
     plugin[clj-agent-plugin<br/>File, HTTP, Shell]
@@ -145,7 +142,7 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # 核心（Kernel, Plugin, Filter, deftool, Process Runtime）
+│   ├── clj-agent-core/         # 核心（Kernel, Tool, Filter, deftool, Process Runtime）
 │   ├── clj-agent-llm/          # LLM Provider + Service 工厂
 │   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
 │   ├── clj-agent-plugin/       # 预置插件库（File, HTTP, Shell, Security）
@@ -175,7 +172,6 @@ clj-agent/
 ```clojure
 (require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
 (require '[im.ttalk.agent.core.kernel.tool :refer [deftool]])
-(require '[im.ttalk.agent.core.kernel.plugin :as kp])
 (require '[im.ttalk.agent.llm.factory.builder :as factory])
 
 ;; 1. 定义工具
@@ -184,8 +180,8 @@ clj-agent/
   [[city :string "城市名称"]]
   (str city ": 晴天 25°C"))
 
-;; 2. 创建 Plugin
-(kp/defplugin my-tools "工具集" get-weather)
+;; 2. 创建工具集（tool var 向量）
+(def my-tools [#'get-weather])
 
 ;; 3. 创建 Provider
 (def provider (factory/create-provider-from-env :openai))
@@ -195,7 +191,7 @@ clj-agent/
              {:provider provider
               :model "gpt-4"
               :system-prompt "你是一个天气助手"
-              :tools [my-tools]}))
+              :tools my-tools}))
 
 ;; 5. 对话（自动累积上下文）
 (println (:text (ka/chat agent "北京天气怎么样？")))
@@ -218,12 +214,12 @@ clj-agent/
   {:sensitive true}   ;; 标记为敏感操作
   (str "已删除: " path))
 
-(kp/defplugin file-tools "文件操作" delete-file)
+(def file-tools [#'delete-file])
 
 (def agent (pa/create-process-agent
              {:provider provider
               :model "gpt-4"
-              :tools [file-tools]
+              :tools file-tools
               :on-pause (fn [{:keys [reason]}]
                           (println "需要审批:" reason))}))
 
@@ -255,7 +251,7 @@ clj-agent/
 (def app-kernel
   (-> (kernel/create-kernel-builder)
       (kernel/add-service service)
-      (kernel/add-plugin my-tools)
+      (kernel/add-tools my-tools)
       (kernel/add-filter filters/logging-pre-filter)
       (kernel/add-filter filters/error-handling-filter)
       (kernel/build-kernel)))
@@ -297,19 +293,6 @@ clj-agent/
 ;; 支持的参数类型: :string :int :float :boolean :array :object
 ```
 
-### defplugin 宏
-
-将工具组织为命名集合：
-
-```clojure
-(kp/defplugin weather-tools
-  "天气相关工具"
-  get-weather get-forecast)
-
-;; 或使用函数式 API
-(kp/create-plugin :weather-tools "天气工具" [#'get-weather #'get-forecast])
-```
-
 ### Kernel API
 
 Kernel 提供三类 API：
@@ -317,7 +300,7 @@ Kernel 提供三类 API：
 ```clojure
 ;; Build API - 构建 Kernel
 (-> (kernel/create-kernel-builder)
-    (kernel/add-plugin my-plugin)       ;; 添加插件
+    (kernel/add-tools my-tools)         ;; 添加工具
     (kernel/add-service service)        ;; 设置 LLM 服务
     (kernel/add-filter filter-def)      ;; 添加 Filter
     (kernel/build-kernel))              ;; 构建
@@ -692,24 +675,19 @@ RAG 模块提供文档切分、向量存储和语义检索能力。
 ;; => "clj-agent 是一个 AI Agent 框架，提供..."
 ```
 
-### 作为 Kernel Plugin 使用
+### 作为 Kernel 工具使用
 
 让 LLM 自动决定何时调用检索：
 
 ```clojure
-(require '[im.ttalk.agent.rag.plugin :as rag-plugin])
+(require '[im.ttalk.agent.rag.plugin :as rag])
 (require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
 
-;; 创建 RAG Plugin
-(def rag-tools (rag-plugin/create-rag-plugin
-                 {:vector-store vector-store
-                  :embedder embedder}))
-
-;; 将 RAG 作为工具提供给 Agent
+;; 将 RAG 工具提供给 Agent
 (def agent (ka/create-agent
              {:provider provider
               :model "gpt-4"
-              :tools [rag-tools]
+              :tools rag/all-tools
               :system-prompt "你是知识库助手。需要查找资料时使用检索工具。"}))
 
 (ka/chat agent "帮我查一下 clj-agent 的架构设计")
@@ -753,7 +731,6 @@ RAG 模块提供文档切分、向量存储和语义检索能力。
 (ns my-app.agent
   (:require [im.ttalk.agent.simpleagent.kernel-agent :as ka]
             [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.factory.builder :as factory]
             [im.ttalk.agent.memory.api :as mem]
@@ -779,7 +756,7 @@ RAG 模块提供文档切分、向量存储和语义检索能力。
       (mem/remember am {:type :fact :content fact})
       (str "已记住: " fact))))
 
-(kp/defplugin memory-tools "记忆工具" search-knowledge remember-fact)
+(def memory-tools [#'search-knowledge #'remember-fact])
 
 ;;; 2. 创建持久化存储
 (def store (sqlite/create-sqlite-store "agent_data.db"))

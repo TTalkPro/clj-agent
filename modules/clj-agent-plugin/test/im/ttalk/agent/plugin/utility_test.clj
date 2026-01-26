@@ -1,8 +1,7 @@
 (ns im.ttalk.agent.plugin.utility-test
   (:require [clojure.test :refer :all]
             [im.ttalk.agent.plugin.utility :as utility]
-            [im.ttalk.agent.core.kernel.tool :as tool]
-            [im.ttalk.agent.core.kernel.plugin :as kp]))
+            [im.ttalk.agent.core.kernel.tool :as tool]))
 
 (deftest calculator-test
   (testing "basic arithmetic"
@@ -45,24 +44,23 @@
       (is (string? result))
       (is (re-matches #"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}" result)))))
 
-(deftest utility-plugin-test
-  (testing "defplugin creates valid KernelPlugin"
-    (is (instance? im.ttalk.agent.core.kernel.plugin.KernelPlugin utility/utility-tools))
-    (is (= :utility-tools (:plugin-name utility/utility-tools)))
-    (is (= "通用工具集" (:description utility/utility-tools))))
+(deftest all-tools-test
+  (testing "all-tools is a valid collection"
+    (is (vector? utility/all-tools))
+    (is (= 2 (count utility/all-tools)))
+    (is (every? var? utility/all-tools)))
 
-  (testing "plugin contains expected tools"
-    (let [names (set (kp/list-function-names utility/utility-tools))]
-      (is (contains? names :calculator))
-      (is (contains? names :current-time))))
+  (testing "all-tools contains expected tools"
+    (let [names (set (map #(-> % meta :name) utility/all-tools))]
+      (is (contains? names 'calculator))
+      (is (contains? names 'current-time))))
 
-  (testing "plugin can generate schemas"
-    (let [schemas (kp/get-schemas utility/utility-tools)]
+  (testing "schemas are generated"
+    (let [schemas (map tool/get-schema utility/all-tools)]
       (is (= 2 (count schemas)))
       (is (every? #(contains? % :name) schemas))
       (is (every? #(contains? % :input_schema) schemas))))
 
-  (testing "plugin can execute tools"
-    (let [result (kp/execute-tool utility/utility-tools :calculator {:expression "(+ 1 2)"})]
-      (is (:success result))
-      (is (= "3" (:result result))))))
+  (testing "direct tool invocation"
+    (let [result (tool/invoke #'utility/calculator {:expression "(+ 1 2)"})]
+      (is (= "3" result)))))

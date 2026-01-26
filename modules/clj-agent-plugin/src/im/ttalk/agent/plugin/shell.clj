@@ -1,7 +1,6 @@
 (ns im.ttalk.agent.plugin.shell
   "Shell 命令工具集"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :refer [defplugin]]
             [im.ttalk.agent.plugin.helpers :as helpers]))
 
 (deftool execute-command
@@ -27,4 +26,6 @@
              "\n[退出码: " exit-code "]"))
       (str "安全检查未通过: " (:error result)))))
 
-(defplugin shell-tools "Shell 命令工具集" execute-command execute-command-safe)
+(def all-tools
+  "Shell 命令工具集（tool vars 列表）"
+  [#'execute-command #'execute-command-safe])

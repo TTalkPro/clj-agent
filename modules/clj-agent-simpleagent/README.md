@@ -46,7 +46,7 @@
               :max-tokens 4096             ;; 最大 token（默认 4096）
               :temperature 0.7             ;; 温度（可选）
               :system-prompt "你是助手"     ;; 系统提示（可选）
-              :tools [my-plugin]           ;; Plugin 列表或 tool var 列表
+              :tools my-tools              ;; tool var 向量
               :filters [my-filter]         ;; Filter 列表（可选）
               :max-iterations 10           ;; 最大工具调用次数（默认 10）
               :kernel pre-built-kernel}))  ;; 或直接传入 Kernel（跳过构建）
@@ -83,7 +83,7 @@
 (def agent (pa/create-process-agent
              {:provider provider
               :model "gpt-4"
-              :tools [my-plugin]
+              :tools my-tools
               :on-pause (fn [{:keys [reason pending-tool]}]
                           (println "暂停:" reason)
                           (println "待审批:" (:name pending-tool)))}))
@@ -116,7 +116,7 @@
 (require '[im.ttalk.agent.simpleagent.common :as common])
 
 ;; 根据 opts 构建 Kernel（内部调用）
-(common/build-kernel {:provider p :model "gpt-4" :tools [plugin]})
+(common/build-kernel {:provider p :model "gpt-4" :tools my-tools})
 
 ;; 获取或构建 Kernel（有 :kernel 直接用，否则构建）
 (common/ensure-kernel opts)
@@ -128,14 +128,18 @@
 
 ## 工具配置
 
-`:tools` 参数支持两种格式：
+`:tools` 参数接受 tool var 向量：
 
 ```clojure
-;; 格式 1: KernelPlugin 实例列表
-:tools [my-plugin another-plugin]
+;; 定义工具
+(deftool get-weather "获取天气" [[city :string "城市"]] ...)
+(deftool calculate "计算" [[expr :string "表达式"]] ...)
 
-;; 格式 2: tool var 列表（自动包装为 Plugin）
-:tools [#'get-weather #'calculate #'delete-file]
+;; 创建工具集
+(def my-tools [#'get-weather #'calculate])
+
+;; 传给 Agent
+(ka/create-agent {:provider p :tools my-tools ...})
 ```
 
 ## Sensitive 工具

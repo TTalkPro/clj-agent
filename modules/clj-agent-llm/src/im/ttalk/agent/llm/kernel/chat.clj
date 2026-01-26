@@ -19,7 +19,7 @@
 
    (def app-kernel
      (-> (kernel/create-kernel-builder)
-         (kernel/add-plugin my-tools)
+         (kernel/add-tools my-tools)
          (kernel/add-service service)
          (kernel/build-kernel)))
 

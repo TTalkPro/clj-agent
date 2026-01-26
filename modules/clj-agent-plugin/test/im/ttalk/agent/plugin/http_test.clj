@@ -1,8 +1,7 @@
 (ns im.ttalk.agent.plugin.http-test
   (:require [clojure.test :refer :all]
             [im.ttalk.agent.plugin.http :as http]
-            [im.ttalk.agent.core.kernel.tool :as tool]
-            [im.ttalk.agent.core.kernel.plugin :as kp]))
+            [im.ttalk.agent.core.kernel.tool :as tool]))
 
 (deftest http-tools-metadata-test
   (testing "http-get has correct metadata"
@@ -32,20 +31,21 @@
       (let [schema (tool/get-schema v)]
         (is (= "http-delete" (:name schema)))))))
 
-(deftest http-tools-plugin-test
-  (testing "plugin structure"
-    (is (instance? im.ttalk.agent.core.kernel.plugin.KernelPlugin http/http-tools))
-    (is (= 4 (kp/function-count http/http-tools))))
+(deftest all-tools-test
+  (testing "all-tools structure"
+    (is (vector? http/all-tools))
+    (is (= 4 (count http/all-tools)))
+    (is (every? var? http/all-tools)))
 
-  (testing "plugin contains expected tools"
-    (let [names (set (kp/list-function-names http/http-tools))]
-      (is (contains? names :http-get))
-      (is (contains? names :http-post))
-      (is (contains? names :http-put))
-      (is (contains? names :http-delete))))
+  (testing "all-tools contains expected tools"
+    (let [names (set (map #(-> % meta :name) http/all-tools))]
+      (is (contains? names 'http-get))
+      (is (contains? names 'http-post))
+      (is (contains? names 'http-put))
+      (is (contains? names 'http-delete))))
 
   (testing "schemas are generated"
-    (let [schemas (kp/get-schemas http/http-tools)]
+    (let [schemas (map tool/get-schema http/all-tools)]
       (is (= 4 (count schemas)))
       (is (every? #(contains? % :name) schemas))
       (is (every? #(contains? % :input_schema) schemas)))))

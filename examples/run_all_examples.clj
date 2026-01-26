@@ -11,7 +11,6 @@
    环境变量:
      ZHIPU_API_KEY - 智谱 AI API Key（必需）"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
@@ -65,11 +64,13 @@
 (deftool delete-file
   "删除文件（危险操作）"
   [[path :string "文件路径"]]
-  {:sensitive true}
+  {:sensitive true
+   :tags [:file :dangerous]}
   (str "已删除: " path))
 
-(kp/defplugin test-tools "测试工具集"
-  get-weather get-time calculate delete-file)
+(def test-tools
+  "测试工具集"
+  [#'get-weather #'get-time #'calculate #'delete-file])
 
 ;;; ============================================================
 ;;; 辅助函数
@@ -121,7 +122,7 @@
                    :max-tokens 1024})
         app-kernel (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
                        (kernel/add-service service)
-                       (kernel/add-plugin test-tools)
+                       (kernel/add-tools test-tools)
                        (kernel/build-kernel))]
 
     ;; 1.1 Query API
@@ -194,7 +195,7 @@
                    :max-tokens 1024})
         app-kernel (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
                        (kernel/add-service service)
-                       (kernel/add-plugin test-tools)
+                       (kernel/add-tools test-tools)
                        (kernel/build-kernel))]
 
     ;; 2.1 线性流程
@@ -540,7 +541,7 @@
         filtered-kernel
         (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
             (kernel/add-service service)
-            (kernel/add-plugin test-tools)
+            (kernel/add-tools test-tools)
             (kernel/add-filter pre-inv-filter)
             (kernel/add-filter post-inv-filter)
             (kernel/add-filter pre-chat-filter)

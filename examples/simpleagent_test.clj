@@ -5,7 +5,6 @@
 
    需要环境变量: ZHIPU_API_KEY"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.simpleagent.kernel-agent :as ka]
             [im.ttalk.agent.simpleagent.process-agent :as pa]
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]))
@@ -17,20 +16,25 @@
 (deftool get-weather
   "获取指定城市的天气信息"
   [[city :string "城市名称"]]
+  {:tags [:weather :read-only]}
   (str city "：晴天，气温 25°C，湿度 60%"))
 
 (deftool get-time
   "获取当前时间"
   []
+  {:tags [:utility :read-only]}
   (str (java.time.LocalDateTime/now)))
 
 (deftool delete-file
   "删除指定文件（危险操作）"
   [[path :string "文件路径"]]
-  {:sensitive true}
+  {:sensitive true
+   :tags [:file :dangerous]}
   (str "已删除: " path))
 
-(kp/defplugin agent-tools "Agent 工具集" get-weather get-time delete-file)
+(def agent-tools
+  "Agent 工具集"
+  [#'get-weather #'get-time #'delete-file])
 
 ;;; ============================================================
 ;;; Provider 设置
@@ -95,7 +99,7 @@
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]})]
+                     :tools agent-tools})]
         (let [result (ka/chat agent "北京现在天气怎么样？")]
           (println "    回复:" (:text result))
           (println "    tool-calls:" (mapv (fn [tc] [(:name tc) (:result tc)])
@@ -134,7 +138,7 @@
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]
+                     :tools agent-tools
                      :on-pause (fn [info]
                                  (reset! pause-log info)
                                  (println "    [on-pause] 原因:" (:reason info)))})]
@@ -162,7 +166,7 @@
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [agent-tools]})]
+                     :tools agent-tools})]
         (let [result (pa/chat agent "请删除 /home/user/important.txt")]
           (when (= :paused (:status result))
             (let [reject-result (pa/resume agent "rejected")]

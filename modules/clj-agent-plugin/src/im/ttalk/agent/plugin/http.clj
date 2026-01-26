@@ -1,7 +1,6 @@
 (ns im.ttalk.agent.plugin.http
   "HTTP 请求工具集"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :refer [defplugin]]
             [im.ttalk.agent.core.http.client :as http]
             [im.ttalk.agent.plugin.helpers :as helpers]))
 
@@ -70,4 +69,6 @@
     (catch Exception e
       (str "请求失败: " (.getMessage e)))))
 
-(defplugin http-tools "HTTP 请求工具集" http-get http-post http-put http-delete)
+(def all-tools
+  "HTTP 请求工具集（tool vars 列表）"
+  [#'http-get #'http-post #'http-put #'http-delete])

@@ -3,8 +3,7 @@
             [im.ttalk.agent.rag.plugin :as plugin]
             [im.ttalk.agent.rag.pipeline :as pipeline]
             [im.ttalk.agent.rag.embeddings :as embeddings]
-            [im.ttalk.agent.core.kernel.tool :as tool]
-            [im.ttalk.agent.core.kernel.plugin :as kp]))
+            [im.ttalk.agent.core.kernel.tool :as tool]))
 
 (use-fixtures :each
   (fn [f]
@@ -37,27 +36,36 @@
       (is (empty? (get-in schema [:input_schema :properties]))))))
 
 ;;; ============================================================
-;;; 插件结构测试
+;;; 工具集结构测试
 ;;; ============================================================
 
-(deftest plugin-structure-test
-  (testing "rag-tools is a valid KernelPlugin"
-    (is (instance? im.ttalk.agent.core.kernel.plugin.KernelPlugin plugin/rag-tools)))
+(deftest all-tools-test
+  (testing "all-tools is a valid collection"
+    (is (vector? plugin/all-tools))
+    (is (= 6 (count plugin/all-tools)))
+    (is (every? var? plugin/all-tools)))
 
-  (testing "plugin contains 6 tools"
-    (is (= 6 (kp/function-count plugin/rag-tools))))
+  (testing "all-tools contains expected tools"
+    (let [names (set (map #(-> % meta :name) plugin/all-tools))]
+      (is (contains? names 'rag-index-text))
+      (is (contains? names 'rag-index-file))
+      (is (contains? names 'rag-retrieve))
+      (is (contains? names 'rag-query))
+      (is (contains? names 'rag-search))
+      (is (contains? names 'rag-stats))))
 
-  (testing "plugin schemas are generated"
-    (let [schemas (kp/get-schemas plugin/rag-tools)]
+  (testing "schemas are generated"
+    (let [schemas (map tool/get-schema plugin/all-tools)]
       (is (= 6 (count schemas)))
       (is (every? #(contains? % :name) schemas))))
 
   (testing "sensitive tools are marked"
-    (is (kp/has-sensitive? plugin/rag-tools))
-    (let [sensitive (set (kp/get-sensitive-functions plugin/rag-tools))]
-      (is (contains? sensitive :rag-index-file))
-      (is (not (contains? sensitive :rag-index-text)))
-      (is (not (contains? sensitive :rag-retrieve))))))
+    (let [sensitive-vars (filter tool/sensitive? plugin/all-tools)
+          sensitive-names (set (map #(-> % meta :name) sensitive-vars))]
+      (is (pos? (count sensitive-vars)))
+      (is (contains? sensitive-names 'rag-index-file))
+      (is (not (contains? sensitive-names 'rag-index-text)))
+      (is (not (contains? sensitive-names 'rag-retrieve))))))
 
 ;;; ============================================================
 ;;; 工具调用测试

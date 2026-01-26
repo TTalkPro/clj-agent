@@ -37,19 +37,19 @@
 ## 使用方式
 
 ```clojure
-(require '[im.ttalk.agent.plugin.file :refer [file-tools]])
-(require '[im.ttalk.agent.plugin.http :refer [http-tools]])
-(require '[im.ttalk.agent.plugin.shell :refer [shell-tools]])
+(require '[im.ttalk.agent.plugin.file :as file])
+(require '[im.ttalk.agent.plugin.http :as http])
+(require '[im.ttalk.agent.plugin.shell :as shell])
 
 ;; 注册到 Kernel
 (-> (kernel/create-kernel-builder)
-    (kernel/add-plugin file-tools)
-    (kernel/add-plugin http-tools)
-    (kernel/add-plugin shell-tools)
+    (kernel/add-tools file/all-tools)
+    (kernel/add-tools http/all-tools)
+    (kernel/add-tools shell/all-tools)
     ...)
 
 ;; 或用于 SimpleAgent
-(ka/create-agent {:tools [file-tools http-tools] ...})
+(ka/create-agent {:tools (concat file/all-tools http/all-tools) ...})
 ```
 
 ## 工具列表
@@ -110,8 +110,8 @@ Pre-built plugin library providing common tools for file operations, HTTP reques
 ### Usage
 
 ```clojure
-(require '[im.ttalk.agent.plugin.file :refer [file-tools]])
-(kernel/add-plugin builder file-tools)
+(require '[im.ttalk.agent.plugin.file :as file])
+(kernel/add-tools builder file/all-tools)
 ```
 
 Tools marked as `:sensitive true` will trigger approval in ProcessAgent.

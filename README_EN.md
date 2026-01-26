@@ -8,7 +8,7 @@ English | [中文](README.md)
 
 `clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to complex workflows:
 
-- **Kernel + Plugin Orchestration**: `deftool` macro for tool definitions, `defplugin` for organizing tool collections, Kernel for unified scheduling
+- **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, Kernel uses `add-tools` for unified scheduling
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM), `invoke` (tool-calling loop)
 - **Filter Middleware**: Ring-style onion model with 4 filter types (pre/post invocation, pre/post chat)
 - **Service Abstraction**: LLM services via `{:chat-fn :build-result-msgs}` map, zero coupling
@@ -30,7 +30,6 @@ graph TB
 
     subgraph "Orchestration Layer"
         K[Kernel<br/>Central Orchestrator]
-        P[Plugin<br/>Tool Collection]
         F[Filter<br/>Middleware Chain]
         T[deftool<br/>Tool Definition Macro]
     end
@@ -64,16 +63,15 @@ graph TB
     subgraph "Extension Layer"
         RAG[RAG Pipeline<br/>Retrieval-Augmented Generation]
         MCP[MCP Server/Client<br/>Model Context Protocol]
-        PLG[Plugin Library<br/>File/HTTP/Shell]
+        PLG[Tool Library<br/>File/HTTP/Shell]
     end
 
     KA --> K
     PA --> K
     PA --> RT
-    K --> P
+    K --> T
     K --> F
     K --> S
-    P --> T
     S --> PR
     PR --> AN & OA & ZP & OL & GM & MS
     RT --> SM
@@ -87,7 +85,7 @@ graph TB
 
 ```mermaid
 graph LR
-    core[clj-agent-core<br/>Kernel, Plugin, Filter<br/>Process Runtime]
+    core[clj-agent-core<br/>Kernel, Tool, Filter<br/>Process Runtime]
     llm[clj-agent-llm<br/>Provider, Service]
     sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
     plugin[clj-agent-plugin<br/>File, HTTP, Shell]
@@ -110,7 +108,7 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # Core (Kernel, Plugin, Filter, deftool, Process Runtime)
+│   ├── clj-agent-core/         # Core (Kernel, Tool, Filter, deftool, Process Runtime)
 │   ├── clj-agent-llm/          # LLM Provider + Service Factory
 │   ├── clj-agent-simpleagent/  # High-level Agent Wrappers (KernelAgent, ProcessAgent)
 │   ├── clj-agent-plugin/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
@@ -139,7 +137,6 @@ The simplest way to use the framework with automatic state management:
 ```clojure
 (require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
 (require '[im.ttalk.agent.core.kernel.tool :refer [deftool]])
-(require '[im.ttalk.agent.core.kernel.plugin :as kp])
 (require '[im.ttalk.agent.llm.factory.builder :as factory])
 
 ;; 1. Define tools
@@ -148,8 +145,8 @@ The simplest way to use the framework with automatic state management:
   [[city :string "City name"]]
   (str city ": Sunny 25°C"))
 
-;; 2. Create Plugin
-(kp/defplugin my-tools "Tool collection" get-weather)
+;; 2. Create tools collection (tool var vector)
+(def my-tools [#'get-weather])
 
 ;; 3. Create Provider
 (def provider (factory/create-provider-from-env :openai))
@@ -159,7 +156,7 @@ The simplest way to use the framework with automatic state management:
              {:provider provider
               :model "gpt-4"
               :system-prompt "You are a weather assistant"
-              :tools [my-tools]}))
+              :tools my-tools}))
 
 ;; 5. Chat (auto-accumulates context)
 (println (:text (ka/chat agent "What's the weather in Beijing?")))
@@ -182,12 +179,12 @@ Automatically pauses when encountering tools marked as `:sensitive`, awaiting hu
   {:sensitive true}   ;; Mark as sensitive operation
   (str "Deleted: " path))
 
-(kp/defplugin file-tools "File operations" delete-file)
+(def file-tools [#'delete-file])
 
 (def agent (pa/create-process-agent
              {:provider provider
               :model "gpt-4"
-              :tools [file-tools]
+              :tools file-tools
               :on-pause (fn [{:keys [reason]}]
                           (println "Approval needed:" reason))}))
 
@@ -219,7 +216,7 @@ Use the Kernel directly for maximum flexibility:
 (def app-kernel
   (-> (kernel/create-kernel-builder)
       (kernel/add-service service)
-      (kernel/add-plugin my-tools)
+      (kernel/add-tools my-tools)
       (kernel/add-filter filters/logging-pre-filter)
       (kernel/add-filter filters/error-handling-filter)
       (kernel/build-kernel)))
@@ -261,19 +258,6 @@ Simultaneously defines a Clojure function and generates an LLM tool schema:
 ;; Supported parameter types: :string :int :float :boolean :array :object
 ```
 
-### defplugin Macro
-
-Organizes tools into named collections:
-
-```clojure
-(kp/defplugin weather-tools
-  "Weather related tools"
-  get-weather get-forecast)
-
-;; Or use the functional API
-(kp/create-plugin :weather-tools "Weather tools" [#'get-weather #'get-forecast])
-```
-
 ### Kernel API
 
 Kernel provides three categories of APIs:
@@ -281,7 +265,7 @@ Kernel provides three categories of APIs:
 ```clojure
 ;; Build API - Construct Kernel
 (-> (kernel/create-kernel-builder)
-    (kernel/add-plugin my-plugin)       ;; Add plugin
+    (kernel/add-tools my-tools)         ;; Add tools
     (kernel/add-service service)        ;; Set LLM service
     (kernel/add-filter filter-def)      ;; Add filter
     (kernel/build-kernel))              ;; Build
@@ -600,7 +584,7 @@ AgentMemory provides one-stop memory management, integrating snapshots, time-tra
 (rag/rag-query "Answer this question" {:top-k 5})
 ```
 
-The RAG module can also be registered as a Kernel Plugin, enabling the LLM to automatically invoke retrieval.
+The RAG module can also be registered as Kernel tools via `rag/all-tools`, enabling the LLM to automatically invoke retrieval.
 
 ## MCP Protocol
 

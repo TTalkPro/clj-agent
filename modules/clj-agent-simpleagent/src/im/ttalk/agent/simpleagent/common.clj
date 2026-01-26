@@ -4,21 +4,11 @@
    提供 kernel 构建、工具执行、结果处理等共享功能。"
   (:require [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.llm.kernel.chat :as chat]))
 
 ;;; ============================================================
 ;;; Kernel 构建
 ;;; ============================================================
-
-(defn- normalize-plugins
-  "将工具配置统一转换为 KernelPlugin 列表
-
-   支持 KernelPlugin 实例列表或 tool var 列表（自动包装为 plugin）。"
-  [tools]
-  (if (and (seq tools) (var? (first tools)))
-    [(kp/create-plugin :agent-tools "Agent 工具集" tools)]
-    (vec tools)))
 
 (defn build-kernel
   "根据配置 map 构建 Kernel 实例
@@ -28,7 +18,7 @@
    - :model         模型名称（默认 \"glm-4\"）
    - :max-tokens    最大生成 token 数（默认 4096）
    - :temperature   温度参数（可选）
-   - :tools         KernelPlugin 列表或 tool var 列表
+   - :tools         tool var 列表（如 [#'get-weather #'get-time]）
    - :filters       Filter 列表（可选）
    - :max-iterations 最大工具调用循环次数（默认 10）"
   [opts]
@@ -37,12 +27,12 @@
                    :model       (:model opts "glm-4")
                    :max-tokens  (:max-tokens opts 4096)
                    :temperature (:temperature opts)})
-        plugins (normalize-plugins (:tools opts []))
+        tools (:tools opts [])
         filters (:filters opts [])]
     (-> (kernel/create-kernel-builder
           {:max-tool-iterations (or (:max-iterations opts) 10)})
         (kernel/add-service service)
-        (as-> b (reduce kernel/add-plugin b plugins))
+        (kernel/add-tools tools)
         (as-> b (reduce kernel/add-filter b filters))
         (kernel/build-kernel))))
 

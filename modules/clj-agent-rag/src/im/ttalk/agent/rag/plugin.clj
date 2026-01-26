@@ -1,10 +1,9 @@
 (ns im.ttalk.agent.rag.plugin
   "RAG 检索增强生成工具集
 
-   将 RAG 管道操作暴露为 Kernel Plugin，
+   将 RAG 管道操作暴露为 Kernel 工具，
    使 LLM Agent 可以通过工具调用进行知识索引和检索。"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :refer [defplugin]]
             [im.ttalk.agent.rag.pipeline :as pipeline]
             [clojure.string :as str]))
 
@@ -125,8 +124,9 @@
       (str "错误: " (.getMessage e)))))
 
 ;;; ============================================================
-;;; Plugin 定义
+;;; 工具集导出
 ;;; ============================================================
 
-(defplugin rag-tools "RAG 检索增强生成工具集"
-  rag-index-text rag-index-file rag-retrieve rag-query rag-search rag-stats)
+(def all-tools
+  "RAG 检索增强生成工具集（tool vars 列表）"
+  [#'rag-index-text #'rag-index-file #'rag-retrieve #'rag-query #'rag-search #'rag-stats])

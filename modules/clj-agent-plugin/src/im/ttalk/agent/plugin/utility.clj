@@ -1,7 +1,6 @@
 (ns im.ttalk.agent.plugin.utility
   "通用工具集：calculator, current-time"
-  (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :refer [defplugin]])
+  (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]])
   (:import [java.time LocalDateTime]
            [java.time.format DateTimeFormatter]))
 
@@ -25,4 +24,6 @@
                 (DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss")))]
     (.format now fmt)))
 
-(defplugin utility-tools "通用工具集" calculator current-time)
+(def all-tools
+  "通用工具集（tool vars 列表）"
+  [#'calculator #'current-time])

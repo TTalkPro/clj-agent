@@ -2,7 +2,6 @@
   (:require [clojure.test :refer :all]
             [im.ttalk.agent.plugin.file :as file]
             [im.ttalk.agent.core.kernel.tool :as tool]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [clojure.java.io :as io])
   (:import [java.io File]))
 
@@ -102,20 +101,21 @@
         (is (= "move me" (slurp dst)))
         (is (not (.exists (io/file src))))))))
 
-(deftest file-tools-plugin-test
-  (testing "plugin structure"
-    (is (instance? im.ttalk.agent.core.kernel.plugin.KernelPlugin file/file-tools))
-    (is (= 10 (kp/function-count file/file-tools))))
+(deftest all-tools-test
+  (testing "all-tools structure"
+    (is (vector? file/all-tools))
+    (is (= 10 (count file/all-tools)))
+    (is (every? var? file/all-tools)))
 
   (testing "sensitive tools are marked"
-    (is (kp/has-sensitive? file/file-tools))
-    (let [sensitive (set (kp/get-sensitive-functions file/file-tools))]
-      (is (contains? sensitive :write-file))
-      (is (contains? sensitive :delete-file))
-      (is (contains? sensitive :move-file))
-      (is (not (contains? sensitive :read-file)))))
+    (let [sensitive-vars (filter tool/sensitive? file/all-tools)]
+      (is (pos? (count sensitive-vars)))
+      (let [sensitive-names (set (map #(-> % meta :name) sensitive-vars))]
+        (is (contains? sensitive-names 'write-file))
+        (is (contains? sensitive-names 'delete-file))
+        (is (contains? sensitive-names 'move-file)))))
 
   (testing "schemas are generated"
-    (let [schemas (kp/get-schemas file/file-tools)]
+    (let [schemas (map tool/get-schema file/all-tools)]
       (is (= 10 (count schemas)))
       (is (every? #(contains? % :name) schemas)))))

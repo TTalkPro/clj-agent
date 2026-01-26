@@ -7,7 +7,6 @@
    环境变量:
      BAILIAN_API_KEY - 阿里云百炼 API Key（必需）"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.plugin :as kp]
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]
@@ -21,20 +20,24 @@
 (deftool get-weather
   "获取指定城市的天气信息"
   [[city :string "城市名称"]]
+  {:tags [:weather :read-only]}
   (str city "：晴天，气温 22°C，湿度 55%"))
 
 (deftool get-time
   "获取当前时间"
   []
+  {:tags [:utility :read-only]}
   (str (java.time.LocalDateTime/now)))
 
 (deftool calculate
   "执行数学计算"
   [[expression :string "数学表达式"]]
+  {:tags [:utility :compute]}
   (str "结果: " (eval (read-string expression))))
 
-(kp/defplugin test-tools "测试工具集"
-  get-weather get-time calculate)
+(def test-tools
+  "测试工具集"
+  [#'get-weather #'get-time #'calculate])
 
 ;;; ============================================================
 ;;; 测试函数
@@ -141,7 +144,7 @@
                      :max-tokens 1024})
           app-kernel (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
                          (kernel/add-service service)
-                         (kernel/add-plugin test-tools)
+                         (kernel/add-tools test-tools)
                          (kernel/build-kernel))]
 
       (test-case "invoke-chat 单轮对话"
@@ -208,7 +211,7 @@
                       {:provider provider
                        :model "qwen-plus"
                        :max-tokens 1024
-                       :tools [test-tools]})
+                       :tools test-tools})
               result (ka/chat agent "现在几点了？")]
           (assert (some? (:text result)))
           (println (str "\n    工具: " (mapv :name (:tool-calls-made result))))

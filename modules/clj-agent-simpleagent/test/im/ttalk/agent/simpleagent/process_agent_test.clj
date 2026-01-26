@@ -17,7 +17,7 @@
                      [{:text "你好！" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (let [result (pa/chat agent "你好")]
         (is (= :completed (:status result)))
         (is (= "你好！" (:text result)))
@@ -34,7 +34,7 @@
                       {:text "工具执行完毕" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (let [result (pa/chat agent "执行安全操作")]
         (is (= :completed (:status result)))
         (is (= "工具执行完毕" (:text result)))
@@ -50,7 +50,7 @@
                                      :input {:target "/tmp/test"}}]}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (let [result (pa/chat agent "删除文件")]
         (is (= :paused (:status result)))
         (is (nil? (:text result)))
@@ -69,7 +69,7 @@
                       {:text "操作已完成" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       ;; 触发暂停
       (pa/chat agent "执行危险操作")
       (is (pa/paused? agent))
@@ -91,7 +91,7 @@
                       {:text "好的，已取消操作" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       ;; 触发暂停
       (pa/chat agent "执行危险操作")
       (is (pa/paused? agent))
@@ -108,7 +108,7 @@
                      [{:text "正常" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       ;; 初始状态
       (is (not (pa/paused? agent)))
 
@@ -124,7 +124,7 @@
                                      :input {:target "x"}}]}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (pa/chat agent "危险操作")
       (is (pa/paused? agent))
 
@@ -141,7 +141,7 @@
                                      :input {:target "重要文件"}}]}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]
+                                          :tools ts/test-plugin
                                           :on-pause (fn [info]
                                                       (reset! callback-log info))})]
       (pa/chat agent "删除重要文件")
@@ -155,7 +155,7 @@
                      [{:text "正常" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (pa/chat agent "你好")
       (is (thrown? clojure.lang.ExceptionInfo
                    (pa/resume agent "approved"))))))
@@ -173,7 +173,7 @@
                       {:text "全部完成" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (let [result (pa/chat agent "执行混合操作")]
         ;; 应该在 dangerous-tool 处暂停
         (is (= :paused (:status result)))
@@ -185,7 +185,7 @@
                      [{:text "回复" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
-                                          :tools [ts/test-plugin]})]
+                                          :tools ts/test-plugin})]
       (is (ctx/context? (pa/get-context agent)))
       (pa/chat agent "消息")
       (is (seq (ctx/get-messages (pa/get-context agent)))))))
