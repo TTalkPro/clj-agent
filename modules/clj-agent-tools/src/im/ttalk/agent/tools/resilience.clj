@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.plugin.resilience
+(ns im.ttalk.agent.tools.resilience
   "弹性执行模块
 
    提供工具级别的弹性包装函数：

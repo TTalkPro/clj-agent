@@ -88,7 +88,7 @@ graph LR
     core[clj-agent-core<br/>Kernel, Tool, Filter<br/>Process Runtime]
     llm[clj-agent-llm<br/>Provider, Service]
     sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
-    plugin[clj-agent-plugin<br/>File, HTTP, Shell]
+    plugin[clj-agent-tools<br/>File, HTTP, Shell]
     rag[clj-agent-rag<br/>RAG Pipeline]
     memory[clj-agent-memory<br/>Store, Snapshot]
     mcp[clj-agent-mcp<br/>MCP Server/Client]
@@ -111,7 +111,7 @@ clj-agent/
 │   ├── clj-agent-core/         # Core (Kernel, Tool, Filter, deftool, Process Runtime)
 │   ├── clj-agent-llm/          # LLM Provider + Service Factory
 │   ├── clj-agent-simpleagent/  # High-level Agent Wrappers (KernelAgent, ProcessAgent)
-│   ├── clj-agent-plugin/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
+│   ├── clj-agent-tools/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
 │   ├── clj-agent-memory/       # Storage Implementations (InMemory, SQLite, Redis, PostgreSQL)
 │   ├── clj-agent-rag/          # RAG Retrieval-Augmented Generation
 │   └── clj-agent-mcp/          # MCP Server/Client

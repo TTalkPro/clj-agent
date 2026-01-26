@@ -1,7 +1,7 @@
-(ns im.ttalk.agent.plugin.shell
+(ns im.ttalk.agent.tools.shell
   "Shell 命令工具集"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.plugin.helpers :as helpers]))
+            [im.ttalk.agent.tools.helpers :as helpers]))
 
 (deftool execute-command
   "执行 shell 命令（不进行安全检查）"

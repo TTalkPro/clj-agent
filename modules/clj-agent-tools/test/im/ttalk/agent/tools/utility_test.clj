@@ -1,6 +1,6 @@
-(ns im.ttalk.agent.plugin.utility-test
+(ns im.ttalk.agent.tools.utility-test
   (:require [clojure.test :refer :all]
-            [im.ttalk.agent.plugin.utility :as utility]
+            [im.ttalk.agent.tools.utility :as utility]
             [im.ttalk.agent.core.kernel.tool :as tool]))
 
 (deftest calculator-test
@@ -63,4 +63,4 @@
 
   (testing "direct tool invocation"
     (let [result (tool/invoke #'utility/calculator {:expression "(+ 1 2)"})]
-      (is (= "3" result)))))
+      (is (= "3" (:result result))))))

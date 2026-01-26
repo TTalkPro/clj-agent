@@ -120,7 +120,7 @@ graph LR
     core[clj-agent-core<br/>Kernel, Tool, Filter<br/>Process Runtime]
     llm[clj-agent-llm<br/>Provider, Service]
     sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
-    plugin[clj-agent-plugin<br/>File, HTTP, Shell]
+    plugin[clj-agent-tools<br/>File, HTTP, Shell]
     rag[clj-agent-rag<br/>RAG Pipeline]
     memory[clj-agent-memory<br/>Store, Snapshot]
     mcp[clj-agent-mcp<br/>MCP Server/Client]
@@ -145,7 +145,7 @@ clj-agent/
 │   ├── clj-agent-core/         # 核心（Kernel, Tool, Filter, deftool, Process Runtime）
 │   ├── clj-agent-llm/          # LLM Provider + Service 工厂
 │   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
-│   ├── clj-agent-plugin/       # 预置插件库（File, HTTP, Shell, Security）
+│   ├── clj-agent-tools/       # 预置插件库（File, HTTP, Shell, Security）
 │   ├── clj-agent-memory/       # 存储实现（InMemory, SQLite, Redis, PostgreSQL）
 │   ├── clj-agent-rag/          # RAG 检索增强生成
 │   ├── clj-agent-mcp/          # MCP 服务器/客户端

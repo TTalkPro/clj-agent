@@ -631,31 +631,8 @@ Answer:")
            :has-llm (boolean (:llm-fn pipeline)))))
 
 ;;; ============================================================
-;;; 向后兼容的分割函数（委托给 splitter 模块）
+;;; 文本分割函数（委托给 splitter 模块）
 ;;; ============================================================
-
-(defn make-text-splitter
-  "创建文本分割器（向后兼容）
-
-   请使用 im.ttalk.agent.rag.splitter/make-splitter"
-  [& {:keys [chunk-size chunk-overlap separator]
-      :or {chunk-size 1000 chunk-overlap 200 separator "\n"}}]
-  (splitter/make-splitter :chunk-size chunk-size
-                          :chunk-overlap chunk-overlap
-                          :separator separator))
-
-(defn split-text
-  "分割文本（向后兼容）
-
-   请使用 im.ttalk.agent.rag.splitter/split-text"
-  [text splitter-or-opts]
-  (if (instance? im.ttalk.agent.rag.splitter.Splitter splitter-or-opts)
-    (splitter/split-text splitter-or-opts text)
-    ;; 旧式调用：splitter 是 TextSplitter record
-    (let [{:keys [chunk-size chunk-overlap]} splitter-or-opts
-          new-splitter (splitter/make-splitter :chunk-size chunk-size
-                                               :chunk-overlap chunk-overlap)]
-      (splitter/split-text new-splitter text))))
 
 (defn split-by-separator
   "按分隔符分割文本

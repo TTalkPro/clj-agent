@@ -1,6 +1,6 @@
-(ns im.ttalk.agent.plugin.security-test
+(ns im.ttalk.agent.tools.security-test
   (:require [clojure.test :refer :all]
-            [im.ttalk.agent.plugin.security :as security]))
+            [im.ttalk.agent.tools.security :as security]))
 
 (defn- run-filter
   "辅助函数：执行 filter handler 并返回结果"

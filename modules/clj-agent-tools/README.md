@@ -1,12 +1,12 @@
-# clj-agent-plugin
+# clj-agent-tools
 
-预置插件库 - 文件操作、HTTP 请求、Shell 命令
+预置工具库 - 文件操作、HTTP 请求、Shell 命令
 
 [English](#english) | 中文
 
 ## 概述
 
-`clj-agent-plugin` 提供常用的预置工具插件，可直接注册到 Kernel 使用：
+`clj-agent-tools` 提供常用的预置工具，可直接注册到 Kernel 使用：
 
 - **file-tools**：文件读写、目录操作、复制/移动/删除
 - **http-tools**：HTTP GET/POST/PUT/DELETE 请求
@@ -16,7 +16,7 @@
 
 ```clojure
 ;; deps.edn
-{:deps {im.ttalk/clj-agent-plugin {:local/root "../clj-agent-plugin"}}}
+{:deps {im.ttalk/clj-agent-tools {:local/root "../clj-agent-tools"}}}
 ```
 
 内部依赖：`clj-agent-core`
@@ -25,21 +25,21 @@
 
 | 命名空间 | 说明 |
 |---------|------|
-| `im.ttalk.agent.plugin.file` | 文件操作工具集 |
-| `im.ttalk.agent.plugin.http` | HTTP 请求工具集 |
-| `im.ttalk.agent.plugin.shell` | Shell 命令工具集 |
-| `im.ttalk.agent.plugin.security` | 安全工具 |
-| `im.ttalk.agent.plugin.resilience` | 重试/超时装饰器 |
-| `im.ttalk.agent.plugin.utility` | 通用工具 |
-| `im.ttalk.agent.plugin.helpers` | 内部辅助函数 |
-| `im.ttalk.agent.plugin.all` | 所有插件合集 |
+| `im.ttalk.agent.tools.file` | 文件操作工具集 |
+| `im.ttalk.agent.tools.http` | HTTP 请求工具集 |
+| `im.ttalk.agent.tools.shell` | Shell 命令工具集 |
+| `im.ttalk.agent.tools.security` | 安全工具 |
+| `im.ttalk.agent.tools.resilience` | 重试/超时装饰器 |
+| `im.ttalk.agent.tools.utility` | 通用工具 |
+| `im.ttalk.agent.tools.helpers` | 内部辅助函数 |
+| `im.ttalk.agent.tools.all` | 所有工具合集 |
 
 ## 使用方式
 
 ```clojure
-(require '[im.ttalk.agent.plugin.file :as file])
-(require '[im.ttalk.agent.plugin.http :as http])
-(require '[im.ttalk.agent.plugin.shell :as shell])
+(require '[im.ttalk.agent.tools.file :as file])
+(require '[im.ttalk.agent.tools.http :as http])
+(require '[im.ttalk.agent.tools.shell :as shell])
 
 ;; 注册到 Kernel
 (-> (kernel/create-kernel-builder)
@@ -99,9 +99,9 @@
 
 ### Overview
 
-Pre-built plugin library providing common tools for file operations, HTTP requests, and shell commands.
+Pre-built tool library providing common tools for file operations, HTTP requests, and shell commands.
 
-### Plugins
+### Tools
 
 - **file-tools**: read, write, append, list, info, exists, mkdir, delete, copy, move
 - **http-tools**: GET, POST, PUT, DELETE with configurable timeout
@@ -110,7 +110,7 @@ Pre-built plugin library providing common tools for file operations, HTTP reques
 ### Usage
 
 ```clojure
-(require '[im.ttalk.agent.plugin.file :as file])
+(require '[im.ttalk.agent.tools.file :as file])
 (kernel/add-tools builder file/all-tools)
 ```
 

@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.plugin.security
+(ns im.ttalk.agent.tools.security
   "安全策略与 Kernel Filter 工厂
 
    提供工具调用前的安全拦截：
@@ -7,7 +7,7 @@
    - 命令安全检查
    - 域名白名单"
   (:require [clojure.string :as str]
-            [im.ttalk.agent.plugin.helpers :as helpers]
+            [im.ttalk.agent.tools.helpers :as helpers]
             [im.ttalk.agent.core.kernel.filter :as kf])
   (:import [java.net URI]))
 

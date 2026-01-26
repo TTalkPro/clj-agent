@@ -1,8 +1,8 @@
-(ns im.ttalk.agent.plugin.http
+(ns im.ttalk.agent.tools.http
   "HTTP 请求工具集"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
             [im.ttalk.agent.core.http.client :as http]
-            [im.ttalk.agent.plugin.helpers :as helpers]))
+            [im.ttalk.agent.tools.helpers :as helpers]))
 
 (deftool http-get
   "发送 HTTP GET 请求获取网页内容"

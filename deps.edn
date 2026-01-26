@@ -1,6 +1,6 @@
 {:paths ["modules/clj-agent-core/src"
           "modules/clj-agent-llm/src"
-          "modules/clj-agent-plugin/src"
+          "modules/clj-agent-tools/src"
           "modules/clj-agent-rag/src"
           "modules/clj-agent-mcp/src"
           "modules/clj-agent-memory/src"
@@ -38,7 +38,7 @@
  :aliases {:mcp-server {:main-opts ["-m" "im.ttalk.mcp.server.main"]}
 
           :test {:extra-paths ["modules/clj-agent-llm/test"
-                               "modules/clj-agent-plugin/test"
+                               "modules/clj-agent-tools/test"
                                "modules/clj-agent-core/test"
                                "modules/clj-agent-rag/test"
                                "modules/clj-agent-memory/test"

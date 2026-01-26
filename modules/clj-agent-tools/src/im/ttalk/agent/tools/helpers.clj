@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.plugin.helpers
+(ns im.ttalk.agent.tools.helpers
   "工具辅助函数
 
    职责：

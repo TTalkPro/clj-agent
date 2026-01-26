@@ -1,6 +1,6 @@
-(ns im.ttalk.agent.plugin.http-test
+(ns im.ttalk.agent.tools.http-test
   (:require [clojure.test :refer :all]
-            [im.ttalk.agent.plugin.http :as http]
+            [im.ttalk.agent.tools.http :as http]
             [im.ttalk.agent.core.kernel.tool :as tool]))
 
 (deftest http-tools-metadata-test

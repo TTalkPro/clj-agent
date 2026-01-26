@@ -25,7 +25,7 @@
   (:require [wkok.openai-clojure.api :as api]
             [im.ttalk.agent.core.http.client :as http]
             [im.ttalk.agent.core.kernel.provider :as proto]
-            [im.ttalk.agent.llm.core.types :as types]
+            [im.ttalk.agent.core.kernel.types :as types]
             [im.ttalk.agent.llm.schema.anthropic :as schema]
             [im.ttalk.agent.llm.stream.anthropic :as stream]))
 

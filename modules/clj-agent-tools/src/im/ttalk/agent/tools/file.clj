@@ -1,7 +1,7 @@
-(ns im.ttalk.agent.plugin.file
+(ns im.ttalk.agent.tools.file
   "文件操作工具集"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.plugin.helpers :as helpers]
+            [im.ttalk.agent.tools.helpers :as helpers]
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import [java.io File]

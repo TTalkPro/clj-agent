@@ -1,11 +1,11 @@
-(ns im.ttalk.agent.plugin.file-test
+(ns im.ttalk.agent.tools.file-test
   (:require [clojure.test :refer :all]
-            [im.ttalk.agent.plugin.file :as file]
+            [im.ttalk.agent.tools.file :as file]
             [im.ttalk.agent.core.kernel.tool :as tool]
             [clojure.java.io :as io])
   (:import [java.io File]))
 
-(def ^:private test-dir (str (System/getProperty "java.io.tmpdir") "/clj-agent-plugin-test"))
+(def ^:private test-dir (str (System/getProperty "java.io.tmpdir") "/clj-agent-tools-test"))
 
 (defn- setup-test-dir []
   (.mkdirs (io/file test-dir)))

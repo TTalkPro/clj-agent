@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.plugin.utility
+(ns im.ttalk.agent.tools.utility
   "通用工具集：calculator, current-time"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]])
   (:import [java.time LocalDateTime]

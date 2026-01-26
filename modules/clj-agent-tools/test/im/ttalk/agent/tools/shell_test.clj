@@ -1,6 +1,6 @@
-(ns im.ttalk.agent.plugin.shell-test
+(ns im.ttalk.agent.tools.shell-test
   (:require [clojure.test :refer :all]
-            [im.ttalk.agent.plugin.shell :as shell]
+            [im.ttalk.agent.tools.shell :as shell]
             [im.ttalk.agent.core.kernel.tool :as tool]))
 
 (deftest execute-command-test

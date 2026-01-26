@@ -29,8 +29,8 @@
             [im.ttalk.agent.llm.factory.registry :as registry]
             [im.ttalk.agent.llm.factory.config :as config]
             [im.ttalk.agent.core.kernel.provider :as proto]
-            [im.ttalk.agent.llm.core.types :as types]
-            [im.ttalk.agent.llm.core.errors :as errors]))
+            [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.kernel.errors :as errors]))
 
 ;;; ============================================================
 ;;; Provider 创建
@@ -240,9 +240,10 @@
   "检查是否为错误"
   errors/error?)
 
-(def retryable?
+(defn retryable?
   "检查错误是否可重试"
-  errors/retryable?)
+  [err]
+  (boolean (:retryable? err)))
 
 (def with-error-handling
   "安全执行函数"

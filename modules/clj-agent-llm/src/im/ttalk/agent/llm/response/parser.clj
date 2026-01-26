@@ -16,7 +16,7 @@
    ;; 检查是否有工具调用
    (parser/has-tool-calls? response)"
   (:require [cheshire.core :as json]
-            [im.ttalk.agent.llm.core.types :as types]))
+            [im.ttalk.agent.core.kernel.types :as types]))
 
 ;;; ============================================================
 ;;; 响应访问器

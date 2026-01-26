@@ -1,9 +1,9 @@
-(ns im.ttalk.agent.plugin.all
+(ns im.ttalk.agent.tools.all
   "便捷聚合入口：所有内置工具"
-  (:require [im.ttalk.agent.plugin.utility :as utility]
-            [im.ttalk.agent.plugin.file :as file]
-            [im.ttalk.agent.plugin.http :as http]
-            [im.ttalk.agent.plugin.shell :as shell]
+  (:require [im.ttalk.agent.tools.utility :as utility]
+            [im.ttalk.agent.tools.file :as file]
+            [im.ttalk.agent.tools.http :as http]
+            [im.ttalk.agent.tools.shell :as shell]
             [im.ttalk.agent.core.kernel.core :as kernel]))
 
 (def all-tools

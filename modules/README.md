@@ -10,7 +10,7 @@ clj-agent/
 │   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, Process Runtime）
 │   ├── clj-agent-llm/          # LLM Provider + Service 工厂
 │   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
-│   ├── clj-agent-plugin/       # 预置插件库（File, HTTP, Shell）
+│   ├── clj-agent-tools/       # 预置插件库（File, HTTP, Shell）
 │   ├── clj-agent-memory/       # 记忆系统（Store, SnapshotStore, 长短期记忆）
 │   ├── clj-agent-rag/          # RAG 检索增强生成
 │   ├── clj-agent-mcp/          # MCP 服务器/客户端
@@ -69,16 +69,16 @@ clj-agent/
 
 ---
 
-### 4. clj-agent-plugin
+### 4. clj-agent-tools
 
 **职责**: 预置工具插件库
 
 **包含**:
-- `im.ttalk.agent.plugin.file` - 文件操作（read, write, delete, copy, move）
-- `im.ttalk.agent.plugin.http` - HTTP 请求（GET, POST, PUT, DELETE）
-- `im.ttalk.agent.plugin.shell` - Shell 命令（安全/非安全模式）
-- `im.ttalk.agent.plugin.security` - 安全工具
-- `im.ttalk.agent.plugin.resilience` - 重试/超时
+- `im.ttalk.agent.tools.file` - 文件操作（read, write, delete, copy, move）
+- `im.ttalk.agent.tools.http` - HTTP 请求（GET, POST, PUT, DELETE）
+- `im.ttalk.agent.tools.shell` - Shell 命令（安全/非安全模式）
+- `im.ttalk.agent.tools.security` - 安全工具
+- `im.ttalk.agent.tools.resilience` - 重试/超时
 
 **依赖**: `clj-agent-core`
 
@@ -191,7 +191,7 @@ graph LR
     core[clj-agent-core]
     llm[clj-agent-llm]
     sa[clj-agent-simpleagent]
-    plugin[clj-agent-plugin]
+    plugin[clj-agent-tools]
     rag[clj-agent-rag]
     memory[clj-agent-memory]
     mcp[clj-agent-mcp]
