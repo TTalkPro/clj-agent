@@ -2,6 +2,7 @@
   "OpenAI 流式响应处理
 
    处理 OpenAI API 的 SSE 流式响应，累积文本和工具调用。
+   构建的响应格式与非流式调用兼容，并支持统一响应转换。
 
    使用示例：
 
@@ -10,8 +11,13 @@
    ;; 处理流式响应块
    (let [[new-state token-data] (stream/process-chunk chunk state)]
      (when token-data
-       (print (:token token-data))))"
-  (:require [cheshire.core :as json]))
+       (print (:token token-data))))
+
+   ;; 构建最终响应（支持统一格式）
+   (stream/build-response final-state :id \"xxx\" :model \"gpt-4\")"
+  (:require [cheshire.core :as json]
+            [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; 状态管理
@@ -126,7 +132,7 @@
 ;;; ============================================================
 
 (defn build-response
-  "从流式状态构建最终响应
+  "从流式状态构建最终响应（OpenAI 原始格式）
 
    参数：
    - state: 最终累积状态
@@ -135,7 +141,7 @@
      - :model 模型名称
 
    返回：
-   与非流式调用兼容的响应格式
+   与非流式调用兼容的 OpenAI 响应格式
 
    示例：
    (build-response final-state :id \"chatcmpl-xxx\" :model \"gpt-4\")"
@@ -150,6 +156,53 @@
                                   :content (:accumulated state)}
                            (seq tool-calls) (assoc :tool_calls tool-calls))
                 :finish_reason (if (seq tool-calls) "tool_calls" "stop")}]}))
+
+(defn normalize-response
+  "从流式状态构建统一格式响应
+
+   参数：
+   - state: 最终累积状态
+   - opts:  可选参数
+     - :id    响应 ID
+     - :model 模型名称
+     - :usage 使用情况（流式响应通常没有 usage）
+
+   返回：
+   统一响应格式：
+   {:text \"...\"
+    :tool-calls [{:id :name :input}]
+    :finish-reason :stop | :tool-use
+    :provider :openai
+    ...}
+
+   示例：
+   (normalize-response final-state :id \"chatcmpl-xxx\" :model \"gpt-4\")"
+  [state & {:keys [id model usage]}]
+  (let [tool-calls-raw (when (seq (:tool-calls-acc state))
+                         (->> (:tool-calls-acc state)
+                              (sort-by first)
+                              (mapv second)))
+        ;; 转换为统一的 tool-call 格式
+        tool-calls (when (seq tool-calls-raw)
+                     (mapv (fn [tc]
+                             (let [args (try
+                                          (json/parse-string
+                                            (get-in tc [:function :arguments]) true)
+                                          (catch Exception _ {}))]
+                               (types/make-tool-call
+                                 (:id tc)
+                                 (get-in tc [:function :name])
+                                 args)))
+                           tool-calls-raw))]
+    (response/make-response
+      :id id
+      :model model
+      :text (let [text (:accumulated state)]
+              (when (seq text) text))
+      :tool-calls tool-calls
+      :finish-reason (if (seq tool-calls) "tool_calls" "stop")
+      :usage usage
+      :provider :openai)))
 
 ;;; ============================================================
 ;;; 流处理器工厂

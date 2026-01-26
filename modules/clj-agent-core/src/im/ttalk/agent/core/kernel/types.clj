@@ -3,8 +3,12 @@
 
    定义 LLM 交互使用的基础数据类型：
    - ToolCall: 工具调用结构
-   - Response: 统一响应结构
    - 消息构建辅助函数
+
+   响应相关类型请参见 response.clj：
+   - ILLMResponse: 响应协议
+   - LLMResponse: 响应 record
+   - make-response: 工厂函数
 
    使用示例：
 
@@ -13,8 +17,9 @@
    ;; 创建工具调用
    (types/make-tool-call \"call_123\" :calculator {:expression \"2+2\"})
 
-   ;; 创建响应
-   (types/make-response :text \"你好\" :tool-calls [])"
+   ;; 创建消息
+   (types/user-message \"你好\")
+   (types/assistant-message \"你好！\")"
   (:require [clojure.string :as str]))
 
 ;;; ============================================================
@@ -53,59 +58,6 @@
        (contains? x :id)
        (contains? x :name)
        (contains? x :input)))
-
-
-;;; ============================================================
-;;; 响应类型
-;;; ============================================================
-
-(defn make-response
-  "创建统一的响应结构
-
-   参数（关键字参数）：
-   - :text         文本内容（字符串）
-   - :tool-calls   工具调用列表
-   - :raw-response 原始响应（可选）
-   - :usage        token 使用情况（可选）
-   - :model        模型名称（可选）
-   - :finish-reason 完成原因（可选）
-
-   返回：
-   响应 map
-
-   示例：
-   (make-response :text \"你好\" :tool-calls [])
-   ; => {:text \"你好\" :tool-calls [] :raw-response nil}"
-  [& {:keys [text tool-calls raw-response usage model finish-reason]}]
-  (cond-> {:text (or text "")
-           :tool-calls (or tool-calls [])}
-    raw-response    (assoc :raw-response raw-response)
-    usage           (assoc :usage usage)
-    model           (assoc :model model)
-    finish-reason   (assoc :finish-reason finish-reason)))
-
-(defn response?
-  "检查是否为有效的响应结构
-
-   参数：
-   - x: 任意值
-
-   返回：
-   boolean"
-  [x]
-  (and (map? x)
-       (contains? x :text)
-       (contains? x :tool-calls)))
-
-(defn has-text?
-  "检查响应是否包含文本"
-  [resp]
-  (not (str/blank? (:text resp ""))))
-
-(defn has-tool-calls?
-  "检查响应是否包含工具调用"
-  [resp]
-  (boolean (seq (:tool-calls resp))))
 
 ;;; ============================================================
 ;;; 消息类型辅助

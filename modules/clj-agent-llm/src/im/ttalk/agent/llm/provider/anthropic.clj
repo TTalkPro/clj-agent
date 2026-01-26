@@ -24,8 +24,9 @@
    (anthropic/call-anthropic-stream config messages tools on-token)"
   (:require [wkok.openai-clojure.api :as api]
             [im.ttalk.agent.core.http.client :as http]
-            [im.ttalk.agent.core.kernel.provider :as proto]
+            [im.ttalk.agent.core.llm.provider :as proto]
             [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.llm.response :as response]
             [im.ttalk.agent.llm.schema.anthropic :as schema]
             [im.ttalk.agent.llm.stream.anthropic :as stream]))
 
@@ -126,6 +127,42 @@
    usage map {:input_tokens n :output_tokens m}"
   [response]
   (:usage response))
+
+(defn normalize-response
+  "将原始 Anthropic API 响应标准化为统一格式
+
+   参数：
+   - response: 原始 Anthropic API 响应
+
+   返回：
+   统一响应格式：
+   {:text \"...\"
+    :tool-calls [{:id :name :input}]
+    :usage {:input-tokens n :output-tokens m :total-tokens t}
+    :finish-reason :stop | :tool-use | :max-tokens | ...
+    :model \"...\"
+    :id \"...\"
+    :provider :anthropic
+    :raw-response {...}}
+
+   示例：
+   (normalize-response raw-response)
+   ; => {:text \"你好\"
+   ;     :tool-calls []
+   ;     :usage {:input-tokens 100 :output-tokens 50 :total-tokens 150}
+   ;     :finish-reason :stop
+   ;     :provider :anthropic}"
+  [raw-response]
+  (response/make-response
+    :id (:id raw-response)
+    :model (:model raw-response)
+    :text (extract-text raw-response)
+    :tool-calls (let [tc (extract-tool-calls raw-response)]
+                  (when (seq tc) tc))
+    :usage (get-usage raw-response)
+    :finish-reason (:stop_reason raw-response)
+    :provider :anthropic
+    :raw-response raw-response))
 
 ;;; ============================================================
 ;;; API 参数构建

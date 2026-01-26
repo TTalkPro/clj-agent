@@ -14,7 +14,7 @@
 
    ;; 设置自定义响应
    (mock/set-mock-response provider \"Hello from Mock!\")"
-  (:require [im.ttalk.agent.core.kernel.provider :as proto]))
+  (:require [im.ttalk.agent.core.llm.provider :as proto]))
 
 ;;; ============================================================
 ;;; 辅助函数

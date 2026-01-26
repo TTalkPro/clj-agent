@@ -2,6 +2,7 @@
   "Anthropic 流式响应处理
 
    处理 Anthropic API 的 SSE 流式响应。
+   构建的响应格式与非流式调用兼容，并支持统一响应转换。
 
    Anthropic 的流式事件类型：
    - message_start:       消息开始
@@ -18,9 +19,14 @@
    ;; 处理流式响应块
    (let [[new-state token-data] (stream/process-event event state)]
      (when token-data
-       (print (:token token-data))))"
+       (print (:token token-data))))
+
+   ;; 构建统一格式响应
+   (stream/normalize-response final-state)"
   (:require [cheshire.core :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; 状态管理
@@ -155,13 +161,13 @@
 ;;; ============================================================
 
 (defn build-response
-  "从流式状态构建最终响应
+  "从流式状态构建最终响应（Anthropic 原始格式）
 
    参数：
    - state: 最终累积状态
 
    返回：
-   与非流式调用兼容的响应格式
+   与非流式调用兼容的 Anthropic 响应格式
 
    示例：
    (build-response final-state)
@@ -180,6 +186,63 @@
                       (mapv second))
                  ;; 只有累积文本时，构造文本块
                  [{:type "text" :text accumulated}])))))
+
+(defn- extract-text-from-blocks
+  "从内容块中提取文本"
+  [content-blocks accumulated]
+  (if (seq content-blocks)
+    (->> content-blocks
+         vals
+         (filter #(= (:type %) "text"))
+         (map :text)
+         (str/join "\n"))
+    accumulated))
+
+(defn- extract-tool-calls-from-blocks
+  "从内容块中提取工具调用"
+  [content-blocks]
+  (when (seq content-blocks)
+    (->> content-blocks
+         vals
+         (filter #(= (:type %) "tool_use"))
+         (mapv (fn [{:keys [id name input]}]
+                 (types/make-tool-call id name input))))))
+
+(defn normalize-response
+  "从流式状态构建统一格式响应
+
+   参数：
+   - state: 最终累积状态
+
+   返回：
+   统一响应格式：
+   {:text \"...\"
+    :tool-calls [{:id :name :input}]
+    :usage {:input-tokens n :output-tokens m :total-tokens t}
+    :finish-reason :stop | :tool-use | :max-tokens
+    :provider :anthropic
+    ...}
+
+   示例：
+   (normalize-response final-state)
+   ; => {:text \"你好\"
+   ;     :tool-calls []
+   ;     :finish-reason :stop
+   ;     :provider :anthropic}"
+  [state]
+  (let [message (:message state)
+        accumulated (:accumulated state)
+        content-blocks (:content-blocks state)
+        text (extract-text-from-blocks content-blocks accumulated)
+        tool-calls (extract-tool-calls-from-blocks content-blocks)]
+    (response/make-response
+      :id (:id message)
+      :model (:model message)
+      :text (when (seq text) text)
+      :tool-calls (when (seq tool-calls) tool-calls)
+      :usage (:usage message)
+      :finish-reason (:stop_reason message)
+      :provider :anthropic)))
 
 ;;; ============================================================
 ;;; 流处理器工厂

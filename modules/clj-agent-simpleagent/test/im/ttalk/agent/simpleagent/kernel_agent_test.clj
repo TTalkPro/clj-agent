@@ -7,7 +7,7 @@
             [im.ttalk.agent.simpleagent.test-support :as ts]
             [im.ttalk.agent.core.kernel.core :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.core.kernel.provider :as provider]
+            [im.ttalk.agent.core.llm.provider :as provider]
             [im.ttalk.agent.core.kernel.service :as service]))
 
 ;;; ============================================================

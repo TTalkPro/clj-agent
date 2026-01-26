@@ -28,8 +28,9 @@
   (:require [im.ttalk.agent.llm.factory.builder :as builder]
             [im.ttalk.agent.llm.factory.registry :as registry]
             [im.ttalk.agent.llm.factory.config :as config]
-            [im.ttalk.agent.core.kernel.provider :as proto]
+            [im.ttalk.agent.core.llm.provider :as proto]
             [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.llm.response :as response]
             [im.ttalk.agent.core.kernel.errors :as errors]))
 
 ;;; ============================================================
@@ -196,17 +197,76 @@
   types/make-tool-call)
 
 (def make-response
-  "创建响应结构
+  "创建统一响应结构
 
    参数（关键字）：
    - :text         文本内容
    - :tool-calls   工具调用列表
+   - :assistant-msg assistant 消息（用于对话历史）
+   - :usage        token 使用情况（自动归一化）
+   - :finish-reason 完成原因（自动归一化）
+   - :model        模型名称
+   - :id           响应 ID
+   - :provider     Provider 类型
    - :raw-response 原始响应
-   - :usage        token 使用情况
 
    返回：
-   {:text \"...\" :tool-calls [...] ...}"
-  types/make-response)
+   LLMResponse record（实现 ILLMResponse 协议）"
+  response/make-response)
+
+;;; ============================================================
+;;; 响应归一化
+;;; ============================================================
+
+(def normalize-usage
+  "归一化 Token 使用情况
+
+   将 OpenAI/Anthropic 的不同命名统一为标准格式：
+   {:input-tokens n :output-tokens m :total-tokens t}
+
+   示例：
+   (normalize-usage {:prompt_tokens 100 :completion_tokens 50})
+   ; => {:input-tokens 100 :output-tokens 50 :total-tokens 150}"
+  response/normalize-usage)
+
+(def normalize-finish-reason
+  "归一化完成原因
+
+   将不同 Provider 的完成原因统一为标准关键字：
+   :stop | :tool-use | :max-tokens | :content-filter | :unknown
+
+   示例：
+   (normalize-finish-reason \"tool_calls\")  ; => :tool-use
+   (normalize-finish-reason \"end_turn\")    ; => :stop"
+  response/normalize-finish-reason)
+
+;;; ============================================================
+;;; 响应辅助函数
+;;; ============================================================
+
+(def get-input-tokens
+  "获取输入 token 数量"
+  response/get-input-tokens)
+
+(def get-output-tokens
+  "获取输出 token 数量"
+  response/get-output-tokens)
+
+(def get-total-tokens
+  "获取总 token 数量"
+  response/get-total-tokens)
+
+(def stopped-by-tool-use?
+  "检查是否因工具调用而停止"
+  response/stopped-by-tool-use?)
+
+(def stopped-by-max-tokens?
+  "检查是否因达到最大 token 而停止"
+  response/stopped-by-max-tokens?)
+
+(def stopped-normally?
+  "检查是否正常停止"
+  response/stopped-normally?)
 
 ;;; ============================================================
 ;;; 消息构建

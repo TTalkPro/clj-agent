@@ -1,9 +1,10 @@
 (ns im.ttalk.agent.core.kernel.provider-test
-  "Tests for core kernel provider protocol and service"
+  "Tests for core llm provider protocol and service"
   (:require [clojure.test :refer [deftest testing is are]]
-            [im.ttalk.agent.core.kernel.provider :as provider]
+            [im.ttalk.agent.core.llm.provider :as provider]
             [im.ttalk.agent.core.kernel.service :as service]
             [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.llm.response :as response]
             [im.ttalk.agent.core.kernel.errors :as errors]))
 
 ;;; ============================================================
@@ -104,10 +105,10 @@
 
 (deftest test-call-with-tools
   (testing "call-with-tools returns unified response"
-    (let [response {:text "Hello" :tool-calls [{:id "t1" :name :foo :input {}}]}
-          p (make-test-provider response)
+    (let [resp {:text "Hello" :tool-calls [{:id "t1" :name :foo :input {}}]}
+          p (make-test-provider resp)
           result (provider/call-with-tools p {} [] [])]
-      (is (types/response? result))
+      (is (response/response? result))
       (is (= "Hello" (:text result)))
       (is (= [{:id "t1" :name :foo :input {}}]
              (:tool-calls result))))))
@@ -300,21 +301,21 @@
 
 (deftest test-make-response
   (testing "make-response creates proper structure"
-    (let [r (types/make-response :text "hello" :tool-calls [])]
-      (is (types/response? r))
+    (let [r (response/make-response :text "hello" :tool-calls [])]
+      (is (response/response? r))
       (is (= "hello" (:text r)))
       (is (= [] (:tool-calls r)))))
 
   (testing "make-response with defaults"
-    (let [r (types/make-response)]
-      (is (= "" (:text r)))
-      (is (= [] (:tool-calls r)))))
+    (let [r (response/make-response)]
+      (is (nil? (:text r)))
+      (is (nil? (:tool-calls r)))))
 
   (testing "has-text? and has-tool-calls?"
-    (is (types/has-text? (types/make-response :text "hi")))
-    (is (not (types/has-text? (types/make-response :text ""))))
-    (is (types/has-tool-calls? (types/make-response :tool-calls [{:id "1" :name :x :input {}}])))
-    (is (not (types/has-tool-calls? (types/make-response :tool-calls []))))))
+    (is (response/has-text? (response/make-response :text "hi")))
+    (is (not (response/has-text? (response/make-response :text ""))))
+    (is (response/has-tool-calls? (response/make-response :tool-calls [{:id "1" :name :x :input {}}])))
+    (is (not (response/has-tool-calls? (response/make-response :tool-calls []))))))
 
 (deftest test-message-helpers
   (testing "user-message"

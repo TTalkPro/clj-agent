@@ -43,7 +43,8 @@
   (:require [clojure.string]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.core.kernel.tool :as tool]))
+            [im.ttalk.agent.core.kernel.tool :as tool]
+            [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; Kernel Record
@@ -574,12 +575,12 @@
             {:keys [response context]} (invoke-chat kernel conv-msgs chat-opts)
             ctx context]
 
-        (if (seq (:tool-calls response))
+        (if (response/has-tool-calls? response)
           ;; 工具调用分支
-          (let [assistant-msg (:assistant-msg response)
+          (let [assistant-msg (response/response-assistant-msg response)
                 ctx (ctx/track-message ctx assistant-msg)
                 {:keys [results context records]}
-                (execute-tool-calls kernel (:tool-calls response) ctx)
+                (execute-tool-calls kernel (response/response-tool-calls response) ctx)
                 new-msgs (build-tool-messages service assistant-msg results)]
             (recur (into conv-msgs new-msgs)
                    (dec remaining)
@@ -587,7 +588,7 @@
                    context))
 
           ;; 文本响应分支
-          (let [ctx (ctx/track-message ctx (:assistant-msg response))]
+          (let [ctx (ctx/track-message ctx (response/response-assistant-msg response))]
             {:response response
              :context ctx
              :tool-calls-made all-tool-calls}))))))

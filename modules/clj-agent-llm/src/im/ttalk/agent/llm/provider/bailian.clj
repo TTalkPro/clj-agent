@@ -23,7 +23,7 @@
   (:require [clojure.string :as str]
             [cheshire.core :as json]
             [org.httpkit.client :as http]
-            [im.ttalk.agent.core.kernel.provider :as proto]))
+            [im.ttalk.agent.core.llm.provider :as proto]))
 
 ;;; ============================================================
 ;;; 配置

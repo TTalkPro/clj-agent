@@ -20,7 +20,7 @@
 ;;; ============================================================
 
 (def ^:private default-config
-  "默认智谱 AI 配置"
+  "默认智谱 AI 配置（OpenAI 兼容接口）"
   (base/make-config
     :zhipu
     "https://open.bigmodel.cn/api/paas/v4"

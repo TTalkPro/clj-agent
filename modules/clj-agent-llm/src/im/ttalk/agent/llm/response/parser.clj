@@ -2,6 +2,7 @@
   "响应解析模块
 
    提供统一的 LLM API 响应解析功能，支持 OpenAI 格式的响应。
+   将 OpenAI 原始响应转换为统一的内部格式。
 
    使用示例：
 
@@ -13,10 +14,11 @@
    ;; 提取文本
    (parser/extract-text response)
 
-   ;; 检查是否有工具调用
-   (parser/has-tool-calls? response)"
+   ;; 标准化响应为统一格式
+   (parser/normalize-response response)"
   (:require [cheshire.core :as json]
-            [im.ttalk.agent.core.kernel.types :as types]))
+            [im.ttalk.agent.core.kernel.types :as types]
+            [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; 响应访问器
@@ -124,24 +126,40 @@
 ;;; ============================================================
 
 (defn normalize-response
-  "将原始 API 响应标准化为统一格式
+  "将原始 OpenAI API 响应标准化为统一格式
 
    参数：
-   - response: 原始 API 响应
+   - response: 原始 OpenAI API 响应
 
    返回：
-   标准化响应 {:text \"...\" :tool-calls [...] :raw-response ...}
+   统一响应格式：
+   {:text \"...\"
+    :tool-calls [{:id :name :input}]
+    :usage {:input-tokens n :output-tokens m :total-tokens t}
+    :finish-reason :stop | :tool-use | :max-tokens | ...
+    :model \"...\"
+    :id \"...\"
+    :provider :openai
+    :raw-response {...}}
 
    示例：
    (normalize-response raw-response)
-   ; => {:text \"你好\" :tool-calls [] :raw-response {...}}"
-  [response]
-  (types/make-response
-    :text (extract-text response)
-    :tool-calls (or (extract-tool-calls response) [])
-    :raw-response response
-    :usage (get-usage response)
-    :finish-reason (get-finish-reason response)))
+   ; => {:text \"你好\"
+   ;     :tool-calls []
+   ;     :usage {:input-tokens 100 :output-tokens 50 :total-tokens 150}
+   ;     :finish-reason :stop
+   ;     :provider :openai}"
+  [raw-response]
+  (response/make-response
+    :id (:id raw-response)
+    :model (:model raw-response)
+    :text (extract-text raw-response)
+    :tool-calls (let [tc (extract-tool-calls raw-response)]
+                  (when (seq tc) tc))
+    :usage (get-usage raw-response)
+    :finish-reason (get-finish-reason raw-response)
+    :provider :openai
+    :raw-response raw-response))
 
 ;;; ============================================================
 ;;; 调试辅助

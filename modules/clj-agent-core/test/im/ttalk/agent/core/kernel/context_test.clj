@@ -4,6 +4,7 @@
             [im.ttalk.agent.core.kernel.context :as context]
             [im.ttalk.agent.core.kernel.tool :as tool :refer [deftool]]
             [im.ttalk.agent.core.kernel.filter :as filters]
+            [im.ttalk.agent.core.llm.response :as response]
             [im.ttalk.agent.core.kernel.core :as core]))
 
 ;; ============================================================
@@ -452,19 +453,21 @@
            (let [n (swap! call-count inc)]
              (case n
                ;; 第一次调用：LLM 返回两个 tool_calls
-               1 {:text nil
-                  :tool-calls [{:id "tc1" :name "append-item"
-                                :input {:item "book"}}
-                               {:id "tc2" :name "append-item"
-                                :input {:item "pen"}}]
-                  :assistant-msg {:role "assistant"
-                                  :content nil
-                                  :tool_calls [{:id "tc1"} {:id "tc2"}]}}
+               1 (response/make-response
+                   :text nil
+                   :tool-calls [{:id "tc1" :name "append-item"
+                                 :input {:item "book"}}
+                                {:id "tc2" :name "append-item"
+                                 :input {:item "pen"}}]
+                   :assistant-msg {:role "assistant"
+                                   :content nil
+                                   :tool_calls [{:id "tc1"} {:id "tc2"}]})
                ;; 第二次调用：LLM 返回文本
-               {:text "已添加 book 和 pen 到您的列表"
-                :tool-calls nil
-                :assistant-msg {:role "assistant"
-                                :content "已添加 book 和 pen 到您的列表"}})))
+               (response/make-response
+                 :text "已添加 book 和 pen 到您的列表"
+                 :tool-calls nil
+                 :assistant-msg {:role "assistant"
+                                 :content "已添加 book 和 pen 到您的列表"}))))
          :build-result-msgs
          (fn [assistant-msg results]
            (into [{:role "assistant" :content "" :tool_calls (:tool_calls assistant-msg)}]
@@ -504,14 +507,16 @@
            (let [n (swap! call-count inc)]
              (if (<= n 3)
                ;; 前三次调用都返回 tool_call
-               {:text nil
-                :tool-calls [{:id (str "tc" n) :name "inc-counter" :input {}}]
-                :assistant-msg {:role "assistant" :content nil
-                                :tool_calls [{:id (str "tc" n)}]}}
+               (response/make-response
+                 :text nil
+                 :tool-calls [{:id (str "tc" n) :name "inc-counter" :input {}}]
+                 :assistant-msg {:role "assistant" :content nil
+                                 :tool_calls [{:id (str "tc" n)}]})
                ;; 第四次返回文本
-               {:text "计数完成"
-                :tool-calls nil
-                :assistant-msg {:role "assistant" :content "计数完成"}})))
+               (response/make-response
+                 :text "计数完成"
+                 :tool-calls nil
+                 :assistant-msg {:role "assistant" :content "计数完成"}))))
          :build-result-msgs
          (fn [assistant-msg results]
            (into [{:role "assistant" :content "" :tool_calls (:tool_calls assistant-msg)}]
@@ -552,13 +557,15 @@
          (fn [_msgs _opts]
            (let [n (swap! call-count inc)]
              (if (= n 1)
-               {:text nil
-                :tool-calls [{:id "tc1" :name "append-item" :input {:item "x"}}]
-                :assistant-msg {:role "assistant" :content nil
-                                :tool_calls [{:id "tc1"}]}}
-               {:text "done"
-                :tool-calls nil
-                :assistant-msg {:role "assistant" :content "done"}})))
+               (response/make-response
+                 :text nil
+                 :tool-calls [{:id "tc1" :name "append-item" :input {:item "x"}}]
+                 :assistant-msg {:role "assistant" :content nil
+                                 :tool_calls [{:id "tc1"}]})
+               (response/make-response
+                 :text "done"
+                 :tool-calls nil
+                 :assistant-msg {:role "assistant" :content "done"}))))
          :build-result-msgs
          (fn [assistant-msg results]
            (into [{:role "assistant" :content "" :tool_calls (:tool_calls assistant-msg)}]
@@ -595,13 +602,15 @@
          (fn [_msgs _opts]
            (let [n (swap! call-count inc)]
              (if (= n 1)
-               {:text nil
-                :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}]
-                :assistant-msg {:role "assistant" :content nil
-                                :tool_calls [{:id "tc1"}]}}
-               {:text "done"
-                :tool-calls nil
-                :assistant-msg {:role "assistant" :content "done"}})))
+               (response/make-response
+                 :text nil
+                 :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}]
+                 :assistant-msg {:role "assistant" :content nil
+                                 :tool_calls [{:id "tc1"}]})
+               (response/make-response
+                 :text "done"
+                 :tool-calls nil
+                 :assistant-msg {:role "assistant" :content "done"}))))
          :build-result-msgs
          (fn [assistant-msg results]
            (into [{:role "assistant" :content "" :tool_calls (:tool_calls assistant-msg)}]
@@ -633,13 +642,15 @@
          (fn [_msgs _opts]
            (let [n (swap! call-count inc)]
              (if (= n 1)
-               {:text nil
-                :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}]
-                :assistant-msg {:role "assistant" :content nil
-                                :tool_calls [{:id "tc1"}]}}
-               {:text "done"
-                :tool-calls nil
-                :assistant-msg {:role "assistant" :content "done"}})))
+               (response/make-response
+                 :text nil
+                 :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}]
+                 :assistant-msg {:role "assistant" :content nil
+                                 :tool_calls [{:id "tc1"}]})
+               (response/make-response
+                 :text "done"
+                 :tool-calls nil
+                 :assistant-msg {:role "assistant" :content "done"}))))
          :build-result-msgs
          (fn [assistant-msg results]
            (into [{:role "assistant" :content "" :tool_calls (:tool_calls assistant-msg)}]
@@ -672,9 +683,10 @@
         {:chat-fn
          (fn [_msgs opts]
            (reset! received-opts opts)
-           {:text "ok"
-            :tool-calls nil
-            :assistant-msg {:role "assistant" :content "ok"}})
+           (response/make-response
+             :text "ok"
+             :tool-calls nil
+             :assistant-msg {:role "assistant" :content "ok"}))
          :build-result-msgs (fn [_ _] [])}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
@@ -696,9 +708,10 @@
   (let [mock-service
         {:chat-fn
          (fn [msgs opts]
-           {:text "hello response"
-            :tool-calls nil
-            :assistant-msg {:role "assistant" :content "hello response"}})
+           (response/make-response
+             :text "hello response"
+             :tool-calls nil
+             :assistant-msg {:role "assistant" :content "hello response"}))
          :build-result-msgs (fn [_ _] [])}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
@@ -728,9 +741,10 @@
         {:chat-fn
          (fn [msgs _opts]
            (reset! received-msgs msgs)
-           {:text "response"
-            :tool-calls nil
-            :assistant-msg {:role "assistant" :content "response"}})
+           (response/make-response
+             :text "response"
+             :tool-calls nil
+             :assistant-msg {:role "assistant" :content "response"}))
          :build-result-msgs (fn [_ _] [])}
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)

@@ -2,20 +2,22 @@
   "LLM Service 工厂
 
    提供通用的 create-service，将任意 ILLMProvider 适配为 Kernel service map。
+   响应使用统一格式（response/make-response），支持 OpenAI/Anthropic 等多 Provider。
 
    使用示例：
 
    (require '[im.ttalk.agent.core.kernel.service :as service])
-   (require '[im.ttalk.agent.core.kernel.provider :as provider])
+   (require '[im.ttalk.agent.core.llm.provider :as provider])
 
    ;; 从 provider 创建 service
    (def svc (service/create-service my-provider
               {:model \"gpt-4\" :max-tokens 4096}))
 
    ;; service 是一个 map：
-   ;; {:chat-fn           (fn [messages opts] -> normalized-response)
+   ;; {:chat-fn           (fn [messages opts] -> ILLMResponse)
    ;;  :build-result-msgs (fn [assistant-msg tool-results] -> [msg ...])}"
-  (:require [im.ttalk.agent.core.kernel.provider :as provider]))
+  (:require [im.ttalk.agent.core.llm.provider :as provider]
+            [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; 辅助函数
@@ -59,25 +61,35 @@
 (defn- normalize-response
   "将 Provider 原始响应规范化为 Kernel 统一格式
 
-   规范化规则：
-   - text: 空字符串视为 nil
-   - tool-calls: 空列表视为 nil
-   - assistant-msg: 由 provider 构建
-   - raw-response: 保留原始响应
+   使用 response/make-response 创建 LLMResponse，自动归一化：
+   - usage: 统一为 {:input-tokens :output-tokens :total-tokens}
+   - finish-reason: 统一为关键字 :stop | :tool-use | :max-tokens 等
 
    参数：
    - provider: ILLMProvider 实例
-   - response: Provider 原始响应
+   - raw-response: Provider 原始响应
 
    返回：
-   {:text str|nil :tool-calls vec|nil :assistant-msg map :raw-response any}"
-  [provider response]
-  {:text          (when-let [t (provider/extract-text provider response)]
-                    (when (seq t) t))
-   :tool-calls    (let [tcs (provider/extract-tool-calls provider response)]
-                    (when (seq tcs) tcs))
-   :assistant-msg (provider/build-assistant-message provider response)
-   :raw-response  response})
+   LLMResponse record（实现 ILLMResponse 协议）"
+  [provider raw-response]
+  (let [text (provider/extract-text provider raw-response)
+        tool-calls (provider/extract-tool-calls provider raw-response)
+        ;; 获取 provider 特定的字段
+        usage (or (:usage raw-response)
+                  (get-in raw-response [:choices 0 :usage]))
+        finish-reason (or (:stop_reason raw-response)
+                          (get-in raw-response [:choices 0 :finish_reason]))
+        assistant-msg (provider/build-assistant-message provider raw-response)]
+    (response/make-response
+      :id (:id raw-response)
+      :model (:model raw-response)
+      :text (when (seq text) text)
+      :tool-calls (when (seq tool-calls) tool-calls)
+      :assistant-msg assistant-msg
+      :usage usage
+      :finish-reason finish-reason
+      :provider (provider/provider-name provider)
+      :raw-response raw-response)))
 
 (defn create-service
   "从 ILLMProvider 创建 Kernel service

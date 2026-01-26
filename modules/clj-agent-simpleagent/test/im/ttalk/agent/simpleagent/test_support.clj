@@ -2,7 +2,7 @@
   "SimpleAgent 测试公共设施
 
    提供 MockProvider、工具定义等共享测试基础设施。"
-  (:require [im.ttalk.agent.core.kernel.provider :as provider]
+  (:require [im.ttalk.agent.core.llm.provider :as provider]
             [im.ttalk.agent.core.kernel.tool :refer [deftool]]))
 
 ;;; ============================================================

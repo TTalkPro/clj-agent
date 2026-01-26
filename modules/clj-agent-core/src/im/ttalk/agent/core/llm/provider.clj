@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.core.kernel.provider
+(ns im.ttalk.agent.core.llm.provider
   "LLM Provider 协议定义
 
    定义所有 LLM 提供商必须实现的统一接口。
@@ -15,7 +15,7 @@
      (build-tool-result [_ tool-id content] ...)
      (build-assistant-message [_ response] ...)
      (build-result-messages [_ assistant-msg tool-results] ...))"
-  (:require [im.ttalk.agent.core.kernel.types :as types]))
+  (:require [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; LLM Provider 协议
@@ -190,15 +190,31 @@
    - tools:    工具列表
 
    返回：
-   {:text \"...\" :tool-calls [...] :raw-response ...}"
+   统一响应格式：
+   {:text \"...\"
+    :tool-calls [{:id :name :input}]
+    :usage {:input-tokens n :output-tokens m :total-tokens t}
+    :finish-reason :stop | :tool-use | ...
+    :provider :openai | :anthropic | ...
+    :raw-response ...}"
   [provider config messages tools]
-  (let [response (call-llm provider config messages tools)
-        text (extract-text provider response)
-        tool-calls (extract-tool-calls provider response)]
-    (types/make-response
+  (let [resp (call-llm provider config messages tools)
+        text (extract-text provider resp)
+        tool-calls (extract-tool-calls provider resp)
+        ;; 获取 provider 特定的字段
+        usage (or (:usage resp)
+                  (get-in resp [:choices 0 :usage]))
+        finish-reason (or (:stop_reason resp)
+                          (get-in resp [:choices 0 :finish_reason]))]
+    (response/make-response
+      :id (:id resp)
+      :model (:model resp)
       :text text
       :tool-calls tool-calls
-      :raw-response response)))
+      :usage usage
+      :finish-reason finish-reason
+      :provider (provider-name provider)
+      :raw-response resp)))
 
 (defn call-simple
   "简化的 LLM 调用（无工具）
@@ -211,5 +227,5 @@
    返回：
    文本响应字符串"
   [provider config messages]
-  (let [response (call-llm provider config messages nil)]
-    (extract-text provider response)))
+  (let [resp (call-llm provider config messages nil)]
+    (extract-text provider resp)))
