@@ -158,12 +158,54 @@ clj-agent/
 
 ## 快速开始
 
-### 在项目中使用
+### 在项目中使用（不发布到 Clojars）
+
+#### 方式 A：本地路径依赖（推荐开发时使用）
+
+在你的项目 `deps.edn` 中使用 `:local/root` 直接引用本地路径：
+
+```clojure
+;; deps.edn - 引用整个项目
+{:deps {im.ttalk/clj-agent {:local/root "/path/to/clj-agent"}}}
+
+;; 或者只引用特定模块
+{:deps {im.ttalk/clj-agent-core {:local/root "/path/to/clj-agent/modules/clj-agent-core"}
+        im.ttalk/clj-agent-llm  {:local/root "/path/to/clj-agent/modules/clj-agent-llm"}}}
+```
+
+#### 方式 B：Git 依赖（推荐团队协作）
+
+如果项目已推送到 Git 仓库（GitHub/GitLab 等）：
+
+```clojure
+;; deps.edn - 使用 commit SHA
+{:deps {im.ttalk/clj-agent {:git/url "https://github.com/your-org/clj-agent"
+                            :git/sha "d523507"}}}
+
+;; 使用 tag
+{:deps {im.ttalk/clj-agent {:git/url "https://github.com/your-org/clj-agent"
+                            :git/tag "v0.1.0"
+                            :git/sha "d523507"}}}
+```
+
+#### 方式 C：安装到本地 Maven 仓库
+
+先打包并安装到 `~/.m2/repository`：
+
+```bash
+cd /path/to/clj-agent/modules/clj-agent-core
+clj -T:build jar      # 打包
+clj -T:build install  # 安装到本地 Maven 仓库
+```
+
+然后像普通 Maven 依赖一样引用：
 
 ```clojure
 ;; deps.edn
-{:deps {im/ttalk-agent {:local/root "/path/to/clj-agent"}}}
+{:deps {im.ttalk/clj-agent-core {:mvn/version "0.1.xxx"}}}
 ```
+
+> **建议**：本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。
 
 ### 方式一：SimpleAgent（推荐入门）
 
