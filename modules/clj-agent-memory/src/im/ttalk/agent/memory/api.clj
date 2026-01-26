@@ -58,8 +58,7 @@
     [im.ttalk.agent.memory.store.postgresql :as postgres-store]
     [im.ttalk.agent.memory.store.redis :as redis-store]
     ;; Snapshot 实现
-    [im.ttalk.agent.memory.snapshot.store-backed :as store-backed]
-    [im.ttalk.agent.memory.snapshot.manager :as snapshot-manager]
+    [im.ttalk.agent.memory.manager.snapshot :as snapshot-manager]
     [im.ttalk.agent.memory.agent-memory :as agent-memory]
     ;; Memory 组件
     [im.ttalk.agent.memory.short-term.buffer :as buffer]
@@ -190,13 +189,11 @@
 ;; SnapshotStore 工厂函数
 ;; =============================================================================
 
-;; 推荐：基于 Store 的 SnapshotStore（统一存储后端）
-(def create-store-backed-snapshot-store store-backed/create-store-backed-snapshot-store)
+;; SnapshotManager - 基于 TimelineManager 的快照管理
+(def create-snapshot-manager snapshot-manager/create-snapshot-manager)
+(def snapshot-manager? snapshot-manager/snapshot-manager?)
 
-;; 别名
-(def create-snapshot-store create-store-backed-snapshot-store)
-
-;; 便捷函数：创建内存 SnapshotStore（基于 Store）
+;; 便捷函数：创建内存 SnapshotStore
 (defn create-memory-snapshot-store
   "创建内存 SnapshotStore
 
@@ -206,9 +203,9 @@
    (def ss (create-memory-snapshot-store))
    (snap-put ss {:thread-id \"t1\"} {:state {}} {:step 1})"
   []
-  (create-store-backed-snapshot-store (create-in-memory-store)))
+  (create-snapshot-manager (create-in-memory-store)))
 
-;; 便捷函数：创建 SQLite SnapshotStore（基于 Store）
+;; 便捷函数：创建 SQLite SnapshotStore
 (defn create-sqlite-snapshot-store
   "创建 SQLite SnapshotStore
 
@@ -221,12 +218,7 @@
    示例：
    (def ss (create-sqlite-snapshot-store \"snapshots.db\"))"
   [db-path & {:as opts}]
-  (create-store-backed-snapshot-store
-    (create-sqlite-store db-path opts)))
-
-;; SnapshotManager（专注 snapshot 管理，封装时间旅行等高级功能）
-(def create-snapshot-manager snapshot-manager/create-snapshot-manager)
-(def snapshot-manager? snapshot-manager/snapshot-manager?)
+  (create-snapshot-manager (create-sqlite-store db-path opts)))
 
 ;; 时间旅行操作（SnapshotManager 扩展功能）
 (def go-back! snapshot-manager/go-back!)
@@ -391,10 +383,9 @@
                           :redis (create-redis-store archive-store-opts)
                           (throw (ex-info "Unknown archive store type" {:type archive-store-type}))))
 
-        ;; 创建 SnapshotStore（使用 Store）
-        snapshot-store (if archive-store
-                         (create-snapshot-store store :persistent-store archive-store)
-                         (create-snapshot-store store))
+        ;; 创建 SnapshotManager（使用 Store）
+        ;; 注意：如果有 archive-store，优先使用它作为快照存储
+        snapshot-store (create-snapshot-manager (or archive-store store))
 
         ;; 创建向量相关组件
         embedder (create-simple-text-embedder :dimension embedding-dimension)

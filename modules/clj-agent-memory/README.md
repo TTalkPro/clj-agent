@@ -69,8 +69,9 @@
 | `im.ttalk.agent.memory.store.redis` | Redis 存储 |
 | `im.ttalk.agent.memory.store.embedding` | Embedding 生成 |
 | `im.ttalk.agent.memory.store.vector-memory` | 向量存储 |
-| `im.ttalk.agent.memory.snapshot.store-backed` | Store 支撑的快照 |
-| `im.ttalk.agent.memory.snapshot.manager` | SnapshotManager |
+| `im.ttalk.agent.memory.timeline.core` | 时间线管理（通用底层） |
+| `im.ttalk.agent.memory.snapshot.manager` | SnapshotManager（Process 框架） |
+| `im.ttalk.agent.memory.checkpoint.manager` | CheckpointManager（Graph 框架） |
 | `im.ttalk.agent.memory.agent-memory` | AgentMemory 封装 |
 | `im.ttalk.agent.memory.short-term.buffer` | 对话缓冲 |
 | `im.ttalk.agent.memory.long-term.semantic` | 语义记忆 |

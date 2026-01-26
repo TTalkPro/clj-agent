@@ -38,7 +38,8 @@
             [im.ttalk.agent.core.graph.node :as node]
             [im.ttalk.agent.core.graph.edge :as edge]
             [im.ttalk.agent.core.graph.reducer :as reducer]
-            [im.ttalk.agent.core.graph.dispatch :as dispatch]))
+            [im.ttalk.agent.core.graph.dispatch :as dispatch]
+            [im.ttalk.agent.core.graph.checkpoint :as checkpoint]))
 
 ;;; ============================================================
 ;;; 执行结果状态
@@ -347,9 +348,7 @@
         (fn [s iter cp-type activations-list]
           (when (and checkpointer run-id)
             (try
-              (let [checkpoint-fn (requiring-resolve
-                                    'im.ttalk.agent.core.graph.checkpoint/save-checkpoint)
-                    cp-data {:run-id run-id
+              (let [cp-data {:run-id run-id
                              :graph-name (or graph-name (:name graph-spec))
                              :superstep iter
                              :iteration iter
@@ -358,7 +357,7 @@
                              :pending-activations activations-list
                              :checkpoint-type cp-type
                              :resumable? (contains? #{:interrupt :error} cp-type)}
-                    cp-id (checkpoint-fn checkpointer run-id cp-data)]
+                    cp-id (checkpoint/save-checkpoint checkpointer run-id cp-data)]
                 (when on-checkpoint
                   (on-checkpoint {:checkpoint-id cp-id
                                   :iteration iter

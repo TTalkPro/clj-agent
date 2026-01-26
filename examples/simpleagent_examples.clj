@@ -22,7 +22,7 @@
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]
             [im.ttalk.agent.llm.provider.anthropic :as anthropic]
             [im.ttalk.agent.memory.store.in-memory :as mem-store]
-            [im.ttalk.agent.memory.snapshot.manager :as snap-mgr]
+            [im.ttalk.agent.memory.manager.snapshot :as snap-mgr]
             [im.ttalk.agent.memory.protocol :as mem-proto]
             [im.ttalk.agent.memory.process-snapshot-adapter :as psa]))
 

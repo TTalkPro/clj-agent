@@ -5,7 +5,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.core.kernel.process.snapshot-manager :as sm]
             [im.ttalk.agent.memory.process-snapshot-adapter :as psa]
-            [im.ttalk.agent.memory.snapshot.manager :as mgr]
+            [im.ttalk.agent.memory.manager.snapshot :as mgr]
             [im.ttalk.agent.memory.store.in-memory :as mem-store]))
 
 ;;; ============================================================

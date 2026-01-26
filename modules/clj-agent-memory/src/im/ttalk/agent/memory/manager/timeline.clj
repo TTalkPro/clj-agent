@@ -1,8 +1,8 @@
-(ns im.ttalk.agent.memory.timeline.core
-  "Timeline Core - 通用时间线管理
+(ns im.ttalk.agent.memory.manager.timeline
+  "Timeline Manager - 通用时间线管理
 
    提供版本链、时间旅行、分支管理等通用能力。
-   被 ProcessSnapshotManager 和 GraphCheckpointManager 复用。
+   被 SnapshotManager 和 CheckpointManager 复用。
 
    架构：
    ┌─────────────────────────────────────────────────────────────┐

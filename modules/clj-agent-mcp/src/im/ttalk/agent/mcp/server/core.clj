@@ -314,36 +314,3 @@
   (registry/register-clj-agent-tools (:registry server) tools)
   server)
 
-;; =============================================================================
-;; 向后兼容：保留原有的 atom 访问方式
-;; =============================================================================
-
-(defn tools-atom
-  "获取工具 atom（用于向后兼容）
-
-   参数:
-   - server: MCPServer 实例
-
-   返回: tools atom"
-  [server]
-  (:tools-atom (:registry server)))
-
-(defn resources-atom
-  "获取资源 atom（用于向后兼容）
-
-   参数:
-   - server: MCPServer 实例
-
-   返回: resources atom"
-  [server]
-  (:resources-atom (:registry server)))
-
-(defn prompts-atom
-  "获取提示词 atom（用于向后兼容）
-
-   参数:
-   - server: MCPServer 实例
-
-   返回: prompts atom"
-  [server]
-  (:prompts-atom (:registry server)))

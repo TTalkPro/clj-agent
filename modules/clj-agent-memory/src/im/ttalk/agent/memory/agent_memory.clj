@@ -52,7 +52,7 @@
    (archive-session! memory)
    (remember memory :user \"Alice\" {:type :preference})"
   (:require [im.ttalk.agent.memory.protocol :as proto]
-            [im.ttalk.agent.memory.snapshot.manager :as mgr]))
+            [im.ttalk.agent.memory.manager.snapshot :as mgr]))
 
 ;; =============================================================================
 ;; 命名空间常量

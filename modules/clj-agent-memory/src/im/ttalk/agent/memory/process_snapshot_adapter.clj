@@ -7,7 +7,7 @@
    使用示例：
 
    (require '[im.ttalk.agent.memory.process-snapshot-adapter :as psa])
-   (require '[im.ttalk.agent.memory.snapshot.manager :as mgr])
+   (require '[im.ttalk.agent.memory.manager.snapshot :as mgr])
    (require '[im.ttalk.agent.memory.store.memory :as mem-store])
 
    ;; 创建适配器
@@ -18,7 +18,7 @@
    (run-process my-spec {:checkpointer adapter :thread-id \"session-1\"})"
   (:require [im.ttalk.agent.core.kernel.process.snapshot-manager :as sm]
             [im.ttalk.agent.memory.protocol :as proto]
-            [im.ttalk.agent.memory.snapshot.manager :as mgr]))
+            [im.ttalk.agent.memory.manager.snapshot :as mgr]))
 
 ;;; ============================================================
 ;;; ProcessSnapshotAdapter Record

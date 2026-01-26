@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.memory.snapshot.manager
+(ns im.ttalk.agent.memory.manager.snapshot
   "SnapshotManager - 快照管理器
 
    基于 TimelineManager 实现快照管理，专门服务于 Process 框架。
@@ -36,7 +36,7 @@
    (go-back! sm {:thread-id \"thread-123\"} :steps 2)
    (go-forward! sm {:thread-id \"thread-123\"} :steps 1)"
   (:require [im.ttalk.agent.memory.protocol :as proto]
-            [im.ttalk.agent.memory.timeline.core :as timeline]))
+            [im.ttalk.agent.memory.manager.timeline :as timeline]))
 
 ;; =============================================================================
 ;; ProcessSnapshot - 实现 ITimelineEntry

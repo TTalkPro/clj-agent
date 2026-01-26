@@ -1,44 +1,33 @@
 (ns im.ttalk.agent.core.graph.checkpoint
-  "Graph Checkpoint - Graph/Pregel 框架检查点管理
+  "Graph Checkpoint - Graph/Pregel 框架检查点协议和数据结构
 
-   专门为 Graph/Pregel 框架设计的检查点管理。
+   本模块定义检查点的协议、数据结构和纯函数。
+   实现（GraphCheckpointManager）在 clj-agent-memory 模块中。
 
    架构：
    ┌─────────────────────────────────────────────────────────────┐
-   │              GraphCheckpointManager                         │
-   │  ┌─────────────────────────────────────────────────────┐   │
-   │  │     timeline-manager (TimelineManager)              │   │
-   │  │     • 版本链管理                                     │   │
-   │  │     • 时间旅行                                       │   │
-   │  │     • 分支管理                                       │   │
-   │  └─────────────────────────────────────────────────────┘   │
-   │                                                             │
-   │  Graph 专用能力：                                            │
-   │  • superstep 级别的状态保存                                 │
-   │  • 顶点状态追踪（active/completed/failed/interrupted）     │
-   │  • 失败重试支持                                             │
-   │  • 中断恢复支持                                             │
-   │  • Pregel 引擎集成                                          │
+   │                    clj-agent-core                           │
+   │  • GraphCheckpoint 数据结构                                 │
+   │  • IGraphCheckpointManager 协议                             │
+   │  • Pregel/Executor 集成函数                                 │
+   └─────────────────────────────────────────────────────────────┘
+                              ↑
+   ┌─────────────────────────────────────────────────────────────┐
+   │                   clj-agent-memory                          │
+   │  • GraphCheckpointManager 实现                              │
+   │  • 依赖 TimelineManager                                     │
    └─────────────────────────────────────────────────────────────┘
 
    使用示例：
 
-   ;; 创建 CheckpointManager
-   (def cm (create-checkpoint-manager store))
+   ;; 在 memory 模块创建 CheckpointManager
+   (require '[im.ttalk.agent.memory.manager.checkpoint :as cm])
+   (def manager (cm/create-checkpoint-manager store))
 
-   ;; 从 Pregel 状态保存
-   (save-from-pregel cm \"run-1\" pregel-state {:checkpoint-type :superstep})
-
-   ;; 时间旅行
-   (go-back cm \"run-1\" 2)
-
-   ;; 失败重试
-   (retry-vertex cm \"run-1\" :failed-vertex-id)
-
-   ;; 恢复执行
-   (def restore-opts (to-pregel-restore-opts checkpoint))"
-  (:require [im.ttalk.agent.memory.timeline.core :as timeline]
-            [im.ttalk.agent.memory.protocol :as proto]))
+   ;; 使用 core 模块的协议和函数
+   (require '[im.ttalk.agent.core.graph.checkpoint :as cp])
+   (cp/save-checkpoint manager \"run-1\" checkpoint)
+   (def opts (cp/to-pregel-restore-opts checkpoint))")
 
 ;; =============================================================================
 ;; Checkpoint 类型常量
@@ -51,7 +40,7 @@
 (def CHECKPOINT-FINAL :final)
 
 ;; =============================================================================
-;; GraphCheckpoint - 实现 ITimelineEntry
+;; GraphCheckpoint 数据结构
 ;; =============================================================================
 
 (defrecord GraphCheckpoint
@@ -89,58 +78,19 @@
    ;; 扩展
    metadata])
 
-(extend-type GraphCheckpoint
-  timeline/ITimelineEntry
-
-  (entry-id [this] (:id this))
-  (entry-owner-id [this] (:run-id this))
-  (entry-parent-id [this] (:parent-id this))
-  (entry-version [this] (:version this))
-  (entry-branch-id [this] (:branch-id this))
-  (entry-created-at [this] (:created-at this))
-  (entry-data [this]
-    ;; 返回完整的 checkpoint 数据（除时间线字段外）
-    {:graph-name (:graph-name this)
-     :superstep (:superstep this)
-     :iteration (:iteration this)
-     :vertices (:vertices this)
-     :pending-activations (:pending-activations this)
-     :pending-deltas (:pending-deltas this)
-     :global-state (:global-state this)
-     :active-vertices (:active-vertices this)
-     :completed-vertices (:completed-vertices this)
-     :failed-vertices (:failed-vertices this)
-     :interrupted-vertices (:interrupted-vertices this)
-     :checkpoint-type (:checkpoint-type this)
-     :resumable? (:resumable? this)
-     :resume-data (:resume-data this)
-     :retry-count (:retry-count this)
-     :metadata (:metadata this)})
-
-  (with-entry-id [this id]
-    (assoc this :id id))
-  (with-parent-id [this parent-id]
-    (assoc this :parent-id parent-id))
-  (with-version [this version]
-    (assoc this :version version))
-  (with-branch-id [this branch-id]
-    (assoc this :branch-id branch-id))
-  (with-created-at [this created-at]
-    (assoc this :created-at created-at)))
+(defn graph-checkpoint?
+  "检查是否为 GraphCheckpoint"
+  [x]
+  (instance? GraphCheckpoint x))
 
 ;; =============================================================================
 ;; 辅助函数
 ;; =============================================================================
 
-(defn- generate-id
-  "生成唯一 ID"
+(defn generate-checkpoint-id
+  "生成唯一 Checkpoint ID"
   []
   (str "cp-" (java.util.UUID/randomUUID)))
-
-(defn- now
-  "获取当前时间戳"
-  []
-  (System/currentTimeMillis))
 
 ;; =============================================================================
 ;; IGraphCheckpointManager 协议
@@ -196,102 +146,7 @@
     "注入恢复数据"))
 
 ;; =============================================================================
-;; GraphCheckpointManager 实现
-;; =============================================================================
-
-(defrecord GraphCheckpointManager
-  [timeline-manager    ; TimelineManager 实例
-   config]             ; 配置
-
-  IGraphCheckpointManager
-
-  ;; -------------------------------------------------------------------------
-  ;; 核心操作
-  ;; -------------------------------------------------------------------------
-
-  (save-checkpoint [this run-id checkpoint]
-    (let [entry (if (instance? GraphCheckpoint checkpoint)
-                  checkpoint
-                  (map->GraphCheckpoint (assoc checkpoint :run-id run-id)))
-          saved (timeline/save timeline-manager entry)]
-      (timeline/entry-id saved)))
-
-  (load-checkpoint [this run-id checkpoint-id]
-    (timeline/load-by-id timeline-manager run-id checkpoint-id))
-
-  (load-latest [this run-id]
-    (timeline/load-latest timeline-manager run-id))
-
-  (list-checkpoints [this run-id opts]
-    (timeline/list-entries timeline-manager run-id opts))
-
-  ;; -------------------------------------------------------------------------
-  ;; 时间旅行
-  ;; -------------------------------------------------------------------------
-
-  (go-back [this run-id steps]
-    (timeline/go-back timeline-manager run-id steps))
-
-  (go-forward [this run-id steps]
-    (timeline/go-forward timeline-manager run-id steps))
-
-  (goto-checkpoint [this run-id checkpoint-id]
-    (timeline/goto timeline-manager run-id checkpoint-id))
-
-  (get-position [this run-id]
-    (let [pos (timeline/get-position timeline-manager run-id)]
-      {:current-checkpoint-id (:current-entry-id pos)
-       :current-index (:current-index pos)
-       :total-checkpoints (:total-entries pos)
-       :branch-id (:branch-id pos)}))
-
-  ;; -------------------------------------------------------------------------
-  ;; 分支管理
-  ;; -------------------------------------------------------------------------
-
-  (create-branch [this run-id checkpoint-id branch-name]
-    (timeline/create-branch timeline-manager run-id checkpoint-id branch-name))
-
-  (list-branches [this run-id]
-    (timeline/list-branches timeline-manager run-id))
-
-  (switch-branch [this run-id branch-id]
-    (timeline/switch-branch timeline-manager run-id branch-id))
-
-  ;; -------------------------------------------------------------------------
-  ;; Graph 专用操作
-  ;; -------------------------------------------------------------------------
-
-  (retry-vertex [this run-id vertex-id]
-    (when-let [cp (load-latest this run-id)]
-      (let [updated (-> cp
-                        (update :failed-vertices #(vec (remove #{vertex-id} %)))
-                        (update :pending-activations #(vec (distinct (conj (or % []) vertex-id))))
-                        (update :retry-count (fnil inc 0))
-                        (assoc :checkpoint-type CHECKPOINT-ERROR)
-                        (assoc :resumable? true))]
-        (save-checkpoint this run-id updated))))
-
-  (retry-all-failed [this run-id]
-    (when-let [cp (load-latest this run-id)]
-      (let [failed (:failed-vertices cp)
-            updated (-> cp
-                        (assoc :failed-vertices [])
-                        (update :pending-activations #(vec (distinct (concat (or % []) failed))))
-                        (update :retry-count (fnil inc 0))
-                        (assoc :checkpoint-type CHECKPOINT-ERROR)
-                        (assoc :resumable? true))]
-        (save-checkpoint this run-id updated))))
-
-  (inject-resume-data [this run-id vertex-id data]
-    (when-let [cp (load-latest this run-id)]
-      (let [updated (-> cp
-                        (update :resume-data assoc vertex-id data)
-                        (assoc :resumable? true))]
-        (save-checkpoint this run-id updated)))))
-
-;; =============================================================================
-;; Checkpoint 访问器
+;; Checkpoint 访问器（纯函数）
 ;; =============================================================================
 
 (defn get-superstep
@@ -370,7 +225,7 @@
   (:retry-count checkpoint))
 
 ;; =============================================================================
-;; Pregel 集成
+;; Pregel 集成（纯函数）
 ;; =============================================================================
 
 (defn from-pregel-state
@@ -402,7 +257,7 @@
         pending-activations (vec (distinct (concat (keys pending-messages)
                                                     (or failed-vertices []))))]
     (map->GraphCheckpoint
-      {:id (generate-id)
+      {:id (generate-checkpoint-id)
        :run-id run-id
        :graph-name graph-name
        :superstep (or superstep 0)
@@ -486,57 +341,9 @@
    :resume-iteration (:iteration checkpoint)
    :initial-activations (:pending-activations checkpoint)})
 
-(defn save-from-pregel
-  "从 Pregel 状态直接保存 Checkpoint
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - pregel-state: Pregel 引擎状态
-   - opts: 选项
-
-   返回: checkpoint-id"
-  [manager run-id pregel-state opts]
-  (let [cp (from-pregel-state pregel-state (assoc opts :run-id run-id))]
-    (save-checkpoint manager run-id cp)))
-
 ;; =============================================================================
-;; 历史查询
+;; 比较函数（纯函数）
 ;; =============================================================================
-
-(defn get-history
-  "获取检查点历史
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - opts: {:limit int :include-data? boolean}
-
-   返回: 历史列表"
-  [manager run-id opts]
-  (let [{:keys [limit include-data?]
-         :or {limit 100 include-data? false}} opts
-        entries (list-checkpoints manager run-id {:limit limit})]
-    (mapv (fn [cp]
-            (cond-> {:id (timeline/entry-id cp)
-                     :superstep (:superstep cp)
-                     :checkpoint-type (:checkpoint-type cp)
-                     :created-at (timeline/entry-created-at cp)
-                     :branch-id (timeline/entry-branch-id cp)}
-              include-data? (assoc :data (timeline/entry-data cp))))
-          entries)))
-
-(defn get-lineage
-  "获取检查点的祖先链
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - checkpoint-id: 起始检查点 ID
-
-   返回: 祖先链列表"
-  [manager run-id checkpoint-id]
-  (timeline/get-lineage (:timeline-manager manager) run-id checkpoint-id))
 
 (defn compare-checkpoints
   "比较两个检查点
@@ -562,103 +369,20 @@
                   :cp2-global (:global-state cp2)}}))
 
 ;; =============================================================================
-;; 便利函数：时间旅行 + 恢复
+;; 恢复选项转换（纯函数）
 ;; =============================================================================
 
-(defn- to-restore-opts
-  "根据引擎类型转换恢复选项"
+(defn to-restore-opts
+  "根据引擎类型转换恢复选项
+
+   参数:
+   - checkpoint: GraphCheckpoint
+   - engine-type: :pregel 或 :executor
+
+   返回: 恢复选项 map"
   [checkpoint engine-type]
   (case engine-type
     :pregel (to-pregel-restore-opts checkpoint)
     :executor (to-executor-restore-opts checkpoint)
     ;; 默认为 pregel
     (to-pregel-restore-opts checkpoint)))
-
-(defn go-back-and-restore
-  "回退 N 步并返回恢复选项
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - steps: 回退步数
-   - engine-type: 引擎类型 :pregel 或 :executor（默认 :pregel）
-
-   返回: 恢复选项或 nil"
-  ([manager run-id steps]
-   (go-back-and-restore manager run-id steps :pregel))
-  ([manager run-id steps engine-type]
-   (when-let [cp (go-back manager run-id steps)]
-     (to-restore-opts cp engine-type))))
-
-(defn goto-and-restore
-  "跳转到指定检查点并返回恢复选项
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - checkpoint-id: 目标检查点 ID
-   - engine-type: 引擎类型 :pregel 或 :executor（默认 :pregel）
-
-   返回: 恢复选项或 nil"
-  ([manager run-id checkpoint-id]
-   (goto-and-restore manager run-id checkpoint-id :pregel))
-  ([manager run-id checkpoint-id engine-type]
-   (when-let [cp (goto-checkpoint manager run-id checkpoint-id)]
-     (to-restore-opts cp engine-type))))
-
-(defn fork-and-restore
-  "创建分支并返回恢复选项
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - checkpoint-id: 分支起点
-   - branch-name: 分支名称
-   - engine-type: 引擎类型 :pregel 或 :executor（默认 :pregel）
-
-   返回: {:branch-info :restore-opts}"
-  ([manager run-id checkpoint-id branch-name]
-   (fork-and-restore manager run-id checkpoint-id branch-name :pregel))
-  ([manager run-id checkpoint-id branch-name engine-type]
-   (when-let [branch-info (create-branch manager run-id checkpoint-id branch-name)]
-     (when-let [cp (load-checkpoint manager run-id checkpoint-id)]
-       {:branch-info branch-info
-        :restore-opts (to-restore-opts cp engine-type)}))))
-
-;; =============================================================================
-;; 工厂函数
-;; =============================================================================
-
-(defn create-checkpoint-manager
-  "创建 GraphCheckpointManager
-
-   参数:
-   - store: IKeyValueStore 实例
-   - opts:
-     - :max-checkpoints 最大检查点数（默认 100）
-     - :auto-prune? 是否自动清理（默认 true）
-
-   返回: GraphCheckpointManager 实例"
-  [store & {:keys [max-checkpoints auto-prune?]
-            :or {max-checkpoints 100
-                 auto-prune? true}}]
-  {:pre [(some? store)
-         (proto/store? store)]}
-  (let [timeline-mgr (timeline/create-timeline-manager
-                       store
-                       :namespace "checkpoints"
-                       :max-entries max-checkpoints
-                       :auto-prune? auto-prune?)]
-    (->GraphCheckpointManager timeline-mgr
-                              {:max-checkpoints max-checkpoints
-                               :auto-prune? auto-prune?})))
-
-(defn checkpoint-manager?
-  "检查是否为 GraphCheckpointManager"
-  [x]
-  (instance? GraphCheckpointManager x))
-
-(defn graph-checkpoint?
-  "检查是否为 GraphCheckpoint"
-  [x]
-  (instance? GraphCheckpoint x))

@@ -239,7 +239,7 @@
         (fn [vtx gs pending-msgs step cp-type & [failed-vtx-ids]]
           (when (and checkpointer run-id)
             (let [checkpoint-fn (requiring-resolve
-                                  'im.ttalk.agent.core.graph.checkpoint/save-from-pregel)
+                                  'im.ttalk.agent.memory.manager.checkpoint/save-from-pregel)
                   pregel-state {:superstep step
                                 :vertices vtx
                                 :global-state gs
@@ -401,7 +401,7 @@
         (fn [vtx gs pending-msgs step cp-type & [failed-vtx-ids]]
           (when (and checkpointer run-id)
             (let [checkpoint-fn (requiring-resolve
-                                  'im.ttalk.agent.core.graph.checkpoint/save-from-pregel)
+                                  'im.ttalk.agent.memory.manager.checkpoint/save-from-pregel)
                   pregel-state {:superstep step
                                 :vertices vtx
                                 :global-state gs
