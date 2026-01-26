@@ -191,7 +191,7 @@ graph LR
     core[clj-agent-core]
     llm[clj-agent-llm]
     sa[clj-agent-simpleagent]
-    plugin[clj-agent-tools]
+    tools[clj-agent-tools]
     rag[clj-agent-rag]
     memory[clj-agent-memory]
     mcp[clj-agent-mcp]
@@ -200,7 +200,7 @@ graph LR
     llm --> core
     sa --> core
     sa --> llm
-    plugin --> core
+    tools --> core
     rag --> core
     mcp --> core
     a2a --> core
