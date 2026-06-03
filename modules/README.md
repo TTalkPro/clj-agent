@@ -10,11 +10,7 @@ clj-agent/
 │   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, Process Runtime）
 │   ├── clj-agent-llm/          # LLM Provider + Service 工厂
 │   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
-│   ├── clj-agent-tools/       # 预置插件库（File, HTTP, Shell）
-│   ├── clj-agent-memory/       # 记忆系统（Store, SnapshotStore, 长短期记忆）
-│   ├── clj-agent-rag/          # RAG 检索增强生成
-│   ├── clj-agent-mcp/          # MCP 服务器/客户端
-│   └── clj-agent-a2a/          # A2A 服务器/客户端
+│   └── clj-agent-tools/       # 预置插件库（File, HTTP, Shell）
 ├── scripts/                     # 构建脚本
 └── deps.edn                     # 根配置
 ```
@@ -84,70 +80,6 @@ clj-agent/
 
 ---
 
-### 5. clj-agent-memory
-
-**职责**: 记忆与存储系统
-
-**包含**:
-- `im.ttalk.agent.memory.store.*` - 存储后端（InMemory, SQLite, PostgreSQL, Redis）
-- `im.ttalk.agent.memory.snapshot.*` - 快照管理（StoreBackedSnapshotStore, Manager）
-- `im.ttalk.agent.memory.short-term.buffer` - 对话缓冲
-- `im.ttalk.agent.memory.long-term.*` - 长期记忆（Semantic, Episodic, Procedural）
-- `im.ttalk.agent.memory.agent-memory` - AgentMemory 统一封装
-
-**依赖**: 无内部依赖（独立模块）
-
----
-
-### 6. clj-agent-rag
-
-**职责**: RAG 检索增强生成
-
-**包含**:
-- `im.ttalk.agent.rag.plugin` - RAG 工具集（导出 `all-tools`）
-- `im.ttalk.agent.rag.pipeline` - RAG 执行管道
-- `im.ttalk.agent.rag.splitter` - 文本切分
-- `im.ttalk.agent.rag.embeddings` - Embedding 操作
-- `im.ttalk.agent.rag.vector_store` - 向量存储
-
-**依赖**: `clj-agent-core`
-
----
-
-### 7. clj-agent-mcp
-
-**职责**: MCP (Model Context Protocol) 服务器/客户端
-
-**包含**:
-- `im.ttalk.agent.mcp.registry` - 状态管理（工具/资源/提示词注册）
-- `im.ttalk.agent.mcp.handler` - 纯函数处理层 + Ring 适配器
-- `im.ttalk.agent.mcp.server` - MCP 服务器生命周期
-- `im.ttalk.agent.mcp.client` - MCP 客户端
-- `im.ttalk.agent.mcp.transport.*` - Stdio/SSE 传输
-- `im.ttalk.agent.mcp.protocol` - MCP 协议定义
-- `im.ttalk.agent.mcp.json_rpc` - JSON-RPC 消息处理
-
-**依赖**: http-kit, cheshire
-
----
-
-### 8. clj-agent-a2a
-
-**职责**: A2A (Agent-to-Agent Protocol) 服务器/客户端
-
-**包含**:
-- `im.ttalk.agent.a2a.types` - 核心类型（Message, Task, Artifact, AgentCard）
-- `im.ttalk.agent.a2a.json_rpc` - JSON-RPC 2.0 实现
-- `im.ttalk.agent.a2a.task` - 任务生命周期管理
-- `im.ttalk.agent.a2a.card` - Agent Card 生成
-- `im.ttalk.agent.a2a.handler` - 状态管理 + 纯函数处理层 + Ring 适配器
-- `im.ttalk.agent.a2a.server` - A2A 服务器生命周期
-- `im.ttalk.agent.a2a.client` - A2A 客户端
-
-**依赖**: http-kit, cheshire, clj-uuid
-
----
-
 ## 使用方法
 
 ### 方式 1: 根目录开发（推荐）
@@ -157,9 +89,6 @@ clj-agent/
 ```bash
 # 运行所有测试
 clojure -M:test
-
-# 启动 MCP 服务器
-clojure -M:mcp-server
 ```
 
 ### 方式 2: 单模块开发
@@ -192,18 +121,9 @@ graph LR
     llm[clj-agent-llm]
     sa[clj-agent-simpleagent]
     tools[clj-agent-tools]
-    rag[clj-agent-rag]
-    memory[clj-agent-memory]
-    mcp[clj-agent-mcp]
-    a2a[clj-agent-a2a]
 
     llm --> core
     sa --> core
     sa --> llm
     tools --> core
-    rag --> core
-    mcp --> core
-    a2a --> core
 ```
-
-`clj-agent-memory` 是独立模块，无内部依赖。

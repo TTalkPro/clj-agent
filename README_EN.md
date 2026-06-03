@@ -15,9 +15,6 @@ English | [中文](README.md)
 - **Multi-Provider Support**: Anthropic, OpenAI, Zhipu, Ollama, Gemini, Mistral, and OpenAI-compatible protocols
 - **SimpleAgent Wrappers**: KernelAgent (synchronous stateful) and ProcessAgent (pause/resume approval)
 - **Process Runtime**: core.async-based event-driven workflows with parallel, fan-in/fan-out, human-in-the-loop
-- **Multi-backend Storage**: IKeyValueStore + ISnapshotStore protocols (Memory/SQLite/Redis/PostgreSQL)
-- **RAG Support**: Retrieval-augmented generation with document splitting, vector storage, semantic retrieval
-- **MCP Protocol**: Model Context Protocol server and client implementation
 
 ## Architecture Overview
 
@@ -50,19 +47,9 @@ graph TB
 
     subgraph "Runtime Layer"
         RT[Process Runtime<br/>core.async Event-Driven]
-        SM[SnapshotManager<br/>State Snapshots]
-    end
-
-    subgraph "Storage Layer"
-        MEM[InMemory]
-        SQL[SQLite]
-        PG[PostgreSQL]
-        RD[Redis]
     end
 
     subgraph "Extension Layer"
-        RAG[RAG Pipeline<br/>Retrieval-Augmented Generation]
-        MCP[MCP Server/Client<br/>Model Context Protocol]
         PLG[Tool Library<br/>File/HTTP/Shell]
     end
 
@@ -74,11 +61,7 @@ graph TB
     K --> S
     S --> PR
     PR --> AN & OA & ZP & OL & GM & MS
-    RT --> SM
-    SM --> MEM & SQL & PG & RD
-    RAG --> K
     PLG --> K
-    MCP --> K
 ```
 
 ## Module Dependencies
@@ -89,21 +72,12 @@ graph LR
     llm[clj-agent-llm<br/>Provider, Service]
     sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
     tools[clj-agent-tools<br/>File, HTTP, Shell]
-    rag[clj-agent-rag<br/>RAG Pipeline]
-    memory[clj-agent-memory<br/>Store, Snapshot]
-    mcp[clj-agent-mcp<br/>MCP Server/Client]
-    a2a[clj-agent-a2a<br/>A2A Server/Client]
 
     llm --> core
     sa --> core
     sa --> llm
     tools --> core
-    rag --> core
-    mcp --> core
-    a2a --> core
 ```
-
-> `clj-agent-memory` is a standalone module with no internal module dependencies.
 
 ## Module Structure
 
@@ -113,10 +87,7 @@ clj-agent/
 │   ├── clj-agent-core/         # Core (Kernel, Tool, Filter, deftool, Process Runtime)
 │   ├── clj-agent-llm/          # LLM Provider + Service Factory
 │   ├── clj-agent-simpleagent/  # High-level Agent Wrappers (KernelAgent, ProcessAgent)
-│   ├── clj-agent-tools/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
-│   ├── clj-agent-memory/       # Storage Implementations (InMemory, SQLite, Redis, PostgreSQL)
-│   ├── clj-agent-rag/          # RAG Retrieval-Augmented Generation
-│   └── clj-agent-mcp/          # MCP Server/Client
+│   └── clj-agent-tools/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
 ├── examples/                   # Usage Examples
 ├── docs/                       # Design Documents
 ├── scripts/                    # Development Scripts
@@ -431,180 +402,6 @@ Inject external events into running Processes for interactive scenarios (chat Ag
 
 See [docs/process-framework-design.md](docs/process-framework-design.md) and [docs/process-parallel-design.md](docs/process-parallel-design.md) for detailed design.
 
-## Memory Storage
-
-Multi-backend storage for conversation history, snapshot persistence, and long/short-term memory management.
-
-### Basic Storage Operations
-
-```clojure
-(require '[im.ttalk.agent.memory.api :as mem])
-
-;; Create storage backend
-(def store (mem/create-in-memory-store))           ;; In-memory (dev/test)
-(def store (mem/create-sqlite-store "agent.db"))   ;; SQLite (single-node persistence)
-(def store (mem/create-postgres-store conn-opts))  ;; PostgreSQL (production)
-(def store (mem/create-redis-store redis-opts))    ;; Redis (distributed cache)
-
-;; Key-Value operations
-(mem/kv-put store "user-123" "preferences" {:lang "en" :theme "dark"})
-(mem/kv-get store "user-123" "preferences")
-;; => {:lang "en" :theme "dark"}
-
-(mem/kv-list-keys store "preferences")
-(mem/kv-exists? store "user-123" "preferences")
-(mem/kv-delete store "user-123" "preferences")
-```
-
-### Agent Conversation State Save & Restore
-
-Use SnapshotManager to persist conversation state, enabling resume-from-checkpoint and time-travel:
-
-```clojure
-(require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
-(require '[im.ttalk.agent.memory.store.in-memory :as mem-store])
-(require '[im.ttalk.agent.memory.snapshot.manager :as snap-mgr])
-(require '[im.ttalk.agent.memory.protocol :as mem-proto])
-(require '[im.ttalk.agent.core.kernel.context :as ctx])
-
-;; 1. Create SnapshotManager
-(def store (mem-store/create-in-memory-store))
-(def snap-manager (snap-mgr/create-snapshot-manager store))
-(def thread-id "session-001")
-
-;; 2. Create Agent and chat
-(def agent (ka/create-agent
-             {:provider provider
-              :model "gpt-4"
-              :system-prompt "You are an assistant."}))
-
-(ka/chat agent "My name is John, I work in New York.")
-(ka/chat agent "I love programming.")
-
-;; 3. Save current conversation state
-(let [context (ka/get-context agent)
-      snapshot {:context context
-                :settings {:model "gpt-4"}}]
-  (mem-proto/snap-put snap-manager
-                      {:thread-id thread-id}
-                      snapshot
-                      {:reason :user-save
-                       :created-at (System/currentTimeMillis)}))
-
-;; 4. Restore state in new Agent (resume conversation)
-(let [loaded (mem-proto/snap-get snap-manager {:thread-id thread-id})
-      restored-context (:context (:snapshot loaded))
-      new-agent (ka/create-agent {:provider provider :model "gpt-4"})]
-  ;; Restore context
-  (reset! (:context-atom new-agent) restored-context)
-  ;; Continue conversation, Agent retains previous memory
-  (ka/chat new-agent "What's my name?"))
-;; => Agent remembers the user is named John
-```
-
-### AgentMemory Unified Wrapper
-
-AgentMemory provides one-stop memory management, integrating snapshots, time-travel, knowledge base, and message management:
-
-```clojure
-(require '[im.ttalk.agent.memory.api :as mem])
-
-;; Create complete memory system
-(def am (mem/create-agent-memory
-          {:context-store (mem/create-in-memory-store)      ;; Hot data
-           :persistent-store (mem/create-sqlite-store "data.db")}))  ;; Cold data
-
-;; State management
-(mem/save-state am {:messages [...] :variables {...}})
-(mem/load-state am)
-
-;; Time travel
-(mem/go-back am)           ;; Go to previous state
-(mem/go-forward am)        ;; Go to next state
-(mem/goto am 3)            ;; Jump to version 3
-(mem/list-history am)      ;; View history
-
-;; Branch management (A/B testing, experimental conversations)
-(mem/create-branch am "experiment-a")
-(mem/switch-branch am "experiment-a")
-(mem/list-branches am)
-
-;; Knowledge base (long-term memory)
-(mem/remember am {:type :fact :content "User prefers English"})
-(mem/remember am {:type :episode :content "User asked about weather last time"})
-(mem/recall am "user preference")                  ;; Semantic retrieval
-(mem/recall-by-type am :fact)                      ;; Retrieve by type
-(mem/search-knowledge am "preference" {:limit 5})  ;; Search
-
-;; Message management
-(mem/add-message-to-memory am {:role "user" :content "Hello"})
-(mem/get-messages-from-memory am)
-(mem/clear-messages-from-memory am)
-
-;; Session archiving
-(mem/archive-session! am)
-(mem/list-archived am)
-(mem/load-archived am "session-id")
-```
-
-### Long-term Memory Types
-
-```clojure
-;; Semantic memory (facts/knowledge)
-(def sem (mem/create-semantic-memory store))
-(mem/store-fact sem {:key "capital" :value "Beijing is the capital of China" :category "geography"})
-(mem/get-fact sem "capital")
-(mem/query-facts sem {:category "geography"})
-
-;; Episodic memory (events/experiences)
-(def epi (mem/create-episodic-memory store))
-(mem/store-episode epi {:action "weather-query"
-                        :query "Beijing weather"
-                        :outcome :success
-                        :timestamp (System/currentTimeMillis)})
-(mem/get-recent-episodes epi 5)
-
-;; Procedural memory (rules/skills)
-(def proc (mem/create-procedural-memory store))
-(mem/set-system-prompt proc "You are a professional assistant")
-(mem/add-rule proc (mem/create-rule {:id "r1" :content "Always respond in English"}))
-(mem/get-active-rules proc)
-```
-
-## RAG (Retrieval-Augmented Generation)
-
-```clojure
-(require '[im.ttalk.agent.rag.plugin :as rag])
-
-;; Index documents
-(rag/rag-index-text "Document content..." {:source "doc-001"})
-
-;; Retrieve relevant documents
-(rag/rag-retrieve "Search query" {:top-k 5})
-
-;; RAG-powered Q&A
-(rag/rag-query "Answer this question" {:top-k 5})
-```
-
-The RAG module can also be registered as Kernel tools via `rag/all-tools`, enabling the LLM to automatically invoke retrieval.
-
-## MCP Protocol
-
-Model Context Protocol server/client implementation:
-
-```clojure
-;; Start MCP server
-;; clj -M:mcp-server
-
-;; Client connection
-(require '[im.ttalk.agent.mcp.client :as mcp-client])
-
-(def client (mcp-client/connect {:transport :stdio
-                                  :command ["clj" "-M:mcp-server"]}))
-```
-
-Supports both Stdio and SSE transport protocols.
-
 ## Development
 
 ```bash
@@ -627,14 +424,7 @@ Core:
 - cheshire/cheshire 5.12.0
 - com.taoensso/timbre 6.3.0
 - http-kit/http-kit 2.8.0
-- com.github.seancorfield/next.jdbc 1.3.939
 - net.clojars.wkok/openai-clojure 0.21.0
-
-Storage backends (as needed):
-
-- org.xerial/sqlite-jdbc 3.45.1.0
-- org.postgresql/postgresql 42.7.3
-- com.taoensso/carmine 3.2.0 (Redis)
 
 Testing:
 
