@@ -474,103 +474,147 @@
   "工具调用循环默认最大次数"
   10)
 
-(defn run-tools
-  "批量执行一组工具调用，返回中立 tool 结果消息 + 执行记录 + 更新后的 ToolContext。
+(defn- build-chat-opts
+  "从 invoke/resume 的 opts 构建传给 invoke-chat 的 chat 选项
+   （system-prompt 合并 + 工具 schema 过滤 + tool-choice）。"
+  [kernel opts]
+  (let [system-prompts (or (:system-prompts opts) [])
+        sp-str (when (seq system-prompts)
+                 (->> system-prompts (map :content) (clojure.string/join "\n")))
+        tool-schemas (filter-tools-by-tags kernel opts)
+        tool-choice (or (:tool-choice opts) :auto)]
+    (cond-> {:tools tool-schemas :tool-choice tool-choice}
+      sp-str (assoc :system-prompt sp-str))))
 
-   单个工具异常被捕获为错误结果，不中断其余工具。供外部手搓工具循环使用。
+(defn execute-batch
+  "按 gate 决策执行一批工具调用，产出中立 tool 结果消息 + 记录 + 更新后的 ToolContext。
+
+   gate: (fn [tool-call] -> :proceed | :reject)，nil 视为全 :proceed。
+   - :proceed 调 invoke-tool（异常捕获为错误结果，不中断）
+   - :reject 跳过执行，填入「已拒绝执行」中立结果
 
    参数:
-   - kernel:       Kernel 实例
-   - tool-calls:   [{:id :name :input} ...]（来自 response/response-tool-calls）
-   - tool-context: ToolContext（扁平 map）
+   - kernel, tool-calls, gate, tool-context, init-records
 
-   返回:
-   {:messages [中立 tool 消息 ...]
-    :records  [{:name :args :result} ...]
-    :context  更新后的 ToolContext}"
-  [kernel tool-calls tool-context]
+   返回: {:messages [...] :records [...] :context ...}"
+  [kernel tool-calls gate tool-context init-records]
   (reduce
     (fn [{:keys [messages records context]} tc]
       (let [fn-key (keyword (:name tc))
-            args (:input tc)
-            {:keys [value context]}
-            (try
-              (invoke-tool kernel fn-key args context)
-              (catch Exception e
-                {:value (str "错误: " (.getMessage e)) :context context}))]
-        {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
-         :records  (conj records {:name fn-key :args args :result value})
-         :context  context}))
-    {:messages [] :records [] :context tool-context}
+            decision (if gate (gate tc) :proceed)]
+        (if (= :reject decision)
+          {:messages (conj messages (msg/tool-result (:id tc) (:name tc) "已拒绝执行"))
+           :records  (conj records {:name fn-key :args (:input tc) :result :rejected})
+           :context  context}
+          (let [{:keys [value context]}
+                (try (invoke-tool kernel fn-key (:input tc) context)
+                     (catch Exception e
+                       {:value (str "错误: " (.getMessage e)) :context context}))]
+            {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
+             :records  (conj records {:name fn-key :args (:input tc) :result value})
+             :context  context}))))
+    {:messages [] :records init-records :context tool-context}
     tool-calls))
 
+(defn run-tools
+  "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。
+
+   返回 {:messages [...] :records [...] :context ...}"
+  [kernel tool-calls tool-context]
+  (execute-batch kernel tool-calls nil tool-context []))
+
+(defn- run-tool-loop
+  "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或被 gate 暂停。
+
+   返回:
+   {:status :completed :response r :tool-context c :tool-calls-made [...]}
+   {:status :paused    :loop-state {:tool-calls :remaining :records} :pending-tool {...} :tool-context c}"
+  [kernel delta remaining records tctx gate chat-opts]
+  (loop [delta delta, remaining remaining, records records, tctx tctx]
+    (when (zero? remaining)
+      (throw (ex-info "工具调用循环次数超过上限"
+                      {:max-iterations remaining :tool-calls-made records})))
+    (let [{:keys [response context]} (invoke-chat kernel delta (assoc chat-opts :context tctx))
+          tctx context
+          calls (response/response-tool-calls response)]
+      (cond
+        (empty? calls)
+        {:status :completed :response response
+         :tool-context tctx :tool-calls-made records}
+
+        (and gate (some #(= :pause (gate %)) calls))
+        (let [paused-call (first (filter #(= :pause (gate %)) calls))]
+          {:status :paused
+           :pause-reason (str "需要审批: " (:name paused-call))
+           :loop-state {:tool-calls calls :remaining (dec remaining) :records records}
+           :pending-tool {:name (:name paused-call)
+                          :args (:input paused-call)
+                          :tool-call paused-call}
+           :tool-calls-made records
+           :tool-context tctx})
+
+        :else
+        (let [{:keys [messages records context]}
+              (execute-batch kernel calls gate tctx records)]
+          (recur messages (dec remaining) records context))))))
+
 (defn invoke
-  "工具调用循环主入口（Memory Filter 模式）
+  "工具调用循环主入口（Memory Filter 模式，统一循环）
 
-   消息不再 thread 在 Context 里，而是由 Memory Filter 按 conversation-id
-   存进 Kernel 的 ChatMemory store。每轮只向 invoke-chat 传 delta，
-   pre-chat 的 Memory Filter 负责拼出完整历史。
-
-   执行流程:
-   1. 确保 conversation-id（ToolContext 没有则生成临时 UUID，结束后清理）
-   2. tool-calling-loop:
-      a. invoke-chat 传 delta → Memory Filter 存入并展开历史 → LLM
-         （assistant 回复由 post-chat Memory Filter 存入）
-      b. 有 tool_calls：run-tools 执行 → 把中立 tool 结果作为下一轮 delta
-      c. 纯文本：返回
+   每轮只向 invoke-chat 传 delta，pre-chat 的 Memory Filter 拼出完整历史。
+   可选 :tool-gate 提供暂停/拒绝能力（gate 返回 :pause 时整批暂停）。
 
    参数:
    - kernel:   Kernel 实例（需注册 LLM 服务）
    - messages: 本轮新消息（中立消息，通常 [(message/user \"...\")]）
-   - opts:     选项 map
-     {:context          ToolContext（扁平 map，含 :conversation-id 则多轮持久）
+   - opts:
+     {:context          ToolContext（含 :conversation-id 则多轮持久；否则临时会话）
       :system-prompts   系统提示消息列表
       :max-iterations   最大循环次数（默认 10）
       :tool-choice      :auto/:none/:required（默认 :auto）
+      :tool-gate        (fn [tool-call] -> :proceed|:pause|:reject)，可选
       :tags / :exclude-tags  工具 tag 过滤}
 
    返回:
-   {:response final-response :tool-context updated-ctx :tool-calls-made [...]}"
+   {:status :completed :response r :tool-context c :tool-calls-made [...]}
+   {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}"
   [kernel messages opts]
   (when-not (:service kernel)
     (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
                     {:kernel-keys (keys kernel)})))
-  (let [system-prompts (or (:system-prompts opts) [])
-        system-prompt-str (when (seq system-prompts)
-                            (->> system-prompts (map :content)
-                                 (clojure.string/join "\n")))
-        max-iter (or (:max-iterations opts)
-                     (get-in kernel [:settings :max-tool-iterations])
-                     default-max-iterations)
-        tool-schemas (filter-tools-by-tags kernel opts)
-        tool-choice (or (:tool-choice opts) :auto)
-        ;; 确保 conversation-id（临时会话用 UUID，结束清理）
-        base-ctx (or (:context opts) (ctx/create))
+  (let [base-ctx (or (:context opts) (ctx/create))
         ephemeral? (nil? (ctx/conversation-id base-ctx))
         conv-id (or (ctx/conversation-id base-ctx)
                     (str "conv-" (java.util.UUID/randomUUID)))
         init-ctx (ctx/with-conversation-id base-ctx conv-id)
-        chat-opts (cond-> {:tools tool-schemas :tool-choice tool-choice}
-                    system-prompt-str (assoc :system-prompt system-prompt-str))]
-    (try
-      (loop [delta          (mapv msg/normalize messages)
-             remaining      max-iter
-             all-tool-calls []
-             tctx           init-ctx]
-        (when (zero? remaining)
-          (throw (ex-info "工具调用循环次数超过上限"
-                          {:max-iterations max-iter
-                           :tool-calls-made all-tool-calls})))
-        (let [{:keys [response context]}
-              (invoke-chat kernel delta (assoc chat-opts :context tctx))
-              tctx context]
-          (if (response/has-tool-calls? response)
-            (let [{:keys [messages records context]}
-                  (run-tools kernel (response/response-tool-calls response) tctx)]
-              (recur messages (dec remaining) (into all-tool-calls records) context))
-            {:response response
-             :tool-context tctx
-             :tool-calls-made all-tool-calls})))
-      (finally
-        (when ephemeral?
-          (memory/mem-clear (:memory kernel) conv-id))))))
+        max-iter (or (:max-iterations opts)
+                     (get-in kernel [:settings :max-tool-iterations])
+                     default-max-iterations)
+        result (run-tool-loop kernel (mapv msg/normalize messages)
+                              max-iter [] init-ctx
+                              (:tool-gate opts)
+                              (build-chat-opts kernel opts))]
+    ;; 临时会话仅在完成时清理（暂停需保留历史以便 resume）
+    (when (and ephemeral? (= :completed (:status result)))
+      (memory/mem-clear (:memory kernel) conv-id))
+    result))
+
+(defn resume
+  "从 paused 的 loop-state 继续工具循环。
+
+   参数:
+   - kernel:     Kernel 实例
+   - loop-state: invoke 返回的 :loop-state {:tool-calls :remaining :records}
+   - decision:   :approved（强制全部执行）| :rejected（gate 决定，敏感→拒绝）
+   - opts:       同 invoke（须含带 conversation-id 的 :context 以接续历史）
+
+   返回: 同 invoke（:completed 或再次 :paused）"
+  [kernel loop-state decision opts]
+  (let [{:keys [tool-calls remaining records]} loop-state
+        tctx (or (:context opts) (ctx/create))
+        resume-gate (if (= decision :approved) (constantly :proceed) (:tool-gate opts))
+        {:keys [messages records context]}
+        (execute-batch kernel tool-calls resume-gate tctx records)]
+    (run-tool-loop kernel messages remaining records context
+                   (:tool-gate opts)
+                   (build-chat-opts kernel opts))))
