@@ -24,7 +24,8 @@
 
    (apply-delta state {:messages [\"new\"] :counter 1}
                 field-reducers)
-   ;; messages 追加，counter 累加，其他字段后值覆盖")
+   ;; messages 追加，counter 累加，其他字段后值覆盖"
+  (:require [clojure.set]))
 
 ;;; ============================================================
 ;;; 内置 Reducer

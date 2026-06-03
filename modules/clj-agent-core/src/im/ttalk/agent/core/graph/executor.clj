@@ -38,8 +38,7 @@
             [im.ttalk.agent.core.graph.node :as node]
             [im.ttalk.agent.core.graph.edge :as edge]
             [im.ttalk.agent.core.graph.reducer :as reducer]
-            [im.ttalk.agent.core.graph.dispatch :as dispatch]
-            [im.ttalk.agent.core.graph.checkpoint :as checkpoint]))
+            [im.ttalk.agent.core.graph.dispatch :as dispatch]))
 
 ;;; ============================================================
 ;;; 执行结果状态
@@ -310,18 +309,8 @@
      :max-iterations    - 最大迭代次数（覆盖图定义）
      :num-workers       - worker 数量（默认 4）
      :timeout-ms        - 执行超时（毫秒）
-     :checkpointer      - GraphCheckpointManager 实例（可选）
-     :checkpoint-policy - checkpoint 策略（默认 :on-complete-or-error）
-                          :every-iteration     - 每次迭代后保存
-                          :on-complete         - 仅完成时保存
-                          :on-error            - 仅出错时保存
-                          :on-complete-or-error - 完成或出错时保存
-                          :on-interrupt        - 中断时保存
-     :on-checkpoint     - checkpoint 保存后的回调 (fn [info])
-     :run-id            - 执行 ID（使用 checkpointer 时必需）
-     :graph-name        - 图名称（可选）
 
-     ;; 恢复参数（从 checkpoint 恢复时使用）
+     ;; 恢复参数（从已保存状态恢复时使用）
      :resume-iteration       - 恢复的起始迭代号（默认 0）
      :initial-activations    - 初始激活列表（覆盖 entry）
      :resume-state           - 恢复的状态（覆盖 initial-state）
@@ -334,48 +323,13 @@
     :interrupts [...] (如有)}"
   [graph-spec initial-state & {:keys [field-reducers max-iterations
                                        num-workers timeout-ms
-                                       checkpointer checkpoint-policy on-checkpoint
-                                       run-id graph-name
                                        ;; 恢复参数
                                        resume-iteration initial-activations resume-state]
                                 :or {field-reducers {}
                                      num-workers 4
                                      timeout-ms 60000
-                                     checkpoint-policy :on-complete-or-error
                                      resume-iteration 0}}]
-  (let [;; checkpoint 辅助函数
-        do-checkpoint!
-        (fn [s iter cp-type activations-list]
-          (when (and checkpointer run-id)
-            (try
-              (let [cp-data {:run-id run-id
-                             :graph-name (or graph-name (:name graph-spec))
-                             :superstep iter
-                             :iteration iter
-                             :vertices {}  ;; Graph executor 不跟踪顶点
-                             :global-state s
-                             :pending-activations activations-list
-                             :checkpoint-type cp-type
-                             :resumable? (contains? #{:interrupt :error} cp-type)}
-                    cp-id (checkpoint/save-checkpoint checkpointer run-id cp-data)]
-                (when on-checkpoint
-                  (on-checkpoint {:checkpoint-id cp-id
-                                  :iteration iter
-                                  :checkpoint-type cp-type}))
-                cp-id)
-              (catch Exception _e nil))))
-
-        should-checkpoint?
-        (fn [cp-type]
-          (case checkpoint-policy
-            :every-iteration true
-            :on-complete (= cp-type :final)
-            :on-error (= cp-type :error)
-            :on-interrupt (= cp-type :interrupt)
-            :on-complete-or-error (contains? #{:final :error} cp-type)
-            false))
-
-        max-iter (or max-iterations (:max-iterations graph-spec) 100)
+  (let [max-iter (or max-iterations (:max-iterations graph-spec) 100)
         vertices (:vertices graph-spec)
         entry (:entry graph-spec)
         ;; 确定实际使用的初始状态和激活列表
@@ -394,12 +348,9 @@
                     activations effective-activations
                     iteration resume-iteration]
             (if (>= iteration max-iter)
-              (do
-                (when (should-checkpoint? :final)
-                  (do-checkpoint! state iteration :final activations))
-                {:status STATUS-MAX-ITERATIONS
-                 :state state
-                 :iterations iteration})
+              {:status STATUS-MAX-ITERATIONS
+               :state state
+               :iterations iteration}
               (let [;; 更新 state-atom 供 worker 读取
                     _ (reset! state-atom state)
                     ;; 执行一次迭代
@@ -409,39 +360,26 @@
                                       iteration field-reducers))]
                 (case (:status iter-result)
                   :completed
-                  (do
-                    (when (should-checkpoint? :final)
-                      (do-checkpoint! (:state iter-result) (inc iteration) :final []))
-                    {:status STATUS-COMPLETED
-                     :state (:state iter-result)
-                     :iterations (inc iteration)})
+                  {:status STATUS-COMPLETED
+                   :state (:state iter-result)
+                   :iterations (inc iteration)}
 
                   :error
-                  (do
-                    (when (should-checkpoint? :error)
-                      (do-checkpoint! (:state iter-result) (inc iteration) :error activations))
-                    {:status STATUS-ERROR
-                     :state (:state iter-result)
-                     :iterations (inc iteration)
-                     :errors (:errors iter-result)})
+                  {:status STATUS-ERROR
+                   :state (:state iter-result)
+                   :iterations (inc iteration)
+                   :errors (:errors iter-result)}
 
                   :interrupted
-                  (do
-                    (when (should-checkpoint? :interrupt)
-                      (do-checkpoint! (:state iter-result) (inc iteration) :interrupt activations))
-                    {:status STATUS-INTERRUPTED
-                     :state (:state iter-result)
-                     :iterations (inc iteration)
-                     :interrupts (:interrupts iter-result)})
+                  {:status STATUS-INTERRUPTED
+                   :state (:state iter-result)
+                   :iterations (inc iteration)
+                   :interrupts (:interrupts iter-result)}
 
                   :running
-                  (do
-                    (when (should-checkpoint? :superstep)
-                      (do-checkpoint! (:state iter-result) (inc iteration) :superstep
-                                      (:next-activations iter-result)))
-                    (recur (:state iter-result)
-                           (:next-activations iter-result)
-                           (inc iteration)))
+                  (recur (:state iter-result)
+                         (:next-activations iter-result)
+                         (inc iteration))
 
                   ;; 未知状态
                   {:status STATUS-ERROR
