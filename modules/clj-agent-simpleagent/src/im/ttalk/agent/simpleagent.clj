@@ -81,19 +81,12 @@
     [{:role "system" :content sp}]))
 
 (defn- cancel-pending!
-  "未-resume 保护：若 agent 处于暂停态，开新对话前为待执行的 tool-calls
-   补一条「已取消」中立结果，避免历史里留下悬空的 tool_use（严格 provider 会报错），
-   并重置控制状态。"
+  "未-resume 保护：暂停态下开新对话时，只重置控制状态。
+   历史里悬空 tool_use 的配对（补「已取消」结果）由 kernel/invoke 入口自愈完成，
+   故此处不再手动操作消息，避免与 kernel 重复。"
   [agent]
   (when (= :paused (:status @(:state-atom agent)))
-    (let [calls (get-in @(:state-atom agent) [:paused-state :loop-state :tool-calls])
-          cancels (mapv (fn [tc]
-                          (msg/tool-result (:id tc) (:name tc)
-                                           "已取消（未审批，开始了新对话）"))
-                        calls)]
-      (when (seq cancels)
-        (memory/mem-add (store agent) (:conversation-id agent) cancels))
-      (clojure.core/reset! (:state-atom agent) {:status :idle :paused-state nil}))))
+    (clojure.core/reset! (:state-atom agent) {:status :idle :paused-state nil})))
 
 (defn- finalize
   "把 kernel/invoke|resume 的结果写入 state-atom 并标准化返回"
