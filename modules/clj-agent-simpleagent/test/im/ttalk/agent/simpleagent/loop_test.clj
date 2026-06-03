@@ -47,11 +47,11 @@
    :build-result-msgs (fn [_ _] [])})
 
 (defn- build [tools svc store]
-  (cond-> (core/create-kernel-builder)
-    (seq tools) (core/add-tools tools)
-    true        (core/add-service svc)
-    store       (core/add-filter (ma/memory-filter store))
-    true        (core/build-kernel)))
+  (let [filters (when store [(ma/memory-filter store)])]
+    (core/build-kernel
+      {:service  svc
+       :tools    (vec tools)
+       :filters  (vec filters)})))
 
 ;;; ============================================================
 ;;; invoke 工具循环

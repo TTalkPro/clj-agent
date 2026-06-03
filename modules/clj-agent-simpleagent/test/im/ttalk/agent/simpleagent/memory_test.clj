@@ -61,7 +61,7 @@
         terminal (fn [req]
                    (reset! seen (:messages req))
                    {:response response :context (:context req)})
-        chain (flt/build-chain [(mf/memory-filter store)] terminal)
+        chain (flt/build-chain (keep :chat [(mf/memory-filter store)]) terminal)
         out (chain {:messages messages :context tc})]
     {:seen @seen :out out}))
 

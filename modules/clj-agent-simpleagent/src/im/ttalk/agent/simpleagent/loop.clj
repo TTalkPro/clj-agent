@@ -153,7 +153,7 @@
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}"
   [kernel store messages opts]
   (when-not (:service kernel)
-    (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
+    (throw (ex-info "Kernel 未配置 LLM 服务（请在 build-kernel 中提供 :service）"
                     {:kernel-keys (keys kernel)})))
   (let [base-ctx (or (:context opts) (ctx/create))
         ephemeral? (nil? (ctx/conversation-id base-ctx))

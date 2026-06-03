@@ -97,7 +97,7 @@
   (testing ":kernel 选项直接复用"
     (let [p (ts/create-mock-provider [{:text "来自预构建" :tool-calls nil}])
           svc (service/create-service p {:model "test" :max-tokens 100})
-          k (-> (kernel/create-kernel-builder) (kernel/add-service svc) (kernel/build-kernel))
+          k (kernel/build-kernel {:service svc})
           a (agent/create-agent {:kernel k})]
       (is (= "来自预构建" (:text (agent/chat a "测试")))))))
 
