@@ -1,0 +1,126 @@
+(ns im.ttalk.agent.core.llm.message
+  "中立消息格式 - provider 无关的对话消息表示
+
+   这是对话历史的唯一真相形态。Memory store 只存这种形状，
+   发送给 LLM 时由各 provider 的 wire 转换器转成自家格式
+   （见 llm/wire/openai、llm/wire/anthropic）。
+
+   消息形状：
+
+   {:role :system    :content \"...\"}
+   {:role :user      :content \"...\"}
+   {:role :assistant :content \"...\"}                       ; 纯文本
+   {:role :assistant :content nil
+    :tool-calls [{:id \"c1\" :name \"get_weather\" :args {:city \"北京\"}}]}
+   {:role :tool :tool-call-id \"c1\" :name \"get_weather\" :content \"晴 22°C\"}
+
+   约束：
+   - role 用 keyword（:system/:user/:assistant/:tool）
+   - tool-call: {:id 字符串 :name 字符串 :args map}
+   - tool 消息的 :tool-call-id 关联到对应调用的 :id")
+
+;;; ============================================================
+;;; 构造函数
+;;; ============================================================
+
+(defn system
+  "系统消息"
+  [content]
+  {:role :system :content content})
+
+(defn user
+  "用户消息"
+  [content]
+  {:role :user :content content})
+
+(defn assistant
+  "assistant 纯文本消息"
+  [content]
+  {:role :assistant :content content})
+
+(defn tool-call
+  "构造单个工具调用
+
+   参数：
+   - id:   调用 ID（字符串）
+   - name: 工具名（字符串或 keyword，规范化为字符串）
+   - args: 参数 map
+
+   返回：{:id :name :args}"
+  [id name args]
+  {:id id
+   :name (if (keyword? name) (clojure.core/name name) (str name))
+   :args (or args {})})
+
+(defn assistant-tool-calls
+  "带工具调用的 assistant 消息
+
+   参数：
+   - tool-calls: [{:id :name :args} ...]（用 tool-call 构造）
+   - content:    可选的伴随文本
+
+   返回：{:role :assistant :content content-or-nil :tool-calls [...]}"
+  ([tool-calls]
+   (assistant-tool-calls tool-calls nil))
+  ([tool-calls content]
+   {:role :assistant
+    :content content
+    :tool-calls (vec tool-calls)}))
+
+(defn tool-result
+  "工具结果消息
+
+   参数：
+   - tool-call-id: 关联的工具调用 ID
+   - name:         工具名（字符串或 keyword）
+   - content:      结果内容（非字符串会 pr-str）
+
+   返回：{:role :tool :tool-call-id :name :content}"
+  [tool-call-id name content]
+  {:role :tool
+   :tool-call-id tool-call-id
+   :name (if (keyword? name) (clojure.core/name name) (str name))
+   :content (if (string? content) content (pr-str content))})
+
+;;; ============================================================
+;;; 谓词与访问器
+;;; ============================================================
+
+(defn role [m] (:role m))
+(defn content [m] (:content m))
+(defn tool-calls [m] (:tool-calls m))
+(defn tool-call-id [m] (:tool-call-id m))
+
+(defn message?
+  "是否为中立消息（有 keyword role）"
+  [m]
+  (and (map? m) (keyword? (:role m))))
+
+(defn has-tool-calls?
+  "assistant 消息是否含工具调用"
+  [m]
+  (boolean (seq (:tool-calls m))))
+
+(defn system? [m] (= :system (:role m)))
+(defn user? [m] (= :user (:role m)))
+(defn assistant? [m] (= :assistant (:role m)))
+(defn tool? [m] (= :tool (:role m)))
+
+;;; ============================================================
+;;; 兼容：legacy 字符串-role map → 中立
+;;; ============================================================
+
+(defn normalize
+  "把可能是 legacy 形态（role 为字符串）的消息规范化为中立消息。
+   已是中立（keyword role）则原样返回。
+
+   仅做 role 关键字化与基本字段透传，供迁移期使用。"
+  [m]
+  (if (keyword? (:role m))
+    m
+    (let [r (keyword (:role m))]
+      (cond-> (assoc m :role r)
+        ;; OpenAI legacy tool 消息：:tool_call_id → :tool-call-id
+        (and (= r :tool) (:tool_call_id m))
+        (-> (assoc :tool-call-id (:tool_call_id m))
+            (dissoc :tool_call_id))))))
