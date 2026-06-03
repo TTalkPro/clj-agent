@@ -1,5 +1,5 @@
 (ns im.ttalk.agent.core.graph.checkpoint
-  "Graph Checkpoint - Graph/Pregel 框架检查点协议和数据结构
+  "Graph Checkpoint - Graph 框架检查点协议和数据结构
 
    本模块定义检查点的协议、数据结构和纯函数。
    实现（GraphCheckpointManager）在 clj-agent-memory 模块中。
@@ -9,7 +9,7 @@
    │                    clj-agent-core                           │
    │  • GraphCheckpoint 数据结构                                 │
    │  • IGraphCheckpointManager 协议                             │
-   │  • Pregel/Executor 集成函数                                 │
+   │  • Executor 集成函数                                        │
    └─────────────────────────────────────────────────────────────┘
                               ↑
    ┌─────────────────────────────────────────────────────────────┐
@@ -27,7 +27,7 @@
    ;; 使用 core 模块的协议和函数
    (require '[im.ttalk.agent.core.graph.checkpoint :as cp])
    (cp/save-checkpoint manager \"run-1\" checkpoint)
-   (def opts (cp/to-pregel-restore-opts checkpoint))")
+   (def opts (cp/to-executor-restore-opts checkpoint))")
 
 ;; =============================================================================
 ;; Checkpoint 类型常量
@@ -225,103 +225,8 @@
   (:retry-count checkpoint))
 
 ;; =============================================================================
-;; Pregel 集成（纯函数）
+;; Executor 集成（纯函数）
 ;; =============================================================================
-
-(defn from-pregel-state
-  "从 Pregel 执行状态创建 Checkpoint
-
-   参数:
-   - pregel-state: Pregel 引擎的执行状态
-     {:superstep :vertices :global-state :pending-messages :failed-vertices ...}
-   - opts: 选项
-     {:checkpoint-type :graph-name :run-id}
-
-   返回: GraphCheckpoint"
-  [pregel-state opts]
-  (let [{:keys [superstep vertices global-state
-                pending-messages active-vertices failed-vertices]} pregel-state
-        {:keys [checkpoint-type graph-name run-id iteration]
-         :or {checkpoint-type CHECKPOINT-SUPERSTEP
-              iteration 0}} opts
-        ;; 计算顶点分类
-        failed-vtx-set (set (or failed-vertices []))
-        active-vtx (or active-vertices
-                       (vec (keys (filter (fn [[_ v]] (:active v)) vertices))))
-        completed-vtx (vec (keys (filter (fn [[_ v]]
-                                           (and (not (:active v))
-                                                (:halt-voted v)
-                                                (not (contains? failed-vtx-set _))))
-                                         vertices)))
-        ;; 待激活 = 有消息的顶点 + 失败顶点（用于重试）
-        pending-activations (vec (distinct (concat (keys pending-messages)
-                                                    (or failed-vertices []))))]
-    (map->GraphCheckpoint
-      {:id (generate-checkpoint-id)
-       :run-id run-id
-       :graph-name graph-name
-       :superstep (or superstep 0)
-       :iteration iteration
-       :vertices vertices
-       :pending-activations pending-activations
-       :pending-deltas nil
-       :global-state global-state
-       :active-vertices active-vtx
-       :completed-vertices completed-vtx
-       :failed-vertices (vec (or failed-vertices []))
-       :interrupted-vertices []
-       :checkpoint-type checkpoint-type
-       :resumable? (contains? #{CHECKPOINT-INTERRUPT CHECKPOINT-ERROR}
-                              checkpoint-type)
-       :resume-data {}
-       :retry-count 0
-       :metadata (:metadata opts)})))
-
-(defn to-pregel-restore-opts
-  "转换为 Pregel 恢复选项
-
-   参数:
-   - checkpoint: GraphCheckpoint
-   - opts: 可选参数
-     :retry-failed-only? - 是否只重试失败顶点（默认 false）
-
-   返回: Pregel run/run-simple 的恢复参数
-   使用方式:
-   (let [opts (to-pregel-restore-opts checkpoint)]
-     (pregel/run-simple (:vertices opts)
-                        :initial-global-state (:initial-global-state opts)
-                        :resume-superstep (:resume-superstep opts)
-                        :initial-pending-messages (:initial-pending-messages opts)
-                        :resume-data (:resume-data opts)))"
-  ([checkpoint]
-   (to-pregel-restore-opts checkpoint {}))
-  ([checkpoint {:keys [retry-failed-only?] :or {retry-failed-only? false}}]
-   (let [;; 决定要激活哪些顶点
-         vertices-to-activate (if retry-failed-only?
-                                (:failed-vertices checkpoint)
-                                (:pending-activations checkpoint))]
-     {:vertices (:vertices checkpoint)
-      :initial-global-state (:global-state checkpoint)
-      :resume-superstep (:superstep checkpoint)
-      :initial-pending-messages (reduce
-                                  (fn [acc vid]
-                                    (assoc acc vid []))  ; 待激活转为空消息列表以激活
-                                  {}
-                                  vertices-to-activate)
-      :resume-data (:resume-data checkpoint)
-      :failed-vertices (:failed-vertices checkpoint)})))
-
-(defn to-pregel-retry-failed-opts
-  "转换为 Pregel 恢复选项（只重试失败顶点）
-
-   这是 to-pregel-restore-opts 的便捷函数，专门用于重试失败顶点场景。
-
-   参数:
-   - checkpoint: GraphCheckpoint
-
-   返回: Pregel run/run-simple 的恢复参数（只激活失败顶点）"
-  [checkpoint]
-  (to-pregel-restore-opts checkpoint {:retry-failed-only? true}))
 
 (defn to-executor-restore-opts
   "转换为 Graph Executor 恢复选项
@@ -377,12 +282,11 @@
 
    参数:
    - checkpoint: GraphCheckpoint
-   - engine-type: :pregel 或 :executor
+   - engine-type: :executor
 
    返回: 恢复选项 map"
   [checkpoint engine-type]
   (case engine-type
-    :pregel (to-pregel-restore-opts checkpoint)
     :executor (to-executor-restore-opts checkpoint)
-    ;; 默认为 pregel
-    (to-pregel-restore-opts checkpoint)))
+    ;; 默认为 executor
+    (to-executor-restore-opts checkpoint)))

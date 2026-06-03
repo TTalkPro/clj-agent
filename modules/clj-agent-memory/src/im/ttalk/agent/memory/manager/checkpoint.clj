@@ -18,7 +18,7 @@
    (cp/load-latest manager \"run-1\")
 
    ;; 时间旅行
-   (cm/go-back-and-restore manager \"run-1\" 2 :pregel)"
+   (cm/go-back-and-restore manager \"run-1\" 2 :executor)"
   (:require [im.ttalk.agent.core.graph.checkpoint :as cp]
             [im.ttalk.agent.memory.manager.timeline :as timeline]
             [im.ttalk.agent.memory.protocol :as proto])
@@ -244,11 +244,11 @@
    - manager: GraphCheckpointManager
    - run-id: 执行 ID
    - steps: 回退步数
-   - engine-type: 引擎类型 :pregel 或 :executor（默认 :pregel）
+   - engine-type: 引擎类型 :executor（默认 :executor）
 
    返回: 恢复选项或 nil"
   ([manager run-id steps]
-   (go-back-and-restore manager run-id steps :pregel))
+   (go-back-and-restore manager run-id steps :executor))
   ([manager run-id steps engine-type]
    (when-let [checkpoint (cp/go-back manager run-id steps)]
      (cp/to-restore-opts checkpoint engine-type))))
@@ -260,11 +260,11 @@
    - manager: GraphCheckpointManager
    - run-id: 执行 ID
    - checkpoint-id: 目标检查点 ID
-   - engine-type: 引擎类型 :pregel 或 :executor（默认 :pregel）
+   - engine-type: 引擎类型 :executor（默认 :executor）
 
    返回: 恢复选项或 nil"
   ([manager run-id checkpoint-id]
-   (goto-and-restore manager run-id checkpoint-id :pregel))
+   (goto-and-restore manager run-id checkpoint-id :executor))
   ([manager run-id checkpoint-id engine-type]
    (when-let [checkpoint (cp/goto-checkpoint manager run-id checkpoint-id)]
      (cp/to-restore-opts checkpoint engine-type))))
@@ -277,31 +277,14 @@
    - run-id: 执行 ID
    - checkpoint-id: 分支起点
    - branch-name: 分支名称
-   - engine-type: 引擎类型 :pregel 或 :executor（默认 :pregel）
+   - engine-type: 引擎类型 :executor（默认 :executor）
 
    返回: {:branch-info :restore-opts}"
   ([manager run-id checkpoint-id branch-name]
-   (fork-and-restore manager run-id checkpoint-id branch-name :pregel))
+   (fork-and-restore manager run-id checkpoint-id branch-name :executor))
   ([manager run-id checkpoint-id branch-name engine-type]
    (when-let [branch-info (cp/create-branch manager run-id checkpoint-id branch-name)]
      (when-let [checkpoint (cp/load-checkpoint manager run-id checkpoint-id)]
        {:branch-info branch-info
         :restore-opts (cp/to-restore-opts checkpoint engine-type)}))))
 
-;; =============================================================================
-;; Pregel 集成便利函数
-;; =============================================================================
-
-(defn save-from-pregel
-  "从 Pregel 状态直接保存 Checkpoint
-
-   参数:
-   - manager: GraphCheckpointManager
-   - run-id: 执行 ID
-   - pregel-state: Pregel 引擎状态
-   - opts: 选项
-
-   返回: checkpoint-id"
-  [manager run-id pregel-state opts]
-  (let [checkpoint (cp/from-pregel-state pregel-state (assoc opts :run-id run-id))]
-    (cp/save-checkpoint manager run-id checkpoint)))
