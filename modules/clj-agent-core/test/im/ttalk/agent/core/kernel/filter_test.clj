@@ -1,84 +1,87 @@
 (ns im.ttalk.agent.core.kernel.filter-test
-  "洋葱式 Filter 执行器测试
+  "Filter 执行器测试
 
-   覆盖：洋葱序(before 正序 / after 逆序) / 请求-响应改写 / 短路(不调 chain) /
-   around(重试、计时 try-finally) / phase 过滤 / order 排序 / 空链。"
+    覆盖：注册顺序 / around 改写 / 短路 / 重试 / chat+tool 并存 / 空链。"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.core.kernel.filter :as flt]))
 
 ;;; ============================================================
-;;; 洋葱序：before 外→内，after 内→外
+;;; 注册顺序即执行顺序
 ;;; ============================================================
 
-(deftest onion-order-test
-  (testing "before 按 order 正序、after 逆序，terminal 居中"
+(deftest registration-order-test
+  (testing "vector 中靠前的 filter 在最外层"
     (let [log (atom [])
-          mk  (fn [name]
-                (flt/create-filter name :chat
-                  :order (case name :a 0 :b 10)
-                  :before (fn [req] (swap! log conj [:before name]) req)
-                  :after  (fn [resp] (swap! log conj [:after name]) resp)))
-          terminal (fn [req] (swap! log conj [:terminal]) {:resp :ok})
-          chain (flt/build-chain [(mk :b) (mk :a)] terminal)  ;; 乱序传入
-          out (chain {:req 1})]
+          a {:name :a
+             :chat (fn [req chain]
+                     (swap! log conj [:pre :a])
+                     (let [resp (chain req)]
+                       (swap! log conj [:post :a])
+                       resp))}
+          b {:name :b
+             :chat (fn [req chain]
+                     (swap! log conj [:pre :b])
+                     (let [resp (chain req)]
+                       (swap! log conj [:post :b])
+                       resp))}
+          terminal (fn [_] {:resp :ok})
+          out ((flt/build-chain (keep :chat [a b]) terminal) {:req 1})]
       (is (= {:resp :ok} out))
-      ;; a(order 0) 最外层：before a → before b → terminal → after b → after a
-      (is (= [[:before :a] [:before :b] [:terminal] [:after :b] [:after :a]]
-             @log)))))
+      ;; a 在外层：pre a → pre b → terminal → post b → post a
+      (is (= [[:pre :a] [:pre :b] [:post :b] [:post :a]] @log)))))
 
 ;;; ============================================================
 ;;; 请求 / 响应改写穿透
 ;;; ============================================================
 
 (deftest rewrite-flows-through-test
-  (testing "before 改 req、after 改 resp，逐层叠加"
-    (let [a (flt/create-filter :a :chat :order 0
-              :before (fn [req] (update req :n inc))
-              :after  (fn [resp] (update resp :tag conj :a)))
-          b (flt/create-filter :b :chat :order 10
-              :before (fn [req] (update req :n * 10))
-              :after  (fn [resp] (update resp :tag conj :b)))
+  (testing "around 可改写 req 和 resp"
+    (let [a {:name :a
+             :chat (fn [req chain]
+                     (let [resp (chain (update req :n inc))]
+                       (update resp :tag conj :a)))}
+          b {:name :b
+             :chat (fn [req chain]
+                     (let [resp (chain (update req :n * 10))]
+                       (update resp :tag conj :b)))}
           terminal (fn [req] {:seen-n (:n req) :tag []})
-          out ((flt/build-chain [a b] terminal) {:n 1})]
-      ;; before: a 先 (1->2)，b 后 (2->20) → terminal 看到 20
+          out ((flt/build-chain (keep :chat [a b]) terminal) {:n 1})]
       (is (= 20 (:seen-n out)))
-      ;; after: b 先 (内层) 再 a → [:b :a]
       (is (= [:b :a] (:tag out))))))
 
 ;;; ============================================================
-;;; 短路：filter 不调 chain
+;;; 短路：around 不调 chain
 ;;; ============================================================
 
 (deftest short-circuit-test
-  (testing "filter 不调用 chain 直接返回 → 下游(含 terminal)不执行"
+  (testing "around 不调用 chain 直接返回 → 下游不执行"
     (let [reached (atom false)
-          guard (flt/create-filter :guard :chat :order 0
-                  :around (fn [_req _chain] {:resp :blocked}))
+          guard {:name :guard
+                 :chat (fn [_req _chain] {:resp :blocked})}
           terminal (fn [_req] (reset! reached true) {:resp :llm})
-          out ((flt/build-chain [guard] terminal) {:req 1})]
+          out ((flt/build-chain (keep :chat [guard]) terminal) {:req 1})]
       (is (= {:resp :blocked} out))
-      (is (false? @reached) "terminal 不应被触达"))))
+      (is (false? @reached)))))
 
 (deftest cache-hit-test
-  (testing "缓存命中走 around：命中不调 chain，未命中调一次并回填"
+  (testing "缓存命中不调 chain，未命中调一次并回填"
     (let [calls (atom 0)
           cache (atom {})
-          cache-filter (flt/create-filter :cache :chat :order 0
-                          :around
-                          (fn [req chain]
-                            (if-let [hit (@cache (:k req))]
-                              {:resp hit :cached true}
-                              (let [resp (chain req)]
-                                (swap! cache assoc (:k req) (:resp resp))
-                                resp))))
+          cache-filter {:name :cache
+                        :chat (fn [req chain]
+                                (if-let [hit (@cache (:k req))]
+                                  {:resp hit :cached true}
+                                  (let [resp (chain req)]
+                                    (swap! cache assoc (:k req) (:resp resp))
+                                    resp)))}
           terminal (fn [req] (swap! calls inc) {:resp (str "v-" (:k req))})
-          chain (flt/build-chain [cache-filter] terminal)
+          chain (flt/build-chain (keep :chat [cache-filter]) terminal)
           r1 (chain {:k "x"})
           r2 (chain {:k "x"})]
       (is (= "v-x" (:resp r1)))
       (is (= "v-x" (:resp r2)))
       (is (true? (:cached r2)))
-      (is (= 1 @calls) "第二次命中缓存，terminal 只跑一次"))))
+      (is (= 1 @calls)))))
 
 ;;; ============================================================
 ;;; around：重试 / 计时
@@ -87,55 +90,64 @@
 (deftest retry-test
   (testing "around 可多次调 chain 实现重试"
     (let [attempts (atom 0)
-          retry (flt/create-filter :retry :chat :order 0
-                  :around
-                  (fn [req chain]
-                    (loop [n 3]
-                      (let [resp (chain req)]
-                        (if (or (:ok resp) (zero? n)) resp (recur (dec n)))))))
+          retry {:name :retry
+                 :chat (fn [req chain]
+                         (loop [n 3]
+                           (let [resp (chain req)]
+                             (if (or (:ok resp) (zero? n)) resp (recur (dec n))))))}
           terminal (fn [_req]
                      (let [a (swap! attempts inc)]
                        (if (>= a 3) {:ok true :a a} {:ok false :a a})))
-          out ((flt/build-chain [retry] terminal) {:req 1})]
+          out ((flt/build-chain (keep :chat [retry]) terminal) {:req 1})]
       (is (true? (:ok out)))
-      (is (= 3 @attempts) "前两次失败重试，第三次成功"))))
+      (is (= 3 @attempts)))))
 
 (deftest around-timing-test
-  (testing "around 可 try/finally 跨整段下游(扁平 fold 做不到)"
+  (testing "around 可 try/finally 跨整段下游"
     (let [finally-ran (atom false)
-          timer (flt/create-filter :timer :chat :order 0
-                  :around
-                  (fn [req chain]
-                    (try (chain req)
-                         (finally (reset! finally-ran true)))))
+          timer {:name :timer
+                 :chat (fn [req chain]
+                         (try (chain req)
+                              (finally (reset! finally-ran true))))}
           terminal (fn [_req] {:resp :ok})
-          out ((flt/build-chain [timer] terminal) {:req 1})]
+          out ((flt/build-chain (keep :chat [timer]) terminal) {:req 1})]
       (is (= {:resp :ok} out))
       (is (true? @finally-ran)))))
 
 ;;; ============================================================
-;;; phase 过滤 / order / 空链
+;;; chat + tool 并存
 ;;; ============================================================
 
-(deftest phase-filter-test
-  (testing "filters-for-phase 只取对应 phase"
-    (let [as [(flt/create-filter :c1 :chat)
-              (flt/create-filter :t1 :tool)
-              (flt/create-filter :c2 :chat)]]
-      (is (= [:c1 :c2] (mapv :name (flt/filters-for-phase as :chat))))
-      (is (= [:t1] (mapv :name (flt/filters-for-phase as :tool)))))))
+(deftest dual-hook-test
+  (testing "一个 filter 同时有 :chat 和 :tool"
+    (let [log (atom [])
+          dual {:name :dual
+                :chat (fn [req chain]
+                        (swap! log conj [:chat-pre])
+                        (let [resp (chain req)]
+                          (swap! log conj [:chat-post])
+                          resp))
+                :tool (fn [req chain]
+                        (swap! log conj [:tool-pre])
+                        (let [resp (chain req)]
+                          (swap! log conj [:tool-post])
+                          resp))}
+          chat-terminal (fn [_] {:resp :chat-ok})
+          tool-terminal (fn [_] {:result :tool-ok :context nil})]
+      ;; chat 链
+      ((flt/build-chain (keep :chat [dual]) chat-terminal) {:req 1})
+      (is (= [[:chat-pre] [:chat-post]] @log))
+      ;; tool 链
+      (reset! log [])
+      ((flt/build-chain (keep :tool [dual]) tool-terminal) {:req 1})
+      (is (= [[:tool-pre] [:tool-post]] @log)))))
+
+;;; ============================================================
+;;; 空链
+;;; ============================================================
 
 (deftest empty-chain-test
   (testing "无 filter 时直接走 terminal"
     (let [terminal (fn [req] {:echo (:req req)})
-          out ((flt/build-chain [] terminal) {:req 42})]
+          out ((flt/build-chain '() terminal) {:req 42})]
       (is (= {:echo 42} out)))))
-
-(deftest order-ties-by-list-test
-  (testing "同 order 按列表序，先出现的在外层"
-    (let [log (atom [])
-          mk (fn [name] (flt/create-filter name :chat :order 0
-                          :before (fn [req] (swap! log conj name) req)))
-          terminal (fn [_] {:resp :ok})]
-      ((flt/build-chain [(mk :first) (mk :second)] terminal) {:req 1})
-      (is (= [:first :second] @log) "first 在外层，before 先跑"))))
