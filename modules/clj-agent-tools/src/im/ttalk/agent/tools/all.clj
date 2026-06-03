@@ -4,7 +4,7 @@
             [im.ttalk.agent.tools.file :as file]
             [im.ttalk.agent.tools.http :as http]
             [im.ttalk.agent.tools.shell :as shell]
-            [im.ttalk.agent.core.kernel.core :as kernel]))
+            [im.ttalk.agent.core.kernel :as kernel]))
 
 (def all-tools
   "所有内置工具（tool vars 列表）"

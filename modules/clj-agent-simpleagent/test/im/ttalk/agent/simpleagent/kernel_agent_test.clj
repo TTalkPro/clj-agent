@@ -5,7 +5,7 @@
   (:require [clojure.test :refer :all]
             [im.ttalk.agent.simpleagent.kernel-agent :as ka]
             [im.ttalk.agent.simpleagent.test-support :as ts]
-            [im.ttalk.agent.core.kernel.core :as kernel]
+            [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.llm.provider :as provider]
             [im.ttalk.agent.core.kernel.service :as service]))

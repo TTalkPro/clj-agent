@@ -5,7 +5,7 @@
 
    使用方法:
    clj -M:mcp-server"
-  (:require [im.ttalk.agent.mcp.server.core :as server])
+  (:require [im.ttalk.agent.mcp.server :as server])
   (:gen-class))
 
 (defn -main

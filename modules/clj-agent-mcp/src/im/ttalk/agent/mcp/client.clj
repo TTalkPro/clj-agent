@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.mcp.client.core
+(ns im.ttalk.agent.mcp.client
   "MCP Client 核心实现
 
    提供 MCP Client 的主要功能：

@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.a2a.server.core
+(ns im.ttalk.agent.a2a.server
   "A2A Server 核心实现
 
    提供 A2A Server 的主要功能：

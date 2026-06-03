@@ -16,7 +16,7 @@
      (when (= :paused (:status result))
        (resume agent \"approved\")))"
   (:refer-clojure :exclude [reset!])
-  (:require [im.ttalk.agent.core.kernel.core :as kernel]
+  (:require [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.tool :as tool]
             [im.ttalk.agent.simpleagent.common :as common]))

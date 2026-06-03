@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.core.kernel.core
+(ns im.ttalk.agent.core.kernel
   "Kernel 核心 - 中央编排器
 
    Kernel 提供三类 API：

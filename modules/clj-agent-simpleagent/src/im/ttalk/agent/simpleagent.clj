@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.simpleagent.core
+(ns im.ttalk.agent.simpleagent
   "SimpleAgent 便捷入口
 
    根据 :mode 分发创建不同类型的 Agent：

@@ -2,7 +2,7 @@
   "SimpleAgent 公共构建逻辑
 
    提供 kernel 构建、工具执行、结果处理等共享功能。"
-  (:require [im.ttalk.agent.core.kernel.core :as kernel]
+  (:require [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]))
 

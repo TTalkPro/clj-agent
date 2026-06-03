@@ -5,7 +5,7 @@
             [im.ttalk.agent.core.kernel.tool :as tool :refer [deftool]]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.llm.response :as response]
-            [im.ttalk.agent.core.kernel.core :as core]))
+            [im.ttalk.agent.core.kernel :as core]))
 
 ;; ============================================================
 ;; Phase 1: Context 创建和变量操作

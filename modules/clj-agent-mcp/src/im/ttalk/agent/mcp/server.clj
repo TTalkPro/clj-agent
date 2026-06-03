@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.mcp.server.core
+(ns im.ttalk.agent.mcp.server
   "MCP Server 核心实现
 
    提供 MCP Server 的主要功能：

@@ -9,7 +9,7 @@
    使用示例：
 
    (require '[im.ttalk.agent.llm.kernel.chat :as chat])
-   (require '[im.ttalk.agent.core.kernel.core :as kernel])
+   (require '[im.ttalk.agent.core.kernel :as kernel])
 
    ;; 方式 1: 使用 create-service 创建 service 并传给 Kernel
    (def service (chat/create-service

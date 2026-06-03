@@ -14,7 +14,7 @@
    (chat agent \"你好\")
    ;; => {:text \"...\" :tool-calls-made [...]}"
   (:refer-clojure :exclude [reset!])
-  (:require [im.ttalk.agent.core.kernel.core :as kernel]
+  (:require [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.simpleagent.common :as common]))
 
