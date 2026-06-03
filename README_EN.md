@@ -204,7 +204,7 @@ Automatically pauses when encountering tools marked as `:sensitive`, awaiting hu
 Use the Kernel directly for maximum flexibility:
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.core :as kernel])
+(require '[im.ttalk.agent.core.kernel :as kernel])
 (require '[im.ttalk.agent.core.kernel.filter :as filters])
 (require '[im.ttalk.agent.llm.kernel.chat :as chat])
 
@@ -597,7 +597,7 @@ Model Context Protocol server/client implementation:
 ;; clj -M:mcp-server
 
 ;; Client connection
-(require '[im.ttalk.agent.mcp.client.core :as mcp-client])
+(require '[im.ttalk.agent.mcp.client :as mcp-client])
 
 (def client (mcp-client/connect {:transport :stdio
                                   :command ["clj" "-M:mcp-server"]}))
