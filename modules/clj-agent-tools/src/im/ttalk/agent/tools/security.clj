@@ -7,8 +7,7 @@
    - 命令安全检查
    - 域名白名单"
   (:require [clojure.string :as str]
-            [im.ttalk.agent.tools.helpers :as helpers]
-            [im.ttalk.agent.core.kernel.filter :as kf])
+            [im.ttalk.agent.tools.helpers :as helpers])
   (:import [java.net URI]))
 
 ;; ============================================================
@@ -115,28 +114,26 @@
    - policy: 安全策略（由 create-security-policy 创建）
    - opts:   可选参数 {:order 10}（兼容旧 :priority）
 
-   返回: filter 定义 map（可直接传给 kernel/add-filter）"
+    返回: filter 定义 map（可直接放入 build-kernel 的 :filters 向量）"
   ([policy] (create-security-filter policy {}))
-  ([policy opts]
-   (kf/create-filter :security :tool
-     :order (or (:order opts) (:priority opts) 10)
-     :around
-     (fn [req chain]
-       (let [tool-name (get-in req [:function :name])
-             args (:args req)
-             tool-check (check-tool-allowed policy tool-name)
-             block (fn [reason] {:result (str "安全策略阻止: " reason) :context (:context req)})]
-         (if-not (:allowed tool-check)
-           (block (:reason tool-check))
-           (let [{:keys [path command url]} (extract-security-args tool-name args)
-                 path-check (check-path-allowed policy path)
-                 cmd-check (check-command-allowed policy command)
-                 url-check (check-url-allowed policy url)]
-             (cond
-               (not (:allowed path-check)) (block (:reason path-check))
-               (not (:allowed cmd-check))  (block (:reason cmd-check))
-               (not (:allowed url-check))  (block (:reason url-check))
-               :else (chain req)))))))))
+  ([policy _opts]
+   {:name :security
+    :tool (fn [req chain]
+            (let [tool-name (get-in req [:function :name])
+                  args (:args req)
+                  tool-check (check-tool-allowed policy tool-name)
+                  block (fn [reason] {:result (str "安全策略阻止: " reason) :context (:context req)})]
+              (if-not (:allowed tool-check)
+                (block (:reason tool-check))
+                (let [{:keys [path command url]} (extract-security-args tool-name args)
+                      path-check (check-path-allowed policy path)
+                      cmd-check (check-command-allowed policy command)
+                      url-check (check-url-allowed policy url)]
+                  (cond
+                    (not (:allowed path-check)) (block (:reason path-check))
+                    (not (:allowed cmd-check))  (block (:reason cmd-check))
+                    (not (:allowed url-check))  (block (:reason url-check))
+                    :else (chain req))))))}))
 
 ;; ============================================================
 ;; 预设安全模式

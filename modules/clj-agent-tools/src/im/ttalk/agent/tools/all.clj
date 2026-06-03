@@ -13,13 +13,12 @@
                http/all-tools
                shell/all-tools)))
 
-(defn add-all-tools
-  "将所有内置工具添加到 Kernel Builder
+(defn all-tools-into
+  "将所有内置工具合入 Kernel 构建配置
 
-   用法:
-   (-> (kernel/create-kernel-builder)
-       (add-all-tools)
-       (kernel/add-service my-service)
-       (kernel/build-kernel))"
-  [builder]
-  (kernel/add-tools builder all-tools))
+    用法:
+    (kernel/build-kernel
+      (-> {:service my-service}
+          (all-tools-into)))"
+  [opts]
+  (update opts :tools (fn [ts] (into (or ts []) all-tools))))

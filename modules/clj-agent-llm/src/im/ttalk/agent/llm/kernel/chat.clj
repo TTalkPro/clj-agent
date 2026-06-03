@@ -19,11 +19,10 @@
                    :base-url \"https://open.bigmodel.cn/api/anthropic\"
                    :api-key (System/getenv \"ZHIPU_API_KEY\")}))
 
-   (def app-kernel
-     (-> (kernel/create-kernel-builder)
-         (kernel/add-tools my-tools)
-         (kernel/add-service service)
-         (kernel/build-kernel)))"
+    (def app-kernel
+      (kernel/build-kernel
+        {:service service
+         :tools   my-tools}))"
   (:require [im.ttalk.agent.core.kernel.service :as service]
             [im.ttalk.agent.core.llm.provider :as provider]
             [im.ttalk.agent.llm.wire.openai :as wire-openai]

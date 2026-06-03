@@ -117,10 +117,10 @@
                   {:provider provider
                    :model "glm-4.7"
                    :max-tokens 1024})
-        app-kernel (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
-                       (kernel/add-service service)
-                       (kernel/add-tools test-tools)
-                       (kernel/build-kernel))]
+        app-kernel (kernel/build-kernel
+                     {:service  service
+                      :tools    test-tools
+                      :settings {:max-tool-iterations 5}})]
 
     ;; 1.1 Query API
     (test-case "Query API"
@@ -301,24 +301,29 @@
                    :model "glm-4.7"
                    :max-tokens 1024})
 
-        ;; 创建自定义 Filter（tool 链 before/after + chat 链 before/after）
+        ;; 创建自定义 Filter（around 模式，tool 和 chat 可并存）
         tool-filter
-        (filters/create-filter :test-tool :tool
-          :before (fn [req] (swap! filter-log conj {:type :pre-invocation :fn (get-in req [:function :name])}) req)
-          :after  (fn [resp] (swap! filter-log conj {:type :post-invocation}) resp))
+        {:name :test-tool
+         :tool (fn [req chain]
+                 (swap! filter-log conj {:type :pre-invocation :fn (get-in req [:function :name])})
+                 (let [resp (chain req)]
+                   (swap! filter-log conj {:type :post-invocation})
+                   resp))}
 
         chat-filter
-        (filters/create-filter :test-chat :chat
-          :before (fn [req] (swap! filter-log conj {:type :pre-chat}) req)
-          :after  (fn [resp] (swap! filter-log conj {:type :post-chat}) resp))
+        {:name :test-chat
+         :chat (fn [req chain]
+                 (swap! filter-log conj {:type :pre-chat})
+                 (let [resp (chain req)]
+                   (swap! filter-log conj {:type :post-chat})
+                   resp))}
 
         filtered-kernel
-        (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
-            (kernel/add-service service)
-            (kernel/add-tools test-tools)
-            (kernel/add-filter tool-filter)
-            (kernel/add-filter chat-filter)
-            (kernel/build-kernel))]
+        (kernel/build-kernel
+          {:service  service
+           :tools    test-tools
+           :filters  [chat-filter tool-filter]
+           :settings {:max-tool-iterations 5}})]
 
     ;; 5.1 Filter 触发验证
     (test-case "Filter 链正确触发"

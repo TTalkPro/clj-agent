@@ -3,13 +3,12 @@
             [im.ttalk.agent.tools.security :as security]))
 
 (defn- run-filter
-  "执行 security filter 的 around。
-   chain 被调用(放行)时返回 {:result :passed}，未被调用(阻止)时返回阻止结果。
-   返回 {:passed? bool :result <:result 值>}。"
+  "执行 security filter 的 :tool 函数。
+    chain 被调用(放行)时返回 {:result :passed}，未被调用(阻止)时返回阻止结果。"
   [filter tool-name args]
   (let [passed (atom false)
         chain (fn [req] (reset! passed true) {:result :passed :context (:context req)})
-        out ((:around filter)
+        out ((:tool filter)
              {:function {:name tool-name} :args args :context nil}
              chain)]
     {:passed? @passed :result (:result out)}))
@@ -22,22 +21,16 @@
 
   (testing "policy with blocked tools"
     (let [policy (security/create-security-policy
-                   {:blocked-tools #{:execute-command}})]
+                    {:blocked-tools #{:execute-command}})]
       (is (contains? (:blocked-tools policy) :execute-command)))))
 
 (deftest security-filter-structure-test
-  (testing "create-security-filter returns an filter definition map"
+  (testing "create-security-filter returns a filter definition map"
     (let [policy (security/create-security-policy {})
           a (security/create-security-filter policy)]
       (is (= :security (:name a)))
-      (is (= :tool (:phase a)))
-      (is (fn? (:around a)))
-      (is (= 10 (:order a)))))
-
-  (testing "custom order (兼容旧 :priority)"
-    (let [policy (security/create-security-policy {})]
-      (is (= 50 (:order (security/create-security-filter policy {:order 50}))))
-      (is (= 50 (:order (security/create-security-filter policy {:priority 50})))))))
+      (is (fn? (:tool a)))
+      (is (nil? (:chat a)) "只有 tool 没有 chat"))))
 
 (deftest security-filter-tool-blocking-test
   (testing "blocked tool is rejected"
