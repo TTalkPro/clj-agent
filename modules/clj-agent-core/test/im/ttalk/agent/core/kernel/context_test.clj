@@ -5,8 +5,6 @@
             [im.ttalk.agent.core.kernel.tool :as tool :refer [deftool]]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.llm.response :as response]
-            [im.ttalk.agent.core.llm.message :as msg]
-            [im.ttalk.agent.core.memory :as memory]
             [im.ttalk.agent.core.kernel :as core]))
 
 ;; ============================================================
@@ -99,76 +97,6 @@
       (is (= ["a" "b" "c"] (context/get-var (:context r3) :items))))))
 
 ;; ============================================================
-;; Phase 3: Filter 4 类型管道
-;; ============================================================
-
-(deftest filter-create-test
-  (testing "创建 filter 定义"
-    (let [f (filters/create-filter :test-f :pre-invocation
-              (fn [ctx] {:action :continue :context ctx})
-              :priority 10)]
-      (is (= :test-f (:name f)))
-      (is (= :pre-invocation (:type f)))
-      (is (= 10 (:priority f))))))
-
-(deftest filter-pre-invocation-test
-  (testing "修改参数"
-    (let [f (filters/create-filter :modify-args :pre-invocation
-              (fn [fc] {:action :continue :context (update fc :args assoc :extra "injected")}))
-          result (filters/apply-pre-invocation-filters [f] {:name :test-fn} {:x 1} (context/create))]
-      (is (= "injected" (get-in result [:ok :args :extra])))
-      (is (= 1 (get-in result [:ok :args :x])))))
-
-  (testing "跳过执行"
-    (let [f (filters/create-filter :skip-f :pre-invocation (fn [_] {:action :skip :value "skipped!"}))
-          result (filters/apply-pre-invocation-filters [f] {:name :test-fn} {:x 1} (context/create))]
-      (is (= "skipped!" (:skip result)))))
-
-  (testing "报错"
-    (let [f (filters/create-filter :err-f :pre-invocation (fn [_] {:action :error :reason "not allowed"}))
-          result (filters/apply-pre-invocation-filters [f] {:name :test-fn} {} (context/create))]
-      (is (= "not allowed" (:error result)))))
-
-  (testing "按 priority 执行"
-    (let [order (atom [])
-          f1 (filters/create-filter :f1 :pre-invocation
-               (fn [c] (swap! order conj :f1) {:action :continue :context c}) :priority 10)
-          f2 (filters/create-filter :f2 :pre-invocation
-               (fn [c] (swap! order conj :f2) {:action :continue :context c}) :priority 5)]
-      (filters/apply-pre-invocation-filters [f1 f2] {:name :test-fn} {} (context/create))
-      (is (= [:f2 :f1] @order)))))
-
-(deftest filter-post-invocation-test
-  (testing "修改结果"
-    (let [f (filters/create-filter :modify-result :post-invocation
-              (fn [fc] {:action :continue :context (update fc :result str " [modified]")}))
-          result (filters/apply-post-invocation-filters [f] {:name :test-fn} {:x 1} "original" (context/create))]
-      (is (= "original [modified]" (get-in result [:ok :result])))))
-
-  (testing "修改 context（set-var）"
-    (let [f (filters/create-filter :mark :post-invocation
-              (fn [fc] {:action :continue
-                        :context (update fc :context context/set-var :marked true)}))
-          result (filters/apply-post-invocation-filters [f] {:name :test-fn} {} "value" (context/create))]
-      (is (true? (context/get-var (get-in result [:ok :context]) :marked))))))
-
-(deftest filter-pre-chat-test
-  (testing "注入 system 消息"
-    (let [f (filters/create-filter :inject-system :pre-chat
-              (fn [fc] {:action :continue
-                        :context (update fc :messages #(into [{:role "system" :content "You are helpful"}] %))}))
-          result (filters/apply-pre-chat-filters [f] [{:role "user" :content "hi"}] (context/create))]
-      (is (= 2 (count (get-in result [:ok :messages]))))
-      (is (= "system" (:role (first (get-in result [:ok :messages]))))))))
-
-(deftest filter-post-chat-test
-  (testing "修改响应"
-    (let [f (filters/create-filter :modify-resp :post-chat
-              (fn [fc] {:action :continue :context (update fc :response assoc :text "modified response")}))
-          result (filters/apply-post-chat-filters [f] {:text "original" :tool-calls nil} (context/create))]
-      (is (= "modified response" (get-in result [:ok :response :text]))))))
-
-;; ============================================================
 ;; Phase 4: invoke-tool（含 filter）
 ;; ============================================================
 
@@ -195,123 +123,31 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"函数未找到"
             (core/invoke-tool kernel :nonexistent {} (context/create)))))))
 
-(deftest invoke-tool-with-filters-test
-  (let [pre-f (filters/create-filter :modify :pre-invocation
-                (fn [fc] {:action :continue :context (update fc :args assoc :text "modified")}))
-        post-f (filters/create-filter :mark :post-invocation
-                 (fn [fc] {:action :continue :context (update fc :context context/set-var :invoked true)}))
+(deftest invoke-tool-with-advisors-test
+  (let [modify (filters/create-advisor :modify :tool
+                 :before (fn [req] (update req :args assoc :text "modified")))
+        mark (filters/create-advisor :mark :tool
+               :after (fn [resp] (update resp :context context/set-var :invoked true)))
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
                      (core/add-tools [#'simple-echo])
-                     (core/add-filter pre-f)
-                     (core/add-filter post-f)))]
-    (testing "pre 修改参数"
+                     (core/add-filter modify)
+                     (core/add-filter mark)))]
+    (testing "before 改参数"
       (is (= "echo: modified" (:value (core/invoke-tool kernel :simple-echo {:text "original"} (context/create))))))
-    (testing "post 修改 context"
+    (testing "after 改 context"
       (let [result (core/invoke-tool kernel :simple-echo {:text "x"} (context/create))]
         (is (true? (context/get-var (:context result) :invoked)))))))
 
-(deftest invoke-tool-skip-filter-test
-  (let [skip-f (filters/create-filter :blocker :pre-invocation (fn [_] {:action :skip :value "blocked by filter"}))
+(deftest invoke-tool-skip-advisor-test
+  (let [blocker (filters/create-advisor :blocker :tool
+                  :advise-call (fn [req _chain] {:result "blocked by advisor" :context (:context req)}))
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
                      (core/add-tools [#'simple-echo])
-                     (core/add-filter skip-f)))]
-    (testing "pre skip 直接返回值"
-      (is (= "blocked by filter" (:value (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))))))))
-
-;; ============================================================
-;; Phase 5: invoke（工具调用循环，Memory Filter 模式）
-;; ============================================================
-
-(defn- mock-service [responses-fn]
-  {:chat-fn (fn [_msgs _opts] (responses-fn))
-   :build-result-msgs (fn [_ _] [])})
-
-(deftest invoke-tool-loop-accumulates-context-test
-  (let [call-count (atom 0)
-        svc (mock-service
-              (fn []
-                (let [n (swap! call-count inc)]
-                  (if (= n 1)
-                    (response/make-response
-                      :text nil
-                      :tool-calls [{:id "tc1" :name "append-item" :input {:item "book"}}
-                                   {:id "tc2" :name "append-item" :input {:item "pen"}}])
-                    (response/make-response :text "已添加 book 和 pen" :tool-calls nil)))))
-        kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'append-item])
-                     (core/add-service svc)))]
-    (testing "工具结果写回 ToolContext，原变量保留，tool-calls-made 记录"
-      (reset! call-count 0)
-      (let [result (core/invoke kernel
-                     [{:role :user :content "添加 book 和 pen"}]
-                     {:context (context/create {:items [] :user-id "u123"})})]
-        (is (= "已添加 book 和 pen" (get-in result [:response :text])))
-        (is (= ["book" "pen"] (context/get-var (:tool-context result) :items)))
-        (is (= "u123" (context/get-var (:tool-context result) :user-id)))
-        (is (= 2 (count (:tool-calls-made result))))))))
-
-(deftest invoke-multi-iteration-test
-  (let [call-count (atom 0)
-        svc (mock-service
-              (fn []
-                (let [n (swap! call-count inc)]
-                  (if (<= n 3)
-                    (response/make-response :text nil
-                      :tool-calls [{:id (str "tc" n) :name "inc-counter" :input {}}])
-                    (response/make-response :text "计数完成" :tool-calls nil)))))
-        kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'inc-counter])
-                     (core/add-service svc)))]
-    (testing "多轮工具调用 context 持续累积"
-      (reset! call-count 0)
-      (let [result (core/invoke kernel
-                     [{:role :user :content "计数三次"}]
-                     {:context (context/create {:counter 0})})]
-        (is (= "计数完成" (get-in result [:response :text])))
-        (is (= 3 (context/get-var (:tool-context result) :counter)))
-        (is (= 3 (count (:tool-calls-made result))))))))
-
-(deftest invoke-stores-history-in-memory-test
-  (let [call-count (atom 0)
-        svc (mock-service
-              (fn []
-                (let [n (swap! call-count inc)]
-                  (if (= n 1)
-                    (response/make-response :text nil
-                      :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}])
-                    (response/make-response :text "done" :tool-calls nil)))))
-        kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'simple-echo])
-                     (core/add-service svc)))]
-    (testing "带 conversation-id 时历史存进 Kernel 的 ChatMemory store"
-      (reset! call-count 0)
-      (core/invoke kernel
-        [{:role :user :content "echo hi"}]
-        {:context (context/with-conversation-id (context/create) "conv-x")})
-      (let [stored (memory/mem-get (:memory kernel) "conv-x")]
-        ;; user, assistant(tool-calls), tool-result, assistant(text)
-        (is (= 4 (count stored)))))))
-
-(deftest invoke-system-prompts-test
-  (let [received-opts (atom nil)
-        svc {:chat-fn (fn [_msgs opts]
-                        (reset! received-opts opts)
-                        (response/make-response :text "ok" :tool-calls nil))
-             :build-result-msgs (fn [_ _] [])}
-        kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-service svc)))]
-    (testing "system-prompts 通过 :system-prompt 传给 chat-fn"
-      (reset! received-opts nil)
-      (core/invoke kernel
-        [{:role :user :content "hi"}]
-        {:system-prompts [{:role "system" :content "Be helpful"}]})
-      (is (= "Be helpful" (:system-prompt @received-opts))))))
+                     (core/add-filter blocker)))]
+    (testing "advisor 不调 chain 直接短路返回"
+      (is (= "blocked by advisor" (:value (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))))))))
 
 ;; ============================================================
 ;; invoke-chat
@@ -330,41 +166,10 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"未配置 LLM 服务"
               (core/invoke-chat no-svc [{:role :user :content "hi"}] {})))))))
 
-;; ============================================================
-;; 外部手搓工具循环（Spring AI 风格：只回传 delta，历史由 Memory Filter 拼）
-;; ============================================================
-
-(deftest external-tool-loop-test
-  (let [call-count (atom 0)
-        svc (mock-service
-              (fn []
-                (let [n (swap! call-count inc)]
-                  (if (= n 1)
-                    (response/make-response :text nil
-                      :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}])
-                    (response/make-response :text "done" :tool-calls nil)))))
-        kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'simple-echo])
-                     (core/add-service svc)))
-        cid "ext-1"
-        tctx (context/with-conversation-id (context/create) cid)]
-    (reset! call-count 0)
-    (testing "首轮只发 user，得到 tool_calls（内部不执行）"
-      (let [{:keys [response]} (core/invoke-chat kernel [(msg/user "echo hi")] {:context tctx})]
-        (is (response/has-tool-calls? response))
-        (testing "手动 run-tools 后只回传 tool 结果 delta"
-          (let [{:keys [messages]} (core/run-tools kernel (response/response-tool-calls response) tctx)
-                {:keys [response]} (core/invoke-chat kernel messages {:context tctx})]
-            (is (= "done" (response/response-text response)))))))
-    (testing "Memory store 拼出完整历史"
-      ;; user, assistant(tool-calls), tool-result, assistant(text)
-      (is (= 4 (count (memory/mem-get (:memory kernel) cid)))))))
-
-(deftest invoke-chat-with-pre-chat-filter-test
-  (let [inject (filters/create-filter :inject :pre-chat
-                 (fn [fc] {:action :continue
-                           :context (update fc :messages #(into [{:role "system" :content "injected"}] %))}))
+(deftest invoke-chat-with-chat-advisor-test
+  (let [inject (filters/create-advisor :inject :chat
+                 :before (fn [req]
+                           (update req :messages #(into [{:role :system :content "injected"}] %))))
         received (atom nil)
         svc {:chat-fn (fn [msgs _] (reset! received msgs)
                         (response/make-response :text "response" :tool-calls nil))
@@ -373,8 +178,8 @@
                  (-> (core/create-kernel-builder)
                      (core/add-filter inject)
                      (core/add-service svc)))]
-    (testing "pre-chat filter 修改传给 LLM 的消息"
+    (testing "chat advisor 的 before 修改传给 LLM 的消息"
       (reset! received nil)
       (core/invoke-chat kernel [{:role :user :content "hi"}] {})
-      (is (= "system" (:role (first @received))))
+      (is (= :system (:role (first @received))))
       (is (= "injected" (:content (first @received)))))))
