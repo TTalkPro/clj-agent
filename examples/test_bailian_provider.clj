@@ -7,7 +7,7 @@
    环境变量:
      BAILIAN_API_KEY - 阿里云百炼 API Key（必需）"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.core :as kernel]
+            [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]
             [im.ttalk.agent.llm.provider.bailian :as bailian]

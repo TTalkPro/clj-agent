@@ -8,7 +8,7 @@
    需要设置环境变量: ZHIPU_API_KEY"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
             [im.ttalk.agent.core.kernel.tool :as tool]
-            [im.ttalk.agent.core.kernel.core :as kernel]
+            [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]
             [im.ttalk.agent.llm.provider.anthropic :as anthropic]

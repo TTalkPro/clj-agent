@@ -15,7 +15,7 @@
 
    注意: Zhipu 免费套餐有速率限制，测试间加了等待间隔。"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.core :as kernel]
+            [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.process.builder :as builder]

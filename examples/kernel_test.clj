@@ -5,7 +5,7 @@
 
    注意: Zhipu 免费套餐有严格速率限制，建议每次调用间隔 10+ 秒。"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.core :as kernel]
+            [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]

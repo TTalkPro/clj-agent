@@ -11,7 +11,7 @@
 
    环境变量: ZHIPU_API_KEY"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.core :as kernel]
+            [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.process.builder :as builder]
             [im.ttalk.agent.core.kernel.process.runtime :as runtime]
