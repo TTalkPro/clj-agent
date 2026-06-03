@@ -14,14 +14,11 @@
             [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.core.kernel.process.builder :as builder]
-            [im.ttalk.agent.core.kernel.process.runtime :as runtime]
             [im.ttalk.agent.llm.kernel.chat :as chat]
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]
             [im.ttalk.agent.llm.provider.anthropic :as anthropic]
             [im.ttalk.agent.simpleagent :as ka]
-            [im.ttalk.agent.simpleagent :as pa]
-            [clojure.core.async :as async]))
+            [im.ttalk.agent.simpleagent :as pa]))
 
 ;;; ============================================================
 ;;; Provider 配置
@@ -152,19 +149,7 @@
 
     (wait api-delay)
 
-    ;; 1.4 invoke 工具调用
-    (test-case "invoke 工具调用循环"
-      (fn []
-        (let [result (kernel/invoke app-kernel
-                       [{:role "user" :content "北京天气怎么样？"}]
-                       {:context (ctx/create)})]
-          (assert (some? (get-in result [:response :text])))
-          (println (str "\n      工具: " (mapv :name (:tool-calls-made result))))
-          (println (str "      回复: " (subs (get-in result [:response :text]) 0
-                                             (min 50 (count (get-in result [:response :text]))))))
-          true)))
-
-    (wait api-delay)
+    ;; 注：完整「工具调用循环」已下沉 SimpleAgent（见 Example 4），kernel 只提供 invoke-chat/invoke-tool 原语
 
     ;; 1.5 多轮对话
     (test-case "invoke-chat 多轮对话"
@@ -180,204 +165,6 @@
                    {:context (ctx/create)})]
           (assert (some? (get-in r2 [:response :text])))
           (println (str "\n      回复: " (get-in r2 [:response :text])))
-          true)))))
-
-;;; ============================================================
-;;; Example 2: Process Framework 测试
-;;; ============================================================
-
-(defn run-process-tests [provider provider-name]
-  (separator (str "Example 2: Process Framework (" provider-name ")"))
-
-  (let [service (chat/create-service
-                  {:provider provider
-                   :model "glm-4.7"
-                   :max-tokens 1024})
-        app-kernel (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
-                       (kernel/add-service service)
-                       (kernel/add-tools test-tools)
-                       (kernel/build-kernel))]
-
-    ;; 2.1 线性流程
-    (test-case "线性流程 A → B → C"
-      (fn []
-        (let [process-spec
-              (-> (builder/builder :linear)
-                  (builder/add-step
-                    {:id :step-a
-                     :on-activate (fn [inputs _state ctx]
-                                    {:events [{:name :a-done :data (str (:input inputs) "→A")}]})})
-                  (builder/add-step
-                    {:id :step-b
-                     :on-activate (fn [inputs _state ctx]
-                                    {:events [{:name :b-done :data (str (:input inputs) "→B")}]})})
-                  (builder/add-step
-                    {:id :step-c
-                     :on-activate (fn [inputs _state ctx]
-                                    {:context (ctx/set-var ctx :result (:input inputs))})})
-                  (builder/on-event :start :step-a :input)
-                  (builder/on-event :a-done :step-b :input)
-                  (builder/on-event :b-done :step-c :input)
-                  (builder/set-initial-event :start "X")
-                  (builder/build))
-              result (runtime/run-process process-spec {:timeout-ms 10000})]
-          (assert (= :completed (:status result)))
-          (assert (= "X→A→B" (ctx/get-var (:context result) :result)))
-          true)))
-
-    ;; 2.2 Fan-out/Fan-in
-    (test-case "Fan-out/Fan-in 并行"
-      (fn []
-        (let [process-spec
-              (-> (builder/builder :fan)
-                  (builder/add-step
-                    {:id :dispatcher
-                     :on-activate (fn [inputs _state _ctx]
-                                    {:events [{:name :to-a :data "A"}
-                                              {:name :to-b :data "B"}]})})
-                  (builder/add-step
-                    {:id :branch-a
-                     :on-activate (fn [inputs _state _ctx]
-                                    {:events [{:name :a-done :data (str "处理" (:input inputs))}]})})
-                  (builder/add-step
-                    {:id :branch-b
-                     :on-activate (fn [inputs _state _ctx]
-                                    {:events [{:name :b-done :data (str "处理" (:input inputs))}]})})
-                  (builder/add-step
-                    {:id :aggregator
-                     :required-inputs [:from-a :from-b]
-                     :on-activate (fn [inputs _state ctx]
-                                    {:context (ctx/set-var ctx :merged [(:from-a inputs) (:from-b inputs)])})})
-                  (builder/on-event :start :dispatcher :input)
-                  (builder/on-event :to-a :branch-a :input)
-                  (builder/on-event :to-b :branch-b :input)
-                  (builder/on-event :a-done :aggregator :from-a)
-                  (builder/on-event :b-done :aggregator :from-b)
-                  (builder/set-initial-event :start nil)
-                  (builder/build))
-              result (runtime/run-process process-spec {:timeout-ms 10000})]
-          (assert (= :completed (:status result)))
-          (assert (= 2 (count (ctx/get-var (:context result) :merged))))
-          true)))
-
-    ;; 2.3 暂停/恢复
-    (test-case "Pause/Resume"
-      (fn []
-        (let [process-spec
-              (-> (builder/builder :pause-demo)
-                  (builder/add-step
-                    {:id :work
-                     :on-activate (fn [inputs _state _ctx]
-                                    {:pause {:reason "需要审批"}})
-                     :on-resume (fn [decision state ctx]
-                                  {:context (ctx/set-var ctx :decision decision)})})
-                  (builder/on-event :start :work :input)
-                  (builder/set-initial-event :start "go")
-                  (builder/build))
-              paused (runtime/run-process process-spec {:timeout-ms 10000})]
-          (assert (= :paused (:status paused)))
-          (let [result (runtime/run-resume paused "approved")]
-            (assert (= :completed (:status result)))
-            (assert (= "approved" (ctx/get-var (:context result) :decision))))
-          true)))
-
-    ;; 2.4 Process 内调用 LLM
-    (test-case "Process 内 LLM 调用"
-      (fn []
-        (let [process-spec
-              (-> (builder/builder :llm-process)
-                  (builder/add-step
-                    {:id :chat
-                     :on-activate (fn [inputs _state ctx]
-                                    (let [{:keys [response context]}
-                                          (kernel/invoke-chat app-kernel
-                                            [{:role "user" :content (:input inputs)}]
-                                            {:context ctx})]
-                                      {:context (ctx/set-var context :answer (:text response))}))})
-                  (builder/on-event :start :chat :input)
-                  (builder/set-initial-event :start "1+2=?")
-                  (builder/build))
-              result (runtime/run-process process-spec {:timeout-ms 30000})]
-          (assert (= :completed (:status result)))
-          (println (str "\n      LLM回复: " (ctx/get-var (:context result) :answer)))
-          true)))))
-
-;;; ============================================================
-;;; Example 3: 外部事件测试
-;;; ============================================================
-
-(defn run-external-event-tests [provider provider-name]
-  (separator (str "Example 3: External Events (" provider-name ")"))
-
-  ;; 3.1 基本外部事件
-  (test-case "外部事件发送/接收"
-    (fn []
-      (let [received (atom nil)
-            process-spec
-            (-> (builder/builder :ext-demo)
-                (builder/add-step
-                  {:id :handler
-                   :on-activate (fn [inputs _state ctx]
-                                  (reset! received (:input inputs))
-                                  {:terminate true
-                                   :context (ctx/set-var ctx :got (:input inputs))})})
-                (builder/on-external-event :user-input :handler :input)
-                (builder/build))
-            handle (runtime/start-process-async process-spec {})]
-        (Thread/sleep 100)
-        (runtime/send-event handle :user-input {:text "hello"})
-        (let [result (runtime/wait-for-completion handle 5000)]
-          (assert (= :completed (:status result)))
-          (assert (= {:text "hello"} @received))
-          true))))
-
-  ;; 3.2 多个外部事件
-  (test-case "多个外部事件"
-    (fn []
-      (let [messages (atom [])
-            process-spec
-            (-> (builder/builder :multi-ext)
-                (builder/add-step
-                  {:id :collector
-                   :init (fn [_] {:count 0})
-                   :on-activate (fn [inputs state ctx]
-                                  (swap! messages conj (:input inputs))
-                                  (let [n (inc (:count state))]
-                                    (if (>= n 3)
-                                      {:terminate true
-                                       :state {:count n}
-                                       :context (ctx/set-var ctx :total n)}
-                                      {:state {:count n}})))})
-                (builder/on-external-event :msg :collector :input)
-                (builder/build))
-            handle (runtime/start-process-async process-spec {})]
-        (Thread/sleep 100)
-        (runtime/send-event handle :msg "A")
-        (Thread/sleep 50)
-        (runtime/send-event handle :msg "B")
-        (Thread/sleep 50)
-        (runtime/send-event handle :msg "C")
-        (let [result (runtime/wait-for-completion handle 5000)]
-          (assert (= :completed (:status result)))
-          (assert (= 3 (count @messages)))
-          true))))
-
-  ;; 3.3 stop-process
-  (test-case "stop-process 停止运行"
-    (fn []
-      (let [process-spec
-            (-> (builder/builder :stop-demo)
-                (builder/add-step
-                  {:id :wait
-                   :on-activate (fn [inputs _state ctx]
-                                  {:context ctx})}) ;; 不产出事件，等待外部
-                (builder/on-external-event :input :wait :input)
-                (builder/build))
-            handle (runtime/start-process-async process-spec {})]
-        (Thread/sleep 100)
-        (runtime/stop-process handle)
-        (let [result (runtime/wait-for-completion handle 2000)]
-          (assert (= :stopped (:status result)))
           true)))))
 
 ;;; ============================================================
@@ -514,39 +301,23 @@
                    :model "glm-4.7"
                    :max-tokens 1024})
 
-        ;; 创建自定义 Filter
-        pre-inv-filter
-        (filters/create-filter :test-pre-inv :pre-invocation
-          (fn [ctx]
-            (swap! filter-log conj {:type :pre-invocation :fn (:name (:function ctx))})
-            {:action :continue :context ctx}))
+        ;; 创建自定义 Advisor（tool 链 before/after + chat 链 before/after）
+        tool-advisor
+        (filters/create-advisor :test-tool :tool
+          :before (fn [req] (swap! filter-log conj {:type :pre-invocation :fn (get-in req [:function :name])}) req)
+          :after  (fn [resp] (swap! filter-log conj {:type :post-invocation}) resp))
 
-        post-inv-filter
-        (filters/create-filter :test-post-inv :post-invocation
-          (fn [ctx]
-            (swap! filter-log conj {:type :post-invocation :fn (:name (:function ctx))})
-            {:action :continue :context ctx}))
-
-        pre-chat-filter
-        (filters/create-filter :test-pre-chat :pre-chat
-          (fn [ctx]
-            (swap! filter-log conj {:type :pre-chat})
-            {:action :continue :context ctx}))
-
-        post-chat-filter
-        (filters/create-filter :test-post-chat :post-chat
-          (fn [ctx]
-            (swap! filter-log conj {:type :post-chat})
-            {:action :continue :context ctx}))
+        chat-advisor
+        (filters/create-advisor :test-chat :chat
+          :before (fn [req] (swap! filter-log conj {:type :pre-chat}) req)
+          :after  (fn [resp] (swap! filter-log conj {:type :post-chat}) resp))
 
         filtered-kernel
         (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
             (kernel/add-service service)
             (kernel/add-tools test-tools)
-            (kernel/add-filter pre-inv-filter)
-            (kernel/add-filter post-inv-filter)
-            (kernel/add-filter pre-chat-filter)
-            (kernel/add-filter post-chat-filter)
+            (kernel/add-filter tool-advisor)
+            (kernel/add-filter chat-advisor)
             (kernel/build-kernel))]
 
     ;; 5.1 Filter 触发验证
@@ -585,10 +356,6 @@
   (println (str "└─────────────────────────────────────────────────────────────────┘"))
 
   (run-kernel-tests provider provider-name)
-  (wait api-delay)
-  (run-process-tests provider provider-name)
-  (wait api-delay)
-  (run-external-event-tests provider provider-name)
   (wait api-delay)
   (run-simpleagent-tests provider provider-name)
   (wait api-delay)
