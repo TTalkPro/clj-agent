@@ -5,8 +5,8 @@
 
    需要环境变量: ZHIPU_API_KEY"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.simpleagent.kernel-agent :as ka]
-            [im.ttalk.agent.simpleagent.process-agent :as pa]
+            [im.ttalk.agent.simpleagent :as ka]
+            [im.ttalk.agent.simpleagent :as pa]
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]))
 
 ;;; ============================================================
@@ -134,7 +134,7 @@
   (safe-call "Process Agent sensitive 工具暂停与恢复"
     (fn []
       (let [pause-log (atom nil)
-            agent (pa/create-process-agent
+            agent (pa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -162,11 +162,12 @@
   (separator "测试 5: Process Agent 拒绝 sensitive 操作")
   (safe-call "拒绝 sensitive 工具"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools agent-tools})]
+                     :tools agent-tools
+                     :on-pause (fn [_] nil)})]
         (let [result (pa/chat agent "请删除 /home/user/important.txt")]
           (when (= :paused (:status result))
             (let [reject-result (pa/resume agent "rejected")]

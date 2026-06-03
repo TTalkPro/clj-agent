@@ -11,7 +11,7 @@
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.llm.kernel.chat :as chat]
             [im.ttalk.agent.llm.provider.bailian :as bailian]
-            [im.ttalk.agent.simpleagent.kernel-agent :as ka]))
+            [im.ttalk.agent.simpleagent :as ka]))
 
 ;;; ============================================================
 ;;; 工具定义

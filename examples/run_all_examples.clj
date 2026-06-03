@@ -19,8 +19,8 @@
             [im.ttalk.agent.llm.kernel.chat :as chat]
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]
             [im.ttalk.agent.llm.provider.anthropic :as anthropic]
-            [im.ttalk.agent.simpleagent.kernel-agent :as ka]
-            [im.ttalk.agent.simpleagent.process-agent :as pa]
+            [im.ttalk.agent.simpleagent :as ka]
+            [im.ttalk.agent.simpleagent :as pa]
             [clojure.core.async :as async]))
 
 ;;; ============================================================
@@ -438,7 +438,7 @@
   ;; 4.4 Process Agent 简单对话
   (test-case "Process Agent 简单对话"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
@@ -453,7 +453,7 @@
   ;; 4.5 Process Agent 工具调用
   (test-case "Process Agent 工具调用"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -469,11 +469,12 @@
   ;; 4.6 Process Agent sensitive 工具暂停
   (test-case "Process Agent HIL 审批"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools [test-tools]})
+                     :tools [test-tools]
+                     :on-pause (fn [_] nil)})
             result (pa/chat agent "帮我删除 /tmp/test.txt")]
         (if (= :paused (:status result))
           (do

@@ -548,6 +548,11 @@ Context 管理对话中的共享状态：
 - http-kit/http-kit 2.8.0
 - net.clojars.wkok/openai-clojure 0.21.0
 
+持久化 ChatMemory（SQLite 后端，按需引入 `im.ttalk.agent.core.memory.sqlite`）：
+
+- com.github.seancorfield/next.jdbc 1.3.939
+- org.xerial/sqlite-jdbc 3.45.1.0
+
 测试：
 
 - lambdaisland/kaocha 1.85.1342

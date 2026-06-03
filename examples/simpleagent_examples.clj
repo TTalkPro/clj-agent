@@ -17,8 +17,8 @@
      ZHIPU_API_KEY - 智谱 AI API Key（必需）"
   (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
             [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.simpleagent.kernel-agent :as ka]
-            [im.ttalk.agent.simpleagent.process-agent :as pa]
+            [im.ttalk.agent.simpleagent :as ka]
+            [im.ttalk.agent.simpleagent :as pa]
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]
             [im.ttalk.agent.llm.provider.anthropic :as anthropic]))
 
@@ -156,7 +156,7 @@
   (subsection "Process Agent: 简单对话")
   (safe-call "Process Agent 单轮对话"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
@@ -170,7 +170,7 @@
   (subsection "Process Agent: 多轮对话")
   (safe-call "Process Agent 多轮对话记忆"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
@@ -240,7 +240,7 @@
   (subsection "Process Agent: 工具调用")
   (safe-call "Process Agent 工具调用（非 sensitive）"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -255,7 +255,7 @@
   (subsection "Process Agent: 多轮工具对话")
   (safe-call "Process Agent 多轮工具调用"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -309,7 +309,7 @@
   (safe-call "Sensitive 工具暂停 -> 审批 -> 执行"
     (fn []
       (let [pause-log (atom nil)
-            agent (pa/create-process-agent
+            agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -334,11 +334,12 @@
   (subsection "Process Agent: HIL 拒绝操作")
   (safe-call "Sensitive 工具暂停 -> 拒绝"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
-                     :tools agent-tools})]
+                     :tools agent-tools
+                     :on-pause (fn [_] nil)})]
         (let [result (pa/chat agent "请删除 /home/user/important.dat")]
           (when (= :paused (:status result))
             (let [rejected (pa/resume agent "rejected")]
@@ -350,12 +351,13 @@
   (subsection "Process Agent: HIL 多轮 sensitive")
   (safe-call "多次 sensitive 暂停恢复"
     (fn []
-      (let [agent (pa/create-process-agent
+      (let [agent (pa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools
-                     :system-prompt "你是助手，用户要求时调用工具。"})]
+                     :system-prompt "你是助手，用户要求时调用工具。"
+                     :on-pause (fn [_] nil)})]
         ;; 第一次: 保存笔记（sensitive）
         (let [r1 (pa/chat agent "帮我保存一条笔记，标题是'TODO'，内容是'学习Clojure'")]
           (println (str "    第1次状态: " (:status r1)))

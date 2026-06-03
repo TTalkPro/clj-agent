@@ -426,6 +426,11 @@ Core:
 - http-kit/http-kit 2.8.0
 - net.clojars.wkok/openai-clojure 0.21.0
 
+Persistent ChatMemory (SQLite backend, opt-in via `im.ttalk.agent.core.memory.sqlite`):
+
+- com.github.seancorfield/next.jdbc 1.3.939
+- org.xerial/sqlite-jdbc 3.45.1.0
+
 Testing:
 
 - lambdaisland/kaocha 1.85.1342
