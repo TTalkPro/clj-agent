@@ -63,7 +63,7 @@ A2A (Agent-to-Agent Protocol) 服务器/客户端模块
 | `im.ttalk.agent.a2a.task` | 任务生命周期管理 |
 | `im.ttalk.agent.a2a.card` | Agent Card 生成与管理 |
 | `im.ttalk.agent.a2a.handler` | 状态管理 + 纯函数处理层 + Ring 适配器 |
-| `im.ttalk.agent.a2a.server.core` | A2A 服务器核心（生命周期管理） |
+| `im.ttalk.agent.a2a.server` | A2A 服务器核心（生命周期管理） |
 | `im.ttalk.agent.a2a.client` | A2A 客户端 |
 
 ## 使用方式
@@ -71,7 +71,7 @@ A2A (Agent-to-Agent Protocol) 服务器/客户端模块
 ### 方式一：独立 A2A Server
 
 ```clojure
-(require '[im.ttalk.agent.a2a.server.core :as a2a]
+(require '[im.ttalk.agent.a2a.server :as a2a]
          '[im.ttalk.agent.a2a.types :as types])
 
 ;; 创建 A2A 服务器
@@ -96,7 +96,7 @@ A2A (Agent-to-Agent Protocol) 服务器/客户端模块
 ### 方式二：快速启动
 
 ```clojure
-(require '[im.ttalk.agent.a2a.server.core :as a2a])
+(require '[im.ttalk.agent.a2a.server :as a2a])
 
 ;; 一行代码启动 A2A 服务器
 (def server
@@ -140,7 +140,7 @@ A2A (Agent-to-Agent Protocol) 服务器/客户端模块
 
 ```clojure
 (require '[im.ttalk.agent.a2a.handler :as handler]
-         '[im.ttalk.agent.a2a.server.core :as a2a])
+         '[im.ttalk.agent.a2a.server :as a2a])
 
 ;; 创建共享的 registry
 (def shared-registry (handler/create-registry {:name "shared"
@@ -261,7 +261,7 @@ The module is organized in layers:
 
 ```clojure
 ;; Standalone A2A Server
-(require '[im.ttalk.agent.a2a.server.core :as a2a])
+(require '[im.ttalk.agent.a2a.server :as a2a])
 
 (def server
   (a2a/create-and-start

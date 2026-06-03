@@ -279,7 +279,7 @@ clj -T:build install  # 安装到本地 Maven 仓库
 直接使用 Kernel 获取最大灵活性：
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.core :as kernel])
+(require '[im.ttalk.agent.core.kernel :as kernel])
 (require '[im.ttalk.agent.core.kernel.filter :as filters])
 (require '[im.ttalk.agent.llm.kernel.chat :as chat])
 
@@ -898,7 +898,7 @@ Model Context Protocol 服务端/客户端实现。架构分为三层：
 ### MCP Server 使用
 
 ```clojure
-(require '[im.ttalk.agent.mcp.server.core :as mcp])
+(require '[im.ttalk.agent.mcp.server :as mcp])
 
 ;; 创建并启动 MCP 服务器
 (def server (mcp/create-server {:name "my-tools"
@@ -928,7 +928,7 @@ Model Context Protocol 服务端/客户端实现。架构分为三层：
 ### MCP Client
 
 ```clojure
-(require '[im.ttalk.agent.mcp.client.core :as mcp-client])
+(require '[im.ttalk.agent.mcp.client :as mcp-client])
 
 ;; Stdio 传输（启动子进程）
 (def client (mcp-client/connect
@@ -952,7 +952,7 @@ Agent-to-Agent Protocol 服务端/客户端实现。架构与 MCP 一致：
 ### A2A Server 使用
 
 ```clojure
-(require '[im.ttalk.agent.a2a.server.core :as a2a]
+(require '[im.ttalk.agent.a2a.server :as a2a]
          '[im.ttalk.agent.a2a.types :as types])
 
 ;; 创建并启动 A2A 服务器

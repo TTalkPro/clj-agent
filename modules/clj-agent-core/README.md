@@ -31,7 +31,7 @@
 
 | 命名空间 | 说明 |
 |---------|------|
-| `im.ttalk.agent.core.kernel.core` | Kernel 构建、调用、查询 API |
+| `im.ttalk.agent.core.kernel` | Kernel 构建、调用、查询 API |
 | `im.ttalk.agent.core.kernel.tool` | `deftool` 宏定义 |
 | `im.ttalk.agent.core.kernel.filter` | Filter 创建和内置 Filter |
 | `im.ttalk.agent.core.kernel.context` | Context 状态管理 |
@@ -49,7 +49,7 @@
 ### Kernel Build API
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.core :as kernel])
+(require '[im.ttalk.agent.core.kernel :as kernel])
 
 ;; 创建 Builder
 (kernel/create-kernel-builder)

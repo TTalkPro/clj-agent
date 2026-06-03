@@ -56,8 +56,8 @@ MCP (Model Context Protocol) 服务器/客户端模块
 |---------|------|
 | `im.ttalk.agent.mcp.registry` | 状态管理（工具/资源/提示词注册） |
 | `im.ttalk.agent.mcp.handler` | 纯函数处理层 + Ring 适配器 |
-| `im.ttalk.agent.mcp.server.core` | MCP 服务器核心（生命周期管理） |
-| `im.ttalk.agent.mcp.client.core` | MCP 客户端 |
+| `im.ttalk.agent.mcp.server` | MCP 服务器核心（生命周期管理） |
+| `im.ttalk.agent.mcp.client` | MCP 客户端 |
 | `im.ttalk.agent.mcp.transport.stdio` | Stdio 传输 |
 | `im.ttalk.agent.mcp.transport.sse` | SSE 传输 |
 | `im.ttalk.agent.mcp.protocol` | MCP 协议定义 |
@@ -68,7 +68,7 @@ MCP (Model Context Protocol) 服务器/客户端模块
 ### 方式一：独立 MCP Server
 
 ```clojure
-(require '[im.ttalk.agent.mcp.server.core :as mcp])
+(require '[im.ttalk.agent.mcp.server :as mcp])
 
 ;; 创建 MCP 服务器
 (def server (mcp/create-server {:name "my-tools"
@@ -117,7 +117,7 @@ MCP (Model Context Protocol) 服务器/客户端模块
 ```clojure
 (require '[im.ttalk.agent.mcp.registry :as registry]
          '[im.ttalk.agent.mcp.handler :as handler]
-         '[im.ttalk.agent.mcp.server.core :as mcp])
+         '[im.ttalk.agent.mcp.server :as mcp])
 
 ;; 创建共享的 registry
 (def shared-registry (registry/create-registry {:name "shared" :version "1.0.0"}))
@@ -135,7 +135,7 @@ MCP (Model Context Protocol) 服务器/客户端模块
 ### MCP Client
 
 ```clojure
-(require '[im.ttalk.agent.mcp.client.core :as mcp-client])
+(require '[im.ttalk.agent.mcp.client :as mcp-client])
 
 ;; Stdio 传输（启动子进程）
 (def client (mcp-client/connect
@@ -188,7 +188,7 @@ The module is organized in three layers:
 
 ```clojure
 ;; Standalone MCP Server
-(require '[im.ttalk.agent.mcp.server.core :as mcp])
+(require '[im.ttalk.agent.mcp.server :as mcp])
 
 (def server (mcp/create-server {:name "my-tools" :transport :stdio}))
 (mcp/register-tool server {:name "echo" :handler (fn [args] (:msg args))})
