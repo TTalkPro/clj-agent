@@ -106,43 +106,37 @@
 ;; Kernel Filter 工厂
 ;; ============================================================
 
-(defn create-security-filter
-  "创建安全过滤器（标准 Kernel pre-invocation Filter）
+(defn create-security-advisor
+  "创建安全 tool advisor
 
-   拦截工具调用前进行权限检查。
+   调用工具前做权限检查；不通过则短路（不调下游），返回阻止原因结果。
 
    参数:
    - policy: 安全策略（由 create-security-policy 创建）
-   - opts:   可选参数 {:priority 10}
+   - opts:   可选参数 {:order 10}（兼容旧 :priority）
 
-   返回: filter 定义 map（可直接传给 kernel/add-filter）"
-  ([policy] (create-security-filter policy {}))
+   返回: advisor 定义 map（可直接传给 kernel/add-advisor）"
+  ([policy] (create-security-advisor policy {}))
   ([policy opts]
-   (kf/create-filter :security :pre-invocation
-     (fn [filter-ctx]
-       (let [func-def (:function filter-ctx)
-             tool-name (:name func-def)
-             args (:args filter-ctx)
-             tool-check (check-tool-allowed policy tool-name)]
+   (kf/create-advisor :security :tool
+     :order (or (:order opts) (:priority opts) 10)
+     :advise-call
+     (fn [req chain]
+       (let [tool-name (get-in req [:function :name])
+             args (:args req)
+             tool-check (check-tool-allowed policy tool-name)
+             block (fn [reason] {:result (str "安全策略阻止: " reason) :context (:context req)})]
          (if-not (:allowed tool-check)
-           {:action :skip :value (str "安全策略阻止: " (:reason tool-check))}
+           (block (:reason tool-check))
            (let [{:keys [path command url]} (extract-security-args tool-name args)
                  path-check (check-path-allowed policy path)
                  cmd-check (check-command-allowed policy command)
                  url-check (check-url-allowed policy url)]
              (cond
-               (not (:allowed path-check))
-               {:action :skip :value (str "安全策略阻止: " (:reason path-check))}
-
-               (not (:allowed cmd-check))
-               {:action :skip :value (str "安全策略阻止: " (:reason cmd-check))}
-
-               (not (:allowed url-check))
-               {:action :skip :value (str "安全策略阻止: " (:reason url-check))}
-
-               :else
-               {:action :continue :context filter-ctx})))))
-     :priority (or (:priority opts) 10))))
+               (not (:allowed path-check)) (block (:reason path-check))
+               (not (:allowed cmd-check))  (block (:reason cmd-check))
+               (not (:allowed url-check))  (block (:reason url-check))
+               :else (chain req)))))))))
 
 ;; ============================================================
 ;; 预设安全模式

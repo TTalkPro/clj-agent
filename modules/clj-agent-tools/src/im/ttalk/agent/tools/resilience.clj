@@ -261,41 +261,41 @@
                     {:available-tokens (:tokens @(:state rl))}))))
 
 ;; ============================================================
-;; Kernel Filter 工厂
+;; Kernel Tool Advisor 工厂
 ;; ============================================================
 
-(defn circuit-breaker-filter
-  "断路器 pre-invocation filter
+(defn circuit-breaker-advisor
+  "断路器 tool advisor
 
-   当断路器处于 open 状态时跳过工具调用。
+   断路器 open 时短路（不调下游），返回提示结果。
 
    参数:
    - cb: 断路器实例（由 create-circuit-breaker 创建）
 
-   返回: filter 定义 map"
+   返回: advisor 定义 map"
   [cb]
-  (kf/create-filter :circuit-breaker :pre-invocation
-    (fn [filter-ctx]
+  (kf/create-advisor :circuit-breaker :tool :order -30
+    :advise-call
+    (fn [req chain]
       (if (should-allow? cb)
         (do (when (= :half-open (:status @(:state cb)))
               (swap! (:state cb) update :half-open-calls inc))
-            {:action :continue :context filter-ctx})
-        {:action :skip :value "Circuit breaker is open"}))
-    :priority -30))
+            (chain req))
+        {:result "Circuit breaker is open" :context (:context req)}))))
 
-(defn rate-limit-filter
-  "速率限制 pre-invocation filter
+(defn rate-limit-advisor
+  "速率限制 tool advisor
 
-   当无法获取令牌时跳过工具调用。
+   无法获取令牌时短路（不调下游），返回提示结果。
 
    参数:
    - rl: 速率限制器实例（由 create-rate-limiter 创建）
 
-   返回: filter 定义 map"
+   返回: advisor 定义 map"
   [rl]
-  (kf/create-filter :rate-limit :pre-invocation
-    (fn [filter-ctx]
+  (kf/create-advisor :rate-limit :tool :order -20
+    :advise-call
+    (fn [req chain]
       (if (acquire-token! rl)
-        {:action :continue :context filter-ctx}
-        {:action :skip :value "Rate limit exceeded"}))
-    :priority -20))
+        (chain req)
+        {:result "Rate limit exceeded" :context (:context req)}))))
