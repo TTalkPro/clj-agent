@@ -43,36 +43,3 @@
   "获取或构建 Kernel（opts 已含 :kernel 则直接用）"
   [opts]
   (or (:kernel opts) (build-kernel opts)))
-
-;;; ============================================================
-;;; 结果处理
-;;; ============================================================
-
-(defn finalize-result
-  "处理工具循环结果，更新 agent 的 state-atom 并返回标准化响应
-
-   - :completed → 清暂停态，返回文本和工具记录
-   - :paused    → 保存暂停状态（loop-state），触发 on-pause 回调
-
-   历史持久化由 ChatMemory store 负责，这里不再管理 context。"
-  [{:keys [state-atom settings]} result]
-  (case (:status result)
-    :completed
-    (let [response {:text (:text result)
-                    :tool-calls-made (:tool-calls-made result)}]
-      (reset! state-atom {:status :completed :paused-state nil :last-response response})
-      (assoc response :status :completed))
-
-    :paused
-    (do
-      (reset! state-atom {:status :paused
-                          :paused-state result
-                          :last-response nil})
-      (when-let [on-pause (:on-pause settings)]
-        (on-pause {:reason (:pause-reason result)
-                   :pending-tool (:pending-tool result)}))
-      {:status :paused
-       :text nil
-       :pause-reason (:pause-reason result)
-       :pending-tool (:pending-tool result)
-       :tool-calls-made (:tool-calls-made result)})))
