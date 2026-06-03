@@ -149,7 +149,11 @@
     (agent/chat a "执行危险操作")
     (let [r (agent/resume a "rejected")]
       (is (= :completed (:status r)))
-      (is (= "好的，已取消" (:text r))))))
+      (is (= "好的，已取消" (:text r)))
+      ;; 拒绝必须真正阻止敏感工具执行：历史里是「已拒绝执行」而非「已执行危险操作」
+      (let [tool-msgs (filter msg/tool? (agent/get-history a))]
+        (is (some #(re-find #"已拒绝执行" (:content %)) tool-msgs))
+        (is (not-any? #(re-find #"已执行危险操作" (:content %)) tool-msgs))))))
 
 (deftest mixed-tools-pause-test
   (testing "safe + sensitive 混合：在 sensitive 处暂停"
@@ -201,6 +205,28 @@
               tool-msgs (filter msg/tool? hist)]
           ;; 存在「已取消」工具结果，且 assistant(tool-calls) 已被配对
           (is (some #(re-find #"已取消" (:content %)) tool-msgs)))))))
+
+(deftest kernel-heals-dangling-on-shared-store-test
+  (testing "暂停未 resume，另一 agent（共享 store/同 conv）开新对话：kernel 自愈悬空 tool_use"
+    (let [store (memory/in-memory-store)
+          p1 (ts/create-mock-provider
+               [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "/tmp/x"}}]}])
+          a1 (agent/create-agent {:provider p1 :model "test" :tools ts/test-plugin
+                                  :memory store :conversation-id "shared-heal"
+                                  :on-pause (fn [_] nil)})]
+      (is (= :paused (:status (agent/chat a1 "删除"))))
+      ;; 第二个 agent 自身不处于暂停态 → cancel-pending! 不触发，纯靠 kernel 入口自愈
+      (let [p2 (ts/create-mock-provider [{:text "新回答" :tool-calls nil}])
+            a2 (agent/create-agent {:provider p2 :model "test" :tools ts/test-plugin
+                                    :memory store :conversation-id "shared-heal"})
+            r (agent/chat a2 "换个问题")
+            hist (agent/get-history a2)
+            call-ids (into #{} (for [m hist :when (msg/assistant? m)
+                                     tc (:tool-calls m)] (:id tc)))
+            paired (into #{} (keep :tool-call-id hist))]
+        (is (= :completed (:status r)))
+        (is (some #(and (msg/tool? %) (re-find #"已取消" (:content %))) hist))
+        (is (every? paired call-ids) "历史中无悬空 tool_use（全部已配对结果）")))))
 
 ;;; ============================================================
 ;;; conversation-id 恢复（共享 store）

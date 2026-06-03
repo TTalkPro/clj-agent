@@ -523,6 +523,30 @@
   [kernel tool-calls tool-context]
   (execute-batch kernel tool-calls nil tool-context []))
 
+(defn- dangling-tool-call-ids
+  "history 中出现在 assistant :tool-calls 里、但没有对应 tool 结果消息的 {:id :name}。
+
+   暂停（gate :pause）会在 store 留下 assistant(tool_use) 却无 tool 结果，
+   若不 resume 直接开新一轮，发给严格 provider 的历史会含悬空 tool_use 而报错。"
+  [history]
+  (let [paired (into #{} (keep :tool-call-id) history)]
+    (for [m history :when (= :assistant (:role m))
+          {:keys [id name]} (:tool-calls m)
+          :when (not (paired id))]
+      {:id id :name name})))
+
+(defn heal-dangling-tool-calls!
+  "开新一轮前的自愈：为 conv-id 历史里的悬空 tool_use 补「已取消」中立结果，
+   使会话重新配平。无悬空则 no-op。供 invoke 及外部「不 resume 即弃用」的路径调用。"
+  [kernel conv-id]
+  (when conv-id
+    (let [dangling (dangling-tool-call-ids (memory/mem-get (:memory kernel) conv-id))]
+      (when (seq dangling)
+        (memory/mem-add (:memory kernel) conv-id
+                        (mapv #(msg/tool-result (:id %) (:name %)
+                                                "已取消（上一轮工具调用未审批/未恢复）")
+                              dangling))))))
+
 (defn- run-tool-loop
   "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或被 gate 暂停。
 
@@ -590,6 +614,8 @@
         max-iter (or (:max-iterations opts)
                      (get-in kernel [:settings :max-tool-iterations])
                      default-max-iterations)
+        ;; 自愈：上一轮暂停未 resume 会留下悬空 tool_use，开新一轮前补「已取消」配平
+        _ (heal-dangling-tool-calls! kernel conv-id)
         result (run-tool-loop kernel (mapv msg/normalize messages)
                               max-iter [] init-ctx
                               (:tool-gate opts)
@@ -612,9 +638,13 @@
   [kernel loop-state decision opts]
   (let [{:keys [tool-calls remaining records]} loop-state
         tctx (or (:context opts) (ctx/create))
-        resume-gate (if (= decision :approved) (constantly :proceed) (:tool-gate opts))
+        gate (:tool-gate opts)
+        ;; rejected：把暂停那批里 gate 判 :pause 的工具落实为 :reject（否则会被执行）
+        resume-gate (if (= decision :approved)
+                      (constantly :proceed)
+                      (fn [tc] (if (and gate (= :pause (gate tc))) :reject :proceed)))
         {:keys [messages records context]}
         (execute-batch kernel tool-calls resume-gate tctx records)]
     (run-tool-loop kernel messages remaining records context
-                   (:tool-gate opts)
+                   gate
                    (build-chat-opts kernel opts))))
