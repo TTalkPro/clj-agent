@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.core.memory.sqlite
+(ns im.ttalk.agent.simpleagent.memory.sqlite
   "持久化 ChatMemory - SQLite 后端
 
    把中立消息（见 core/llm/message）按 conversation-id 持久化到 SQLite，
@@ -10,12 +10,12 @@
      chat_messages(id INTEGER PK AUTOINCREMENT, conversation_id TEXT, content TEXT)
 
    用法：
-     (require '[im.ttalk.agent.core.memory.sqlite :as sqlite])
+     (require '[im.ttalk.agent.simpleagent.memory.sqlite :as sqlite])
      (def store (sqlite/sqlite-store \"agent.db\"))
      (create-agent {:provider p :memory store :conversation-id \"user-123\"})"
   (:require [clojure.edn :as edn]
             [next.jdbc :as jdbc]
-            [im.ttalk.agent.core.memory :as memory]
+            [im.ttalk.agent.simpleagent.memory :as memory]
             [im.ttalk.agent.core.llm.message :as msg]))
 
 (defn- ensure-schema! [ds]

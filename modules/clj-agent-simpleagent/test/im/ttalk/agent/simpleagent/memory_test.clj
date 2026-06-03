@@ -1,10 +1,10 @@
-(ns im.ttalk.agent.core.memory-test
-  "P2 ChatMemory store + P3 Memory Filter 单测"
+(ns im.ttalk.agent.simpleagent.memory-test
+  "ChatMemory store + memory-advisor 单测"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.core.memory :as mem]
+            [im.ttalk.agent.simpleagent.memory :as mem]
             [im.ttalk.agent.core.llm.message :as msg]
             [im.ttalk.agent.core.llm.response :as resp]
-            [im.ttalk.agent.core.kernel.memory-filter :as mf]
+            [im.ttalk.agent.simpleagent.memory-advisor :as mf]
             [im.ttalk.agent.core.kernel.filter :as flt]))
 
 ;;; ============================================================
@@ -50,55 +50,53 @@
         (is (not-any? msg/tool? out))))))
 
 ;;; ============================================================
-;;; P3: memory filter
+;;; P3: memory advisor（洋葱式 chat advisor）
 ;;; ============================================================
 
-(defn- run-pre [filters messages tool-context]
-  ;; 模拟 invoke-chat 里 pre-chat 管道：context 即 ToolContext 扁平 map
-  (flt/apply-pre-chat-filters filters messages tool-context))
+(defn- run-advisor
+  "把 memory-advisor 折进洋葱，terminal 返回固定 response 并记录它看到的 messages。
+   返回 {:seen <terminal 看到的 messages> :out <链结果>}。"
+  [store messages tc response]
+  (let [seen (atom nil)
+        terminal (fn [req]
+                   (reset! seen (:messages req))
+                   {:response response :context (:context req)})
+        chain (flt/build-chain [(mf/memory-advisor store)] terminal)
+        out (chain {:messages messages :context tc})]
+    {:seen @seen :out out}))
 
-(defn- run-post [filters response tool-context]
-  (flt/apply-post-chat-filters filters response tool-context))
-
-(deftest memory-filter-pre-stores-and-prepends
+(deftest memory-advisor-prepends-history
   (let [store (mem/in-memory-store)
-        [pre _] (mf/memory-filters store)
-        tc {:conversation-id "s1"}]
-    (testing "首轮：存 user，messages 变为完整历史"
-      (let [r1 (run-pre [pre] [(msg/user "北京天气?")] tc)]
-        (is (= [(msg/user "北京天气?")] (get-in r1 [:ok :messages])))))
-    (testing "次轮：只传 delta，pre 拼出完整历史"
-      ;; 先模拟上一轮 assistant 已被 post 存入
-      (mem/mem-add store "s1" [(msg/assistant "晴")])
-      (let [r2 (run-pre [pre] [(msg/user "明天呢?")] tc)
-            msgs (get-in r2 [:ok :messages])]
-        (is (= 3 (count msgs)))
-        (is (= [(msg/user "北京天气?") (msg/assistant "晴") (msg/user "明天呢?")] msgs))))))
+        tc {:conversation-id "s1"}
+        晴 (resp/make-response :text "晴" :tool-calls nil)]
+    (testing "首轮：terminal 看到 [user]，回复被存"
+      (let [{:keys [seen]} (run-advisor store [(msg/user "北京天气?")] tc 晴)]
+        (is (= [(msg/user "北京天气?")] seen))))
+    (testing "次轮：只传 delta，terminal 看到完整历史（含上一轮回复）"
+      (let [{:keys [seen]} (run-advisor store [(msg/user "明天呢?")] tc 晴)]
+        (is (= [(msg/user "北京天气?") (msg/assistant "晴") (msg/user "明天呢?")] seen))))))
 
-(deftest memory-filter-post-stores-assistant
-  (let [store (mem/in-memory-store)
-        [_ post] (mf/memory-filters store)
-        tc {:conversation-id "s2"}
-        response (resp/make-response :text "你好" :tool-calls nil)]
-    (run-post [post] response tc)
-    (is (= [(msg/assistant "你好")] (mem/mem-get store "s2")))))
+(deftest memory-advisor-stores-reply
+  (let [store (mem/in-memory-store)]
+    (run-advisor store [(msg/user "hi")] {:conversation-id "s2"}
+                 (resp/make-response :text "你好" :tool-calls nil))
+    (is (= [(msg/user "hi") (msg/assistant "你好")] (mem/mem-get store "s2")))))
 
-(deftest memory-filter-post-stores-tool-calls
+(deftest memory-advisor-stores-tool-calls
   (let [store (mem/in-memory-store)
-        [_ post] (mf/memory-filters store)
-        tc {:conversation-id "s3"}
         response (resp/make-response
                    :text nil
                    :tool-calls [{:id "c1" :name :get_weather :input {:city "北京"}}])]
-    (run-post [post] response tc)
-    (let [stored (first (mem/mem-get store "s3"))]
+    (run-advisor store [(msg/user "天气")] {:conversation-id "s3"} response)
+    (let [stored (last (mem/mem-get store "s3"))]
       (is (msg/has-tool-calls? stored))
       (is (= [(msg/tool-call "c1" "get_weather" {:city "北京"})]
              (msg/tool-calls stored))))))
 
-(deftest memory-filter-noop-without-conv-id
+(deftest memory-advisor-noop-without-conv-id
   (let [store (mem/in-memory-store)
-        [pre _] (mf/memory-filters store)
-        r (run-pre [pre] [(msg/user "x")] {})]   ;; 无 conversation-id
+        {:keys [seen]} (run-advisor store [(msg/user "x")] {}
+                                    (resp/make-response :text "x" :tool-calls nil))]
     (testing "无 conv-id：messages 原样、store 不写"
-      (is (= [(msg/user "x")] (get-in r [:ok :messages]))))))
+      (is (= [(msg/user "x")] seen))
+      (is (= [] (mem/mem-get store "any"))))))

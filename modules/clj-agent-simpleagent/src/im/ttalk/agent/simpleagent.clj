@@ -24,7 +24,8 @@
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.tool :as tool]
             [im.ttalk.agent.core.llm.message :as msg]
-            [im.ttalk.agent.core.memory :as memory]
+            [im.ttalk.agent.simpleagent.memory :as memory]
+            [im.ttalk.agent.simpleagent.loop :as agent-loop]
             [im.ttalk.agent.simpleagent.common :as common]))
 
 ;;; ============================================================
@@ -43,7 +44,7 @@
    - :system-prompt 系统提示词
    - :tools         tool var 列表
    - :filters       Filter 列表
-   - :memory        ChatMemory store（可选，默认 in-memory；持久化见 core.memory.sqlite）
+   - :memory        ChatMemory store（可选，默认 in-memory；持久化见 simpleagent.memory.sqlite）
    - :conversation-id 会话 ID（可选）。提供则可配合持久 store 跨重启恢复该会话；
                       不提供则生成随机 UUID
    - :max-iterations 最大工具循环次数（默认 10）
@@ -51,8 +52,11 @@
 
    返回 Agent map"
   [opts]
-  (let [k (common/ensure-kernel opts)]
+  (let [;; store 由 agent 持有（kernel 不再持有 memory）；并以 memory-advisor 形态挂进 kernel
+        store (or (:memory opts) (memory/in-memory-store))
+        k (common/ensure-kernel (assoc opts :memory store))]
     {:kernel          k
+     :memory          store
      :conversation-id (or (:conversation-id opts)
                           (str "agent-" (java.util.UUID/randomUUID)))
      :state-atom      (atom {:status :idle :paused-state nil})
@@ -62,7 +66,7 @@
 ;;; 内部
 ;;; ============================================================
 
-(defn- store [agent] (:memory (:kernel agent)))
+(defn- store [agent] (:memory agent))
 
 (defn- tctx [agent]
   (ctx/with-conversation-id (ctx/create) (:conversation-id agent)))
@@ -82,14 +86,14 @@
 
 (defn- cancel-pending!
   "未-resume 保护：暂停态下开新对话时，只重置控制状态。
-   历史里悬空 tool_use 的配对（补「已取消」结果）由 kernel/invoke 入口自愈完成，
-   故此处不再手动操作消息，避免与 kernel 重复。"
+   历史里悬空 tool_use 的配对（补「已取消」结果）由 loop/invoke 入口自愈完成，
+   故此处不再手动操作消息，避免重复。"
   [agent]
   (when (= :paused (:status @(:state-atom agent)))
     (clojure.core/reset! (:state-atom agent) {:status :idle :paused-state nil})))
 
 (defn- finalize
-  "把 kernel/invoke|resume 的结果写入 state-atom 并标准化返回"
+  "把 loop/invoke|resume 的结果写入 state-atom 并标准化返回"
   [agent result]
   (case (:status result)
     :completed
@@ -118,7 +122,7 @@
   ([agent message] (chat agent message nil))
   ([agent message opts]
    (cancel-pending! agent)   ;; 未-resume 保护：开新对话前清理悬空 tool_use
-   (let [result (kernel/invoke (:kernel agent) [(msg/user message)]
+   (let [result (agent-loop/invoke (:kernel agent) (store agent) [(msg/user message)]
                   (cond-> {:context (tctx agent)
                            :tool-gate (gate-of agent)
                            :max-iterations (or (:max-iterations opts)
@@ -138,7 +142,7 @@
     (throw (ex-info "Agent 未处于暂停状态" {:status (:status @(:state-atom agent))})))
   (let [ls (:loop-state (:paused-state @(:state-atom agent)))
         approved? (or (= decision "approved") (= decision :approved))
-        result (kernel/resume (:kernel agent) ls (if approved? :approved :rejected)
+        result (agent-loop/resume (:kernel agent) ls (if approved? :approved :rejected)
                  (cond-> {:context (tctx agent)
                           :tool-gate (gate-of agent)}
                    (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil))))]

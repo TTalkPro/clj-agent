@@ -1,7 +1,7 @@
-(ns im.ttalk.agent.core.memory
+(ns im.ttalk.agent.simpleagent.memory
   "ChatMemory - 按 conversation-id 管理中立消息历史
 
-   这是 Memory Filter 的后端存储。只存中立消息（见 core/llm/message）。
+   这是 Memory Advisor 的后端存储。只存中立消息（见 core/llm/message）。
    替代了旧 clj-agent-memory 模块中庞大的快照/时间线/多后端体系，
    这里只保留对话历史所需的极小子集。
 

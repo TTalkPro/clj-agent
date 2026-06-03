@@ -8,8 +8,8 @@
             [im.ttalk.agent.simpleagent.test-support :as ts]
             [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.service :as service]
-            [im.ttalk.agent.core.memory :as memory]
-            [im.ttalk.agent.core.memory.sqlite :as sqlite]
+            [im.ttalk.agent.simpleagent.memory :as memory]
+            [im.ttalk.agent.simpleagent.memory.sqlite :as sqlite]
             [im.ttalk.agent.core.llm.message :as msg]
             [im.ttalk.agent.core.llm.provider :as provider])
   (:import [java.io File]))
