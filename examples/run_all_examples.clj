@@ -301,14 +301,14 @@
                    :model "glm-4.7"
                    :max-tokens 1024})
 
-        ;; 创建自定义 Advisor（tool 链 before/after + chat 链 before/after）
-        tool-advisor
-        (filters/create-advisor :test-tool :tool
+        ;; 创建自定义 Filter（tool 链 before/after + chat 链 before/after）
+        tool-filter
+        (filters/create-filter :test-tool :tool
           :before (fn [req] (swap! filter-log conj {:type :pre-invocation :fn (get-in req [:function :name])}) req)
           :after  (fn [resp] (swap! filter-log conj {:type :post-invocation}) resp))
 
-        chat-advisor
-        (filters/create-advisor :test-chat :chat
+        chat-filter
+        (filters/create-filter :test-chat :chat
           :before (fn [req] (swap! filter-log conj {:type :pre-chat}) req)
           :after  (fn [resp] (swap! filter-log conj {:type :post-chat}) resp))
 
@@ -316,8 +316,8 @@
         (-> (kernel/create-kernel-builder {:max-tool-iterations 5})
             (kernel/add-service service)
             (kernel/add-tools test-tools)
-            (kernel/add-filter tool-advisor)
-            (kernel/add-filter chat-advisor)
+            (kernel/add-filter tool-filter)
+            (kernel/add-filter chat-filter)
             (kernel/build-kernel))]
 
     ;; 5.1 Filter 触发验证

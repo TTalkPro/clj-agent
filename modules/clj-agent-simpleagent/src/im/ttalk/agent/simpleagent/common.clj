@@ -6,7 +6,7 @@
    Agent 自身只持 conversation-id + 轻量 state。"
   (:require [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.llm.kernel.chat :as chat]
-            [im.ttalk.agent.simpleagent.memory-advisor :as memory-advisor]))
+            [im.ttalk.agent.simpleagent.memory-filter :as memory-filter]))
 
 ;;; ============================================================
 ;;; Kernel 构建
@@ -21,8 +21,8 @@
    - :max-tokens    最大生成 token 数（默认 4096）
    - :temperature   温度参数（可选）
    - :tools         tool var 列表
-   - :filters       Filter / Advisor 列表（可选）
-   - :memory        ChatMemory store（已解析；以 memory-advisor 形态挂进 kernel）
+   - :filters       Filter / Filter 列表（可选）
+   - :memory        ChatMemory store（已解析；以 memory-filter 形态挂进 kernel）
    - :max-iterations 最大工具调用循环次数（默认 10）"
   [opts]
   (let [service (chat/create-service
@@ -37,7 +37,7 @@
               {:max-tool-iterations (or (:max-iterations opts) 10)})
       true  (kernel/add-service service)
       true  (kernel/add-tools tools)
-      store (kernel/add-filter (memory-advisor/memory-advisor store))
+      store (kernel/add-filter (memory-filter/memory-filter store))
       true  (as-> b (reduce kernel/add-filter b filters))
       true  (kernel/build-kernel))))
 

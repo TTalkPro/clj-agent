@@ -17,7 +17,7 @@ Clojure AI Agent Framework - Kernel 中央编排器
   - [deftool 宏](#deftool-宏)
   - [Kernel API](#kernel-api)
   - [Service 接口](#service-接口)
-  - [Advisor 中间件](#advisor-中间件洋葱式-around对标-spring-ai-advisor)
+  - [Filter 中间件](#filter-中间件洋葱式-around对标-spring-ai-advisor)
   - [Context（共享状态）](#context共享状态)
 - [LLM Provider](#llm-provider)
 - [开发](#开发)
@@ -30,8 +30,8 @@ Clojure AI Agent Framework - Kernel 中央编排器
 `clj-agent` 是一个 Clojure AI Agent 框架，提供从简单对话到工具调用的完整解决方案：
 
 - **Kernel + Tool 编排**：`deftool` 宏定义工具，Kernel 通过 `add-tools` 统一调度
-- **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）、`invoke`（工具调用循环）
-- **Advisor 中间件**：洋葱式 around 链（对标 Spring AI Advisor），:chat / :tool 两类，可短路/重试/计时
+- **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）；工具调用循环由 SimpleAgent 提供
+- **Filter 中间件**：洋葱式 around 链（对标 Spring AI Advisor），:chat / :tool 两类，可短路/重试/计时
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
 - **多 Provider 支持**：Anthropic、OpenAI、Zhipu、Ollama、Gemini、Mistral 及 OpenAI 兼容协议
 - **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批
@@ -246,16 +246,16 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
   (-> (kernel/create-kernel-builder)
       (kernel/add-service service)
       (kernel/add-tools my-tools)
-      (kernel/add-filter filters/logging-tool-advisor)
+      (kernel/add-filter filters/logging-filter)
       (kernel/build-kernel)))
 
-;; 纯 LLM 调用（经 :chat advisor 链，不触发工具）
+;; 纯 LLM 调用（经 :chat filter 链，不触发工具）
 (let [{:keys [response]} (kernel/invoke-chat app-kernel
                            [{:role "user" :content "你好"}]
                            {})]
   (println (:text response)))
 
-;; 单独调用工具（经 :tool advisor 链）
+;; 单独调用工具（经 :tool filter 链）
 (let [{:keys [value]} (kernel/invoke-tool app-kernel :get-weather
                         {:city "北京"} nil)]
   (println value))
@@ -296,7 +296,7 @@ Kernel 提供三类 API：
     (kernel/add-filter filter-def)      ;; 添加 Filter
     (kernel/build-kernel))              ;; 构建
 
-;; Invoke API - 调用（两个原语，均经 advisor 洋葱链）
+;; Invoke API - 调用（两个原语，均经 filter 洋葱链）
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; 调用函数（:tool 链）
 (kernel/invoke-chat kernel messages opts)                   ;; 纯 LLM（:chat 链，不含工具循环）
 ;; 工具调用循环不在 kernel —— 见 im.ttalk.agent.simpleagent（create-agent + chat）
@@ -319,26 +319,26 @@ Service 是一个 map，定义 LLM 调用协议：
 
 `clj-agent-llm` 模块的 `chat/create-service` 可自动创建。也可自行实现此 map 接入任意 LLM。
 
-### Advisor 中间件（洋葱式 around，对标 Spring AI Advisor）
+### Filter 中间件（洋葱式 around，对标 Spring AI Advisor）
 
-根抽象是 `advise-call(req, chain)`：chain 是下游，由 advisor 决定调不调、调几次、前后干什么
+根抽象是 `around(req, chain)`：chain 是下游，由 filter 决定调不调、调几次、前后干什么
 （可短路 / 重试 / 计时）。`before`/`after` 是只改写请求/响应的语法糖。
 
 ```clojure
-;; 自定义 advisor —— around（拿到 chain）
-(filters/create-advisor :my-advisor :tool :order 10
-  :advise-call (fn [req chain]
+;; 自定义 filter —— around（拿到 chain）
+(filters/create-filter :my-filter :tool :order 10
+  :around (fn [req chain]
                  (println "工具调用前:" (get-in req [:function :name]))
                  (chain req)))         ;; 不调 chain 即短路
 
 ;; 或只改写（糖）
-(filters/create-advisor :inject :chat :order 0
+(filters/create-filter :inject :chat :order 0
   :before (fn [req] (update req :messages conj sys-msg)))
 
-;; 内置 tool advisor
-filters/logging-tool-advisor        ;; 调用前后日志
-(filters/timeout-tool-advisor 5000) ;; 超时控制（ms，around）
-(filters/approval-tool-advisor)     ;; 敏感工具审批（拒绝则短路）
+;; 内置 tool filter
+filters/logging-filter        ;; 调用前后日志
+(filters/timeout-filter 5000) ;; 超时控制（ms，around）
+(filters/approval-filter)     ;; 敏感工具审批（拒绝则短路）
 
 ;; phase：:chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
 ;; order：越小越靠外层（最先 before、最后 after）

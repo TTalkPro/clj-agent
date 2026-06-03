@@ -52,7 +52,7 @@
 
    返回 Agent map"
   [opts]
-  (let [;; store 由 agent 持有（kernel 不再持有 memory）；并以 memory-advisor 形态挂进 kernel
+  (let [;; store 由 agent 持有（kernel 不再持有 memory）；并以 memory-filter 形态挂进 kernel
         store (or (:memory opts) (memory/in-memory-store))
         k (common/ensure-kernel (assoc opts :memory store))]
     {:kernel          k

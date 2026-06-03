@@ -9,8 +9,8 @@ English | [中文](README.md)
 `clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to tool-calling agents:
 
 - **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, Kernel uses `add-tools` for unified scheduling
-- **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM), `invoke` (tool-calling loop)
-- **Advisor Middleware**: onion-style around chain (mirrors Spring AI Advisor), :chat / :tool phases, can short-circuit/retry/time
+- **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM); the tool-calling loop is provided by SimpleAgent
+- **Filter Middleware**: onion-style around chain (mirrors Spring AI Advisor), :chat / :tool phases, can short-circuit/retry/time
 - **Service Abstraction**: LLM services via `{:chat-fn :build-result-msgs}` map, zero coupling
 - **Multi-Provider Support**: Anthropic, OpenAI, Zhipu, Ollama, Gemini, Mistral, and OpenAI-compatible protocols
 - **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval
@@ -183,16 +183,16 @@ Use the Kernel directly for maximum flexibility:
   (-> (kernel/create-kernel-builder)
       (kernel/add-service service)
       (kernel/add-tools my-tools)
-      (kernel/add-filter filters/logging-tool-advisor)
+      (kernel/add-filter filters/logging-filter)
       (kernel/build-kernel)))
 
-;; Pure LLM call (:chat advisor chain, no tool invocation)
+;; Pure LLM call (:chat filter chain, no tool invocation)
 (let [{:keys [response]} (kernel/invoke-chat app-kernel
                            [{:role "user" :content "Hello"}]
                            {})]
   (println (:text response)))
 
-;; Direct tool invocation (:tool advisor chain)
+;; Direct tool invocation (:tool filter chain)
 (let [{:keys [value]} (kernel/invoke-tool app-kernel :get-weather
                         {:city "Beijing"} nil)]
   (println value))
@@ -233,7 +233,7 @@ Kernel provides three categories of APIs:
     (kernel/add-filter filter-def)      ;; Add filter
     (kernel/build-kernel))              ;; Build
 
-;; Invoke API - two primitives (both through the advisor onion chain)
+;; Invoke API - two primitives (both through the filter onion chain)
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; Function call (:tool chain)
 (kernel/invoke-chat kernel messages opts)                   ;; Pure LLM (:chat chain, no tool loop)
 ;; The tool-calling loop is NOT in the kernel — see im.ttalk.agent.simpleagent (create-agent + chat)
@@ -256,27 +256,27 @@ Service is a map defining the LLM call protocol:
 
 `chat/create-service` from `clj-agent-llm` module creates this automatically. You can also implement this map yourself to integrate any LLM.
 
-### Advisor Middleware (onion-style around, mirrors Spring AI Advisor)
+### Filter Middleware (onion-style around, mirrors Spring AI Advisor)
 
-The root abstraction is `advise-call(req, chain)`: the advisor holds the downstream `chain`
+The root abstraction is `around(req, chain)`: the filter holds the downstream `chain`
 and decides whether/when/how many times to call it (short-circuit / retry / time it).
 `before`/`after` are sugar for request/response rewriting only.
 
 ```clojure
-;; Custom advisor — around (gets the chain)
-(filters/create-advisor :my-advisor :tool :order 10
-  :advise-call (fn [req chain]
+;; Custom filter — around (gets the chain)
+(filters/create-filter :my-filter :tool :order 10
+  :around (fn [req chain]
                  (println "Before tool call:" (get-in req [:function :name]))
                  (chain req)))        ;; not calling chain => short-circuit
 
 ;; Or rewrite-only (sugar)
-(filters/create-advisor :inject :chat :order 0
+(filters/create-filter :inject :chat :order 0
   :before (fn [req] (update req :messages conj sys-msg)))
 
-;; Built-in tool advisors
-filters/logging-tool-advisor        ;; Pre/post-call logging
-(filters/timeout-tool-advisor 5000) ;; Timeout control (ms, around)
-(filters/approval-tool-advisor)     ;; Sensitive tool approval (short-circuits on reject)
+;; Built-in tool filters
+filters/logging-filter        ;; Pre/post-call logging
+(filters/timeout-filter 5000) ;; Timeout control (ms, around)
+(filters/approval-filter)     ;; Sensitive tool approval (short-circuits on reject)
 
 ;; phase: :chat (invoke-chat, terminal calls LLM) | :tool (invoke-tool, terminal calls fn)
 ;; order: smaller = outer (before runs first, after runs last)

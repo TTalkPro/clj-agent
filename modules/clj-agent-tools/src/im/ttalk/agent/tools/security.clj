@@ -106,8 +106,8 @@
 ;; Kernel Filter 工厂
 ;; ============================================================
 
-(defn create-security-advisor
-  "创建安全 tool advisor
+(defn create-security-filter
+  "创建安全 tool filter
 
    调用工具前做权限检查；不通过则短路（不调下游），返回阻止原因结果。
 
@@ -115,12 +115,12 @@
    - policy: 安全策略（由 create-security-policy 创建）
    - opts:   可选参数 {:order 10}（兼容旧 :priority）
 
-   返回: advisor 定义 map（可直接传给 kernel/add-advisor）"
-  ([policy] (create-security-advisor policy {}))
+   返回: filter 定义 map（可直接传给 kernel/add-filter）"
+  ([policy] (create-security-filter policy {}))
   ([policy opts]
-   (kf/create-advisor :security :tool
+   (kf/create-filter :security :tool
      :order (or (:order opts) (:priority opts) 10)
-     :advise-call
+     :around
      (fn [req chain]
        (let [tool-name (get-in req [:function :name])
              args (:args req)

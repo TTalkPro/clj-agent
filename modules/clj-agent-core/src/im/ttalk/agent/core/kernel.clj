@@ -7,7 +7,7 @@
      (-> (create-kernel-builder)
          (add-tools [#'get-weather #'get-time])
          (add-service my-service)
-         (add-filter filters/logging-tool-advisor)
+         (add-filter filters/logging-filter)
          (build-kernel))
 
    Tool 定义（支持 tags）:
@@ -117,20 +117,20 @@
   (assoc builder :service service))
 
 (defn add-filter
-  "添加 Advisor 到 builder
+  "添加 Filter 到 builder
 
-   Advisor 是一个 map（由 filter/create-advisor 创建）：
-   {:name :x :phase :chat|:tool :order 0 :advise-call fn}（或 :before/:after 糖）。
+   Filter 是一个 map（由 filter/create-filter 创建）：
+   {:name :x :phase :chat|:tool :order 0 :around fn}（或 :before/:after 糖）。
    invoke-chat 跑 :phase :chat 链，invoke-tool 跑 :phase :tool 链。
 
    参数:
    - builder:     kernel builder
-   - advisor-def: advisor 定义 map
+   - filter-def: filter 定义 map
 
    返回:
    更新后的 builder"
-  [builder advisor-def]
-  (update builder :filters conj advisor-def))
+  [builder filter-def]
+  (update builder :filters conj filter-def))
 
 ;;; ============================================================
 ;;; 构建 Kernel
@@ -263,7 +263,7 @@
 ;;; ============================================================
 
 (defn- build-func-def
-  "构建 ToolRequest 的 :function 信息（供 tool advisor 读取）"
+  "构建 ToolRequest 的 :function 信息（供 tool filter 读取）"
   [fn-name tool-var]
   (let [schema (when tool-var
                  (:tool/schema (meta tool-var)))]
@@ -273,10 +273,10 @@
                   (boolean (:tool/sensitive (meta tool-var))))}))
 
 (defn invoke-tool
-  "调用 Kernel 中注册的函数（经 tool advisor 洋葱链）
+  "调用 Kernel 中注册的函数（经 tool filter 洋葱链）
 
-   组装 ToolRequest {:function :args :context} → build-chain(:phase :tool advisors) 包裹
-   → terminal 执行函数。advisor 可改写 args/context、短路(不调 chain，如审批拒绝/熔断/
+   组装 ToolRequest {:function :args :context} → build-chain(:phase :tool filters) 包裹
+   → terminal 执行函数。filter 可改写 args/context、短路(不调 chain，如审批拒绝/熔断/
    限流/安全策略)、around(超时计时)。
 
    参数:
@@ -299,7 +299,7 @@
                              :available (list-functions kernel)})))
         {:keys [tool-var]} found
         func-def (build-func-def fn-key tool-var)
-        ;; 最内层：执行函数。异常捕获为错误结果（不中断 advisor 链）
+        ;; 最内层：执行函数。异常捕获为错误结果（不中断 filter 链）
         terminal (fn [req]
                    (let [exec (try (tool/invoke tool-var (:args req) (:context req))
                                    (catch Exception e
@@ -309,7 +309,7 @@
                                  (str "错误: " (:error exec)))]
                      {:result value :context (or (:context exec) (:context req))}))
         chain (filters/build-chain
-                (filters/advisors-for-phase (:filters kernel) :tool)
+                (filters/filters-for-phase (:filters kernel) :tool)
                 terminal)
         out (chain {:function func-def :args args :context context})]
     {:value (:result out) :context (:context out)}))
@@ -319,11 +319,11 @@
 ;;; ============================================================
 
 (defn invoke-chat
-  "发送 Chat Completion 请求（经 chat advisor 洋葱链，不含工具调用循环）
+  "发送 Chat Completion 请求（经 chat filter 洋葱链，不含工具调用循环）
 
-   组装 ChatRequest → build-chain(:phase :chat advisors) 包裹 → terminal 调 LLM。
-   memory 等「读历史 / 改写请求 / 加工响应」能力以 chat advisor 形态注入；
-   advisor 可 around（短路 / 重试 / 计时），详见 kernel.filter。
+   组装 ChatRequest → build-chain(:phase :chat filters) 包裹 → terminal 调 LLM。
+   memory 等「读历史 / 改写请求 / 加工响应」能力以 chat filter 形态注入；
+   filter 可 around（短路 / 重试 / 计时），详见 kernel.filter。
 
    参数:
    - kernel:   Kernel 实例（需已配置 service）
@@ -343,13 +343,13 @@
             (throw (ex-info "Service 缺少 :chat-fn"
                             {:service-keys (keys service)})))
         context (or (:context opts) (ctx/create))
-        ;; 统一 ChatRequest：advisor 可改写其中任意字段
+        ;; 统一 ChatRequest：filter 可改写其中任意字段
         request {:messages      messages
                  :tools         (:tools opts)
                  :tool-choice   (:tool-choice opts)
                  :system-prompt (:system-prompt opts)
                  :context       context}
-        ;; 最内层：真正调 LLM（chat-opts 由 request 当前字段重建，吃到 advisor 的改写）
+        ;; 最内层：真正调 LLM（chat-opts 由 request 当前字段重建，吃到 filter 的改写）
         terminal (fn [req]
                    (let [chat-opts (cond-> {}
                                      (some? (:tools req))         (assoc :tools (:tools req))
@@ -358,7 +358,7 @@
                      {:response (chat-fn (:messages req) chat-opts)
                       :context  (:context req)}))
         chain (filters/build-chain
-                (filters/advisors-for-phase (:filters kernel) :chat)
+                (filters/filters-for-phase (:filters kernel) :chat)
                 terminal)]
     (chain request)))
 

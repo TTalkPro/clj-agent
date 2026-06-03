@@ -261,21 +261,21 @@
                     {:available-tokens (:tokens @(:state rl))}))))
 
 ;; ============================================================
-;; Kernel Tool Advisor 工厂
+;; Kernel Tool Filter 工厂
 ;; ============================================================
 
-(defn circuit-breaker-advisor
-  "断路器 tool advisor
+(defn circuit-breaker-filter
+  "断路器 tool filter
 
    断路器 open 时短路（不调下游），返回提示结果。
 
    参数:
    - cb: 断路器实例（由 create-circuit-breaker 创建）
 
-   返回: advisor 定义 map"
+   返回: filter 定义 map"
   [cb]
-  (kf/create-advisor :circuit-breaker :tool :order -30
-    :advise-call
+  (kf/create-filter :circuit-breaker :tool :order -30
+    :around
     (fn [req chain]
       (if (should-allow? cb)
         (do (when (= :half-open (:status @(:state cb)))
@@ -283,18 +283,18 @@
             (chain req))
         {:result "Circuit breaker is open" :context (:context req)}))))
 
-(defn rate-limit-advisor
-  "速率限制 tool advisor
+(defn rate-limit-filter
+  "速率限制 tool filter
 
    无法获取令牌时短路（不调下游），返回提示结果。
 
    参数:
    - rl: 速率限制器实例（由 create-rate-limiter 创建）
 
-   返回: advisor 定义 map"
+   返回: filter 定义 map"
   [rl]
-  (kf/create-advisor :rate-limit :tool :order -20
-    :advise-call
+  (kf/create-filter :rate-limit :tool :order -20
+    :around
     (fn [req chain]
       (if (acquire-token! rl)
         (chain req)

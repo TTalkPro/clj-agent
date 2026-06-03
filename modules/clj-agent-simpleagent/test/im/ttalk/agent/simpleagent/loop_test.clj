@@ -2,7 +2,7 @@
   "工具调用循环测试（从 core context_test 的 Phase 5 迁来）
 
    循环 + memory 已下沉 simpleagent：kernel 只提供 invoke-chat/invoke-tool，
-   memory 以 memory-advisor 形态挂进 kernel，store 由调用方持有并显式传给 invoke。"
+   memory 以 memory-filter 形态挂进 kernel，store 由调用方持有并显式传给 invoke。"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.core.kernel :as core]
             [im.ttalk.agent.core.kernel.context :as context]
@@ -10,7 +10,7 @@
             [im.ttalk.agent.core.llm.response :as response]
             [im.ttalk.agent.core.llm.message :as msg]
             [im.ttalk.agent.simpleagent.memory :as memory]
-            [im.ttalk.agent.simpleagent.memory-advisor :as ma]
+            [im.ttalk.agent.simpleagent.memory-filter :as ma]
             [im.ttalk.agent.simpleagent.loop :as agent-loop]))
 
 ;;; ============================================================
@@ -39,7 +39,7 @@
      :context (context/set-var ctx :counter (inc c))}))
 
 ;;; ============================================================
-;;; 公共设施：mock service + 挂载 memory-advisor 的 kernel
+;;; 公共设施：mock service + 挂载 memory-filter 的 kernel
 ;;; ============================================================
 
 (defn- mock-service [responses-fn]
@@ -50,7 +50,7 @@
   (cond-> (core/create-kernel-builder)
     (seq tools) (core/add-tools tools)
     true        (core/add-service svc)
-    store       (core/add-filter (ma/memory-advisor store))
+    store       (core/add-filter (ma/memory-filter store))
     true        (core/build-kernel)))
 
 ;;; ============================================================
@@ -136,7 +136,7 @@
       (is (= "Be helpful" (:system-prompt @received-opts))))))
 
 ;;; ============================================================
-;;; 外部手搓工具循环（只回传 delta，历史由 memory-advisor 拼）
+;;; 外部手搓工具循环（只回传 delta，历史由 memory-filter 拼）
 ;;; ============================================================
 
 (deftest external-tool-loop-test

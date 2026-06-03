@@ -26,7 +26,7 @@ clj-agent/
 **包含**:
 - `im.ttalk.agent.core.kernel` - Kernel（Build/invoke-chat/invoke-tool/Query API）
 - `im.ttalk.agent.core.kernel.tool` - deftool 宏（工具函数定义 + schema 生成）
-- `im.ttalk.agent.core.kernel.filter` - Advisor 洋葱链（对标 Spring AI Advisor）
+- `im.ttalk.agent.core.kernel.filter` - Filter 洋葱链（对标 Spring AI Advisor）
 - `im.ttalk.agent.core.kernel.context` - Context 共享状态管理
 - `im.ttalk.agent.core.http.client` - HTTP 客户端
 
@@ -59,7 +59,7 @@ clj-agent/
 - `im.ttalk.agent.simpleagent` - SimpleAgent（同步有状态，可选 pause/resume 审批）
 - `im.ttalk.agent.simpleagent.loop` - 工具调用循环（invoke/resume，从 kernel 下沉）
 - `im.ttalk.agent.simpleagent.memory` / `.memory.sqlite` - ChatMemory store（in-memory / windowed / SQLite）
-- `im.ttalk.agent.simpleagent.memory-advisor` - 按 conversation-id 串历史的 chat advisor
+- `im.ttalk.agent.simpleagent.memory-filter` - 按 conversation-id 串历史的 chat filter
 - `im.ttalk.agent.simpleagent.common` - 共享构建逻辑
 
 **依赖**: `clj-agent-core`, `clj-agent-llm`, next.jdbc, sqlite-jdbc

@@ -59,15 +59,15 @@
 
 ### Kernel Invoke API
 
-kernel 只提供两个原语（均经 advisor 洋葱链）；**工具调用循环不在 kernel**，已下沉到
+kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环不在 kernel**，已下沉到
 `im.ttalk.agent.simpleagent`（`create-agent` + `chat`，或 `simpleagent.loop/invoke`）。
 
 ```clojure
-;; 调用工具函数（经过 :phase :tool advisor 链）
+;; 调用工具函数（经过 :phase :tool filter 链）
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)
 ;; => {:value result :context updated-ctx}
 
-;; LLM 调用（经过 :phase :chat advisor 链，不含工具循环）
+;; LLM 调用（经过 :phase :chat filter 链，不含工具循环）
 (kernel/invoke-chat kernel messages opts)
 ;; => {:response {:text "..." :tool-calls [...]} :context ctx}
 ```
@@ -98,28 +98,28 @@ kernel 只提供两个原语（均经 advisor 洋葱链）；**工具调用循�
 ;; 生成的 metadata: :tool/schema :tool/sensitive
 ```
 
-### Advisor API（洋葱式 around，对标 Spring AI Advisor）
+### Filter API（洋葱式 around，对标 Spring AI Advisor）
 
 ```clojure
 (require '[im.ttalk.agent.core.kernel.filter :as filters])
 
-;; 创建 Advisor —— 根抽象 advise-call(req, chain)；before/after 为糖
-(filters/create-advisor :name :chat :order 10
-  :advise-call (fn [req chain] ... (chain req') ...))   ;; 完整 around
-(filters/create-advisor :name :tool :order 10
+;; 创建 Filter —— 根抽象 around(req, chain)；before/after 为糖
+(filters/create-filter :name :chat :order 10
+  :around (fn [req chain] ... (chain req') ...))   ;; 完整 around
+(filters/create-filter :name :tool :order 10
   :before (fn [req] req') :after (fn [resp] resp'))     ;; 改写糖
 
 ;; phase: :chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
 ;; order: 越小越靠外层（最先 before、最后 after）；不调 chain 即短路
 
-;; 内置 tool advisor
-filters/logging-tool-advisor
-(filters/timeout-tool-advisor 5000)   ;; around：超时返回提示结果
-(filters/approval-tool-advisor)       ;; around：敏感工具人工审批，拒绝则短路
+;; 内置 tool filter
+filters/logging-filter
+(filters/timeout-filter 5000)   ;; around：超时返回提示结果
+(filters/approval-filter)       ;; around：敏感工具人工审批，拒绝则短路
 
 ;; 挂载 + 执行
-(kernel/add-filter builder my-advisor) ;; 加入 builder
-(filters/build-chain advisors terminal) ;; 折成洋葱，返回 (fn [req] -> resp)
+(kernel/add-filter builder my-filter) ;; 加入 builder
+(filters/build-chain filters terminal) ;; 折成洋葱，返回 (fn [req] -> resp)
 ```
 
 ### Context API
@@ -154,8 +154,8 @@ filters/logging-tool-advisor
 ### Key APIs
 
 - `kernel/create-kernel-builder` → `add-tools` → `add-service` → `add-filter` → `build-kernel`
-- `kernel/invoke-tool` - Single tool invocation through the :tool advisor chain
-- `kernel/invoke-chat` - LLM call through the :chat advisor chain
+- `kernel/invoke-tool` - Single tool invocation through the :tool filter chain
+- `kernel/invoke-chat` - LLM call through the :chat filter chain
   (the tool-calling loop lives in `im.ttalk.agent.simpleagent`, not the kernel)
 - `deftool` - Define tool with auto-generated schema
 - `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/track-message` - Context management

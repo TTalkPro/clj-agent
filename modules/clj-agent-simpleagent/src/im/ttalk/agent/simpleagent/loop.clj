@@ -3,11 +3,11 @@
 
    kernel 只提供原语 invoke-chat / invoke-tool；'驱动 LLM↔工具直到文本或暂停'
    这套策略(含 max-iterations / gate 暂停 / resume / 悬空 tool_use 自愈)属编排层，
-   放在 simpleagent。每轮只向 invoke-chat 传 delta，由 kernel 的 memory advisor
+   放在 simpleagent。每轮只向 invoke-chat 传 delta，由 kernel 的 memory filter
    按 conversation-id 拼出完整历史。
 
    store 显式传入(kernel 不再持有 memory)：用于 heal 与临时会话清理；
-   与 kernel 上挂载的 memory-advisor 必须是同一个 store 实例。"
+   与 kernel 上挂载的 memory-filter 必须是同一个 store 实例。"
   (:require [clojure.string]
             [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
@@ -144,7 +144,7 @@
 
    参数:
    - kernel:   Kernel 实例（需注册 LLM 服务）
-   - store:    ChatMemory store（与 kernel 上 memory-advisor 同一实例；用于 heal/临时清理）
+   - store:    ChatMemory store（与 kernel 上 memory-filter 同一实例；用于 heal/临时清理）
    - messages: 本轮新消息（中立消息）
    - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags}
 

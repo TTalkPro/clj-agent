@@ -123,10 +123,10 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"函数未找到"
             (core/invoke-tool kernel :nonexistent {} (context/create)))))))
 
-(deftest invoke-tool-with-advisors-test
-  (let [modify (filters/create-advisor :modify :tool
+(deftest invoke-tool-with-filters-test
+  (let [modify (filters/create-filter :modify :tool
                  :before (fn [req] (update req :args assoc :text "modified")))
-        mark (filters/create-advisor :mark :tool
+        mark (filters/create-filter :mark :tool
                :after (fn [resp] (update resp :context context/set-var :invoked true)))
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
@@ -139,15 +139,15 @@
       (let [result (core/invoke-tool kernel :simple-echo {:text "x"} (context/create))]
         (is (true? (context/get-var (:context result) :invoked)))))))
 
-(deftest invoke-tool-skip-advisor-test
-  (let [blocker (filters/create-advisor :blocker :tool
-                  :advise-call (fn [req _chain] {:result "blocked by advisor" :context (:context req)}))
+(deftest invoke-tool-skip-filter-test
+  (let [blocker (filters/create-filter :blocker :tool
+                  :around (fn [req _chain] {:result "blocked by filter" :context (:context req)}))
         kernel (core/build-kernel
                  (-> (core/create-kernel-builder)
                      (core/add-tools [#'simple-echo])
                      (core/add-filter blocker)))]
-    (testing "advisor 不调 chain 直接短路返回"
-      (is (= "blocked by advisor" (:value (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))))))))
+    (testing "filter 不调 chain 直接短路返回"
+      (is (= "blocked by filter" (:value (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))))))))
 
 ;; ============================================================
 ;; invoke-chat
@@ -166,8 +166,8 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"未配置 LLM 服务"
               (core/invoke-chat no-svc [{:role :user :content "hi"}] {})))))))
 
-(deftest invoke-chat-with-chat-advisor-test
-  (let [inject (filters/create-advisor :inject :chat
+(deftest invoke-chat-with-chat-filter-test
+  (let [inject (filters/create-filter :inject :chat
                  :before (fn [req]
                            (update req :messages #(into [{:role :system :content "injected"}] %))))
         received (atom nil)
@@ -178,7 +178,7 @@
                  (-> (core/create-kernel-builder)
                      (core/add-filter inject)
                      (core/add-service svc)))]
-    (testing "chat advisor 的 before 修改传给 LLM 的消息"
+    (testing "chat filter 的 before 修改传给 LLM 的消息"
       (reset! received nil)
       (core/invoke-chat kernel [{:role :user :content "hi"}] {})
       (is (= :system (:role (first @received))))
