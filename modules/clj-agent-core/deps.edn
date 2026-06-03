@@ -5,9 +5,6 @@
 
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
-        ;; 异步（process runtime）
-        org.clojure/core.async {:mvn/version "1.6.681"}
-
         ;; JSON（http/client.clj）
         cheshire/cheshire {:mvn/version "5.12.0"}
 

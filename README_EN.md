@@ -6,23 +6,22 @@ English | [中文](README.md)
 
 ## Overview
 
-`clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to complex workflows:
+`clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to tool-calling agents:
 
 - **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, Kernel uses `add-tools` for unified scheduling
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM), `invoke` (tool-calling loop)
-- **Filter Middleware**: Ring-style onion model with 4 filter types (pre/post invocation, pre/post chat)
+- **Advisor Middleware**: onion-style around chain (mirrors Spring AI Advisor), :chat / :tool phases, can short-circuit/retry/time
 - **Service Abstraction**: LLM services via `{:chat-fn :build-result-msgs}` map, zero coupling
 - **Multi-Provider Support**: Anthropic, OpenAI, Zhipu, Ollama, Gemini, Mistral, and OpenAI-compatible protocols
-- **SimpleAgent Wrappers**: KernelAgent (synchronous stateful) and ProcessAgent (pause/resume approval)
-- **Process Runtime**: core.async-based event-driven workflows with parallel, fan-in/fan-out, human-in-the-loop
+- **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval
+- **ChatMemory**: per-conversation-id history persistence (in-memory / windowed / SQLite)
 
 ## Architecture Overview
 
 ```mermaid
 graph TB
     subgraph "User Layer"
-        KA[KernelAgent<br/>Synchronous Stateful]
-        PA[ProcessAgent<br/>Pause/Resume Approval]
+        SA[SimpleAgent<br/>Synchronous Stateful<br/>Optional Pause/Resume Approval]
     end
 
     subgraph "Orchestration Layer"
@@ -45,17 +44,11 @@ graph TB
         MS[Mistral]
     end
 
-    subgraph "Runtime Layer"
-        RT[Process Runtime<br/>core.async Event-Driven]
-    end
-
     subgraph "Extension Layer"
         PLG[Tool Library<br/>File/HTTP/Shell]
     end
 
-    KA --> K
-    PA --> K
-    PA --> RT
+    SA --> K
     K --> T
     K --> F
     K --> S
@@ -68,9 +61,9 @@ graph TB
 
 ```mermaid
 graph LR
-    core[clj-agent-core<br/>Kernel, Tool, Filter<br/>Process Runtime]
+    core[clj-agent-core<br/>Kernel, Tool, Filter<br/>ChatMemory]
     llm[clj-agent-llm<br/>Provider, Service]
-    sa[clj-agent-simpleagent<br/>KernelAgent, ProcessAgent]
+    sa[clj-agent-simpleagent<br/>SimpleAgent]
     tools[clj-agent-tools<br/>File, HTTP, Shell]
 
     llm --> core
@@ -84,9 +77,9 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # Core (Kernel, Tool, Filter, deftool, Process Runtime)
+│   ├── clj-agent-core/         # Core (Kernel, Tool, Filter, deftool, ChatMemory)
 │   ├── clj-agent-llm/          # LLM Provider + Service Factory
-│   ├── clj-agent-simpleagent/  # High-level Agent Wrappers (KernelAgent, ProcessAgent)
+│   ├── clj-agent-simpleagent/  # High-level Agent Wrapper (SimpleAgent)
 │   └── clj-agent-tools/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
 ├── examples/                   # Usage Examples
 ├── docs/                       # Design Documents
@@ -108,7 +101,7 @@ clj-agent/
 The simplest way to use the framework with automatic state management:
 
 ```clojure
-(require '[im.ttalk.agent.simpleagent.kernel-agent :as ka])
+(require '[im.ttalk.agent.simpleagent :as ka])
 (require '[im.ttalk.agent.core.kernel.tool :refer [deftool]])
 (require '[im.ttalk.agent.llm.factory.builder :as factory])
 
@@ -139,12 +132,12 @@ The simplest way to use the framework with automatic state management:
 (ka/reset! agent)
 ```
 
-### Option 2: ProcessAgent (Sensitive Tool Approval)
+### Option 2: SimpleAgent + Sensitive Tool Approval
 
-Automatically pauses when encountering tools marked as `:sensitive`, awaiting human approval:
+Configuring `:on-pause` enables pause/resume: the agent automatically pauses when encountering tools marked as `:sensitive`, awaiting human approval:
 
 ```clojure
-(require '[im.ttalk.agent.simpleagent.process-agent :as pa])
+(require '[im.ttalk.agent.simpleagent :as ka])
 
 (deftool delete-file
   "Delete a file"
@@ -154,19 +147,19 @@ Automatically pauses when encountering tools marked as `:sensitive`, awaiting hu
 
 (def file-tools [#'delete-file])
 
-(def agent (pa/create-process-agent
+(def agent (ka/create-agent
              {:provider provider
               :model "gpt-4"
               :tools file-tools
               :on-pause (fn [{:keys [reason]}]
-                          (println "Approval needed:" reason))}))
+                          (println "Approval needed:" reason))}))   ;; enables pause/resume
 
-(let [result (pa/chat agent "Delete /tmp/test.txt")]
+(let [result (ka/chat agent "Delete /tmp/test.txt")]
   (when (= :paused (:status result))
     (println "Pending tool:" (get-in result [:pending-tool :name]))
     ;; Approve
-    (pa/resume agent "approved")
-    ;; Or reject: (pa/resume agent "rejected")
+    (ka/resume agent "approved")
+    ;; Or reject: (ka/resume agent "rejected")
     ))
 ```
 
@@ -185,31 +178,28 @@ Use the Kernel directly for maximum flexibility:
                 :model "gpt-4"
                 :max-tokens 4096}))
 
-;; Build Kernel
+;; Build Kernel (kernel provides only the primitives: invoke-chat / invoke-tool)
 (def app-kernel
   (-> (kernel/create-kernel-builder)
       (kernel/add-service service)
       (kernel/add-tools my-tools)
-      (kernel/add-filter filters/logging-pre-filter)
-      (kernel/add-filter filters/error-handling-filter)
+      (kernel/add-filter filters/logging-tool-advisor)
       (kernel/build-kernel)))
 
-;; Tool-calling loop (auto LLM + Tool interaction)
-(let [messages [{:role "user" :content "What's the weather in Beijing?"}]
-      result (kernel/invoke app-kernel messages {})]
-  (println (get-in result [:response :text]))
-  (println "Tools called:" (:tool-calls-made result)))
-
-;; Pure LLM call (no tool invocation)
+;; Pure LLM call (:chat advisor chain, no tool invocation)
 (let [{:keys [response]} (kernel/invoke-chat app-kernel
                            [{:role "user" :content "Hello"}]
                            {})]
   (println (:text response)))
 
-;; Direct tool invocation (through Filter pipeline)
+;; Direct tool invocation (:tool advisor chain)
 (let [{:keys [value]} (kernel/invoke-tool app-kernel :get-weather
                         {:city "Beijing"} nil)]
   (println value))
+
+;; The full tool-calling loop is SimpleAgent's job (see Option 1 above), not the kernel:
+;; (require '[im.ttalk.agent.simpleagent :as agent])
+;; (agent/chat (agent/create-agent {:provider provider :tools my-tools}) "What's the weather in Beijing?")
 ```
 
 ## Core Concepts
@@ -224,7 +214,7 @@ Simultaneously defines a Clojure function and generates an LLM tool schema:
   [[param1 :string "Parameter description"]
    [param2 :int "Optional parameter" :default 10]
    [param3 :boolean "Boolean parameter"]]
-  {:sensitive true    ;; Optional: mark as sensitive (ProcessAgent will pause for approval)
+  {:sensitive true    ;; Optional: mark as sensitive (SimpleAgent pauses for approval when :on-pause is set)
    :context true}     ;; Optional: needs Context access (adds ctx parameter to function signature)
   (body ...))
 
@@ -243,10 +233,10 @@ Kernel provides three categories of APIs:
     (kernel/add-filter filter-def)      ;; Add filter
     (kernel/build-kernel))              ;; Build
 
-;; Invoke API - Invocation
-(kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; Function call (through Filters)
-(kernel/invoke-chat kernel messages opts)                   ;; Pure LLM (no tool loop)
-(kernel/invoke kernel messages opts)                        ;; Tool-calling loop (main entry)
+;; Invoke API - two primitives (both through the advisor onion chain)
+(kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; Function call (:tool chain)
+(kernel/invoke-chat kernel messages opts)                   ;; Pure LLM (:chat chain, no tool loop)
+;; The tool-calling loop is NOT in the kernel — see im.ttalk.agent.simpleagent (create-agent + chat)
 
 ;; Query API - Query
 (:tools kernel)                       ;; All tool schemas
@@ -266,30 +256,30 @@ Service is a map defining the LLM call protocol:
 
 `chat/create-service` from `clj-agent-llm` module creates this automatically. You can also implement this map yourself to integrate any LLM.
 
-### Filter Middleware
+### Advisor Middleware (onion-style around, mirrors Spring AI Advisor)
 
-Four types of Filters in a Ring-style onion model:
+The root abstraction is `advise-call(req, chain)`: the advisor holds the downstream `chain`
+and decides whether/when/how many times to call it (short-circuit / retry / time it).
+`before`/`after` are sugar for request/response rewriting only.
 
 ```clojure
-;; Create custom Filter
-(filters/create-filter :my-filter :pre-invocation
-  (fn [filter-ctx]
-    (println "Before tool call:" (:tool-name filter-ctx))
-    {:action :continue :context filter-ctx})
-  :priority 10)
+;; Custom advisor — around (gets the chain)
+(filters/create-advisor :my-advisor :tool :order 10
+  :advise-call (fn [req chain]
+                 (println "Before tool call:" (get-in req [:function :name]))
+                 (chain req)))        ;; not calling chain => short-circuit
 
-;; Built-in Filters
-filters/logging-pre-filter         ;; Pre-invocation logging
-filters/logging-post-filter        ;; Post-invocation logging
-filters/error-handling-filter      ;; Exception handling
-(filters/timeout-filter 5000)      ;; Timeout control (ms)
-filters/approval-filter            ;; Sensitive tool approval
+;; Or rewrite-only (sugar)
+(filters/create-advisor :inject :chat :order 0
+  :before (fn [req] (update req :messages conj sys-msg)))
 
-;; Filter types
-;; :pre-invocation   Before tool call (can modify args/context, can skip execution)
-;; :post-invocation  After tool call (can modify result/context)
-;; :pre-chat         Before LLM call (can modify messages/context)
-;; :post-chat        After LLM call (can modify response/context)
+;; Built-in tool advisors
+filters/logging-tool-advisor        ;; Pre/post-call logging
+(filters/timeout-tool-advisor 5000) ;; Timeout control (ms, around)
+(filters/approval-tool-advisor)     ;; Sensitive tool approval (short-circuits on reject)
+
+;; phase: :chat (invoke-chat, terminal calls LLM) | :tool (invoke-tool, terminal calls fn)
+;; order: smaller = outer (before runs first, after runs last)
 ```
 
 ### Context (Shared State)
@@ -340,68 +330,6 @@ Context manages shared state within a conversation:
                  :base-url "http://localhost:8000/v1"}))
 ```
 
-## Process Runtime
-
-A core.async-based event-driven workflow engine supporting:
-
-- Linear/parallel/fan-in/fan-out execution patterns
-- Human-in-the-loop pause/resume
-- External event injection (interactive Agents, webhook callbacks)
-- Safe snapshot points (on-quiescent callback)
-- Step lifecycle management (init → can-activate? → on-activate → on-terminate)
-
-```clojure
-(require '[im.ttalk.agent.core.kernel.process.builder :as process])
-(require '[im.ttalk.agent.core.kernel.process.runtime :as runtime])
-
-;; Define Process
-(def spec
-  (-> (process/builder :document-gen)
-      (process/add-step {:id :gather
-                         :on-activate (fn [state ctx event]
-                                        {:emit [{:target :generate
-                                                 :data (:data event)}]})})
-      (process/add-step {:id :generate
-                         :on-activate (fn [state ctx event]
-                                        {:result (generate-doc (:data event))})})
-      (process/on-event :start :gather :input)
-      (process/on-event :ready :generate :data)
-      (process/build)))
-
-;; Execute
-(def result (runtime/run-process spec {:input {:topic "AI"}}))
-```
-
-### External Event Support
-
-Inject external events into running Processes for interactive scenarios (chat Agents, webhook callbacks):
-
-```clojure
-;; Build Process with external event bindings
-(def interactive-spec
-  (-> (process/builder :chat)
-      (process/add-step
-        {:id :handler
-         :on-activate (fn [inputs state ctx]
-                        (if (= (:input inputs) "/quit")
-                          {:terminate true}  ;; Termination signal
-                          {:events [{:name :response :data "..."}]}))})
-      (process/on-external-event :user-input :handler :input)
-      (process/build)))
-
-;; Start asynchronously (returns ProcessHandle)
-(def handle (runtime/start-process-async interactive-spec {}))
-
-;; Send external events
-(runtime/send-event handle :user-input "Hello!")
-(runtime/send-event handle :user-input "/quit")
-
-;; Wait for completion
-(runtime/wait-for-completion handle)
-```
-
-See [docs/process-framework-design.md](docs/process-framework-design.md) and [docs/process-parallel-design.md](docs/process-parallel-design.md) for detailed design.
-
 ## Development
 
 ```bash
@@ -420,13 +348,12 @@ See [docs/process-framework-design.md](docs/process-framework-design.md) and [do
 Core:
 
 - org.clojure/clojure 1.11.4
-- org.clojure/core.async 1.6.681
 - cheshire/cheshire 5.12.0
 - com.taoensso/timbre 6.3.0
 - http-kit/http-kit 2.8.0
 - net.clojars.wkok/openai-clojure 0.21.0
 
-Persistent ChatMemory (SQLite backend, opt-in via `im.ttalk.agent.core.memory.sqlite`):
+Persistent ChatMemory (SQLite backend, opt-in via `im.ttalk.agent.simpleagent.memory.sqlite`):
 
 - com.github.seancorfield/next.jdbc 1.3.939
 - org.xerial/sqlite-jdbc 3.45.1.0

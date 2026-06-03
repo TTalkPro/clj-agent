@@ -7,9 +7,9 @@ clj-agent 分为多个独立模块：
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, Process Runtime）
+│   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, ChatMemory）
 │   ├── clj-agent-llm/          # LLM Provider + Service 工厂
-│   ├── clj-agent-simpleagent/  # 高级 Agent 封装（KernelAgent, ProcessAgent）
+│   ├── clj-agent-simpleagent/  # 高级 Agent 封装（SimpleAgent，含 pause/resume）
 │   └── clj-agent-tools/       # 预置插件库（File, HTTP, Shell）
 ├── scripts/                     # 构建脚本
 └── deps.edn                     # 根配置
@@ -21,17 +21,16 @@ clj-agent/
 
 ### 1. clj-agent-core
 
-**职责**: Kernel 编排器、工具系统、Process 运行时
+**职责**: Kernel 编排器、工具系统、Filter 中间件
 
 **包含**:
-- `im.ttalk.agent.core.kernel` - Kernel（Build/Invoke/Query API）
+- `im.ttalk.agent.core.kernel` - Kernel（Build/invoke-chat/invoke-tool/Query API）
 - `im.ttalk.agent.core.kernel.tool` - deftool 宏（工具函数定义 + schema 生成）
-- `im.ttalk.agent.core.kernel.filter` - Filter 拦截链（Ring-style 中间件）
+- `im.ttalk.agent.core.kernel.filter` - Advisor 洋葱链（对标 Spring AI Advisor）
 - `im.ttalk.agent.core.kernel.context` - Context 共享状态管理
-- `im.ttalk.agent.core.kernel.process.*` - 事件驱动 Process 运行时
 - `im.ttalk.agent.core.http.client` - HTTP 客户端
 
-**依赖**: core.async, cheshire, timbre, http-kit
+**依赖**: cheshire, timbre, http-kit
 
 ---
 
@@ -57,11 +56,13 @@ clj-agent/
 **职责**: 开箱即用的 Agent 封装
 
 **包含**:
-- `im.ttalk.agent.simpleagent.kernel-agent` - KernelAgent（同步有状态）
-- `im.ttalk.agent.simpleagent.process-agent` - ProcessAgent（pause/resume 审批）
+- `im.ttalk.agent.simpleagent` - SimpleAgent（同步有状态，可选 pause/resume 审批）
+- `im.ttalk.agent.simpleagent.loop` - 工具调用循环（invoke/resume，从 kernel 下沉）
+- `im.ttalk.agent.simpleagent.memory` / `.memory.sqlite` - ChatMemory store（in-memory / windowed / SQLite）
+- `im.ttalk.agent.simpleagent.memory-advisor` - 按 conversation-id 串历史的 chat advisor
 - `im.ttalk.agent.simpleagent.common` - 共享构建逻辑
 
-**依赖**: `clj-agent-core`, `clj-agent-llm`
+**依赖**: `clj-agent-core`, `clj-agent-llm`, next.jdbc, sqlite-jdbc
 
 ---
 
