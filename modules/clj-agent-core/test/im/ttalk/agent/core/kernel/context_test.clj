@@ -102,8 +102,7 @@
 
 (deftest invoke-tool-test
   (let [kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'simple-echo #'append-item #'inc-counter])))]
+                 {:tools [#'simple-echo #'append-item #'inc-counter]})]
     (testing "普通 tool 返回 {:value :context}"
       (let [result (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))]
         (is (= "echo: hi" (:value result)))
@@ -124,28 +123,28 @@
             (core/invoke-tool kernel :nonexistent {} (context/create)))))))
 
 (deftest invoke-tool-with-filters-test
-  (let [modify (filters/create-filter :modify :tool
-                 :before (fn [req] (update req :args assoc :text "modified")))
-        mark (filters/create-filter :mark :tool
-               :after (fn [resp] (update resp :context context/set-var :invoked true)))
+  (let [modify {:name :modify
+                :tool (fn [req chain]
+                        (chain (update req :args assoc :text "modified")))}
+        mark {:name :mark
+              :tool (fn [req chain]
+                      (let [resp (chain req)]
+                        (update resp :context context/set-var :invoked true)))}
         kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'simple-echo])
-                     (core/add-filter modify)
-                     (core/add-filter mark)))]
-    (testing "before 改参数"
+                 {:tools [#'simple-echo]
+                  :filters [modify mark]})]
+    (testing "around 改参数"
       (is (= "echo: modified" (:value (core/invoke-tool kernel :simple-echo {:text "original"} (context/create))))))
-    (testing "after 改 context"
+    (testing "around 改 context"
       (let [result (core/invoke-tool kernel :simple-echo {:text "x"} (context/create))]
         (is (true? (context/get-var (:context result) :invoked)))))))
 
 (deftest invoke-tool-skip-filter-test
-  (let [blocker (filters/create-filter :blocker :tool
-                  :around (fn [req _chain] {:result "blocked by filter" :context (:context req)}))
+  (let [blocker {:name :blocker
+                 :tool (fn [req _chain] {:result "blocked by filter" :context (:context req)})}
         kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-tools [#'simple-echo])
-                     (core/add-filter blocker)))]
+                 {:tools [#'simple-echo]
+                  :filters [blocker]})]
     (testing "filter 不调 chain 直接短路返回"
       (is (= "blocked by filter" (:value (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))))))))
 
@@ -156,29 +155,28 @@
 (deftest invoke-chat-test
   (let [svc {:chat-fn (fn [_ _] (response/make-response :text "hello response" :tool-calls nil))
              :build-result-msgs (fn [_ _] [])}
-        kernel (core/build-kernel (-> (core/create-kernel-builder) (core/add-service svc)))]
+        kernel (core/build-kernel {:service svc})]
     (testing "invoke-chat 返回 {:response :context}"
       (let [result (core/invoke-chat kernel [{:role :user :content "hi"}] {})]
         (is (= "hello response" (get-in result [:response :text])))
         (is (context/context? (:context result)))))
     (testing "无 service 抛异常"
-      (let [no-svc (core/build-kernel (core/create-kernel-builder))]
+      (let [no-svc (core/build-kernel {})]
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"未配置 LLM 服务"
               (core/invoke-chat no-svc [{:role :user :content "hi"}] {})))))))
 
 (deftest invoke-chat-with-chat-filter-test
-  (let [inject (filters/create-filter :inject :chat
-                 :before (fn [req]
-                           (update req :messages #(into [{:role :system :content "injected"}] %))))
+  (let [inject {:name :inject
+                :chat (fn [req chain]
+                        (chain (update req :messages #(into [{:role :system :content "injected"}] %))))}
         received (atom nil)
         svc {:chat-fn (fn [msgs _] (reset! received msgs)
                         (response/make-response :text "response" :tool-calls nil))
              :build-result-msgs (fn [_ _] [])}
         kernel (core/build-kernel
-                 (-> (core/create-kernel-builder)
-                     (core/add-filter inject)
-                     (core/add-service svc)))]
-    (testing "chat filter 的 before 修改传给 LLM 的消息"
+                 {:service svc
+                  :filters [inject]})]
+    (testing "chat filter 修改传给 LLM 的消息"
       (reset! received nil)
       (core/invoke-chat kernel [{:role :user :content "hi"}] {})
       (is (= :system (:role (first @received))))
