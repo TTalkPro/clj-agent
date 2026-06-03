@@ -193,8 +193,8 @@
                    :on-activate (fn [inputs _state ctx]
                                   (let [question (:input inputs)
                                         _ (println (str "    [turn-1] 提问: " question))
-                                        ;; 使用 invoke 以确保消息被 track 到 context
-                                        {:keys [response context]}
+                                        ;; invoke 经 conversation-id 把消息存入 ChatMemory
+                                        {:keys [response tool-context]}
                                         (kernel/invoke app-kernel
                                           [{:role "user" :content question}]
                                           {:context ctx
@@ -202,24 +202,22 @@
                                         answer (get-in response [:text])]
                                     (println (str "    [turn-1] 回复: " answer))
                                     {:events [{:name :turn-1-done :data answer}]
-                                     :context context}))})
+                                     :context tool-context}))})
                 (builder/add-step
                   {:id :turn-2
                    :on-activate (fn [inputs _state ctx]
                                   ;; 第二轮使用 context 中已有的 messages（由 invoke 自动拼接）
                                   (let [follow-up "用一个词概括你刚才的回答。"
                                         _ (println (str "    [turn-2] 追问: " follow-up))
-                                        _ (println (str "    [turn-2] context.messages 已有: "
-                                                        (count (ctx/get-messages ctx)) " 条"))
-                                        ;; invoke 会自动读取 context.messages 拼接历史
-                                        {:keys [response context]}
+                                        ;; invoke 经同一 conversation-id 自动拼接历史（Memory Filter）
+                                        {:keys [response tool-context]}
                                         (kernel/invoke app-kernel
                                           [{:role "user" :content follow-up}]
                                           {:context ctx})
                                         answer (get-in response [:text])]
                                     (println (str "    [turn-2] 回复: " answer))
                                     {:events [{:name :done :data answer}]
-                                     :context context}))})
+                                     :context tool-context}))})
                 (builder/add-step
                   {:id :final
                    :on-activate (fn [inputs _state ctx]
@@ -229,11 +227,12 @@
                 (builder/on-event :done :final :input)
                 (builder/set-initial-event :start "中国有多少个省份？简短回答。")
                 (builder/build))
-            result (runtime/run-process process-spec {:timeout-ms 30000})]
+            ;; 用同一 conversation-id 让 turn-1/turn-2 共享历史（Memory Filter）
+            init-ctx (ctx/with-conversation-id (ctx/create)
+                                               (str "mt-" (java.util.UUID/randomUUID)))
+            result (runtime/run-process process-spec {:timeout-ms 30000 :context init-ctx})]
         (println (str "    状态: " (:status result)))
         (println (str "    最终结果: " (ctx/get-var (:context result) :multi-turn-result)))
-        (println (str "    messages 数量: " (count (ctx/get-messages (:context result)))))
-        (println (str "    history 数量: " (count (ctx/get-history (:context result)))))
         (assert (= :completed (:status result)))))))
 
 ;;; ============================================================
@@ -266,7 +265,7 @@
                                                             {:city city} ctx)
                                         ctx (-> context
                                                 (ctx/set-var :weather value)
-                                                (update-in [:variables :step-trace] conj :enrich))]
+                                                (update :step-trace conj :enrich))]
                                     {:events [{:name :enriched :data nil}]
                                      :context ctx}))})
                 (builder/add-step
@@ -278,7 +277,7 @@
                                                      " | 天气: " weather)
                                         ctx (-> ctx
                                                 (ctx/set-var :summary summary)
-                                                (update-in [:variables :step-trace] conj :summary))]
+                                                (update :step-trace conj :summary))]
                                     (println (str "    [summary] " summary))
                                     {:context ctx}))})
                 (builder/on-event :start :init-step :input)
@@ -320,7 +319,7 @@
                                     {:events [{:name :answered
                                                :data {:answer (get-in result [:response :text])
                                                       :tools-used (mapv :name (:tool-calls-made result))}}]
-                                     :context (:context result)}))})
+                                     :context (:tool-context result)}))})
                 (builder/add-step
                   {:id :collect-step
                    :on-activate (fn [inputs _state ctx]

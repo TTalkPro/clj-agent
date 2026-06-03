@@ -1,7 +1,8 @@
 (ns im.ttalk.agent.simpleagent.kernel-agent
-  "Kernel Agent - 简单同步模式
+  "Kernel Agent - 简单同步模式（Memory Filter 版）
 
-   包装 kernel invoke API，atom 管理 context 自动累积对话。
+   包装 kernel/invoke。对话历史由 Kernel 的 ChatMemory store 按
+   conversation-id 自管，Agent 自身只持 conversation-id。
 
    使用示例：
 
@@ -9,13 +10,15 @@
                 {:provider my-provider
                  :model \"glm-4.7\"
                  :system-prompt \"你是一个助手\"
-                 :tools [my-plugin]}))
+                 :tools [#'get-weather]}))
 
    (chat agent \"你好\")
    ;; => {:text \"...\" :tool-calls-made [...]}"
   (:refer-clojure :exclude [reset!])
   (:require [im.ttalk.agent.core.kernel :as kernel]
             [im.ttalk.agent.core.kernel.context :as ctx]
+            [im.ttalk.agent.core.llm.message :as msg]
+            [im.ttalk.agent.core.memory :as memory]
             [im.ttalk.agent.simpleagent.common :as common]))
 
 ;;; ============================================================
@@ -33,86 +36,54 @@
       :max-tokens    最大 token 数（默认 4096）
       :system-prompt 系统提示词
       :temperature   温度参数
-      :tools         KernelPlugin 实例列表或 tool var 列表
+      :tools         tool var 列表
       :filters       Filter 列表
+      :memory        ChatMemory store（可选）
       :max-iterations 最大工具调用循环次数（默认 10）}
 
    返回:
-   Agent map"
+   Agent map（持 kernel + conversation-id + settings）"
   [opts]
   (let [k (common/ensure-kernel opts)]
-    {:kernel       k
-     :context-atom (atom (ctx/create))
-     :settings     (select-keys opts [:system-prompt :max-iterations])}))
+    {:kernel          k
+     :conversation-id (str "kern-" (java.util.UUID/randomUUID))
+     :settings        (select-keys opts [:system-prompt :max-iterations])}))
 
 (defn chat
-  "对话（有状态累积）
+  "对话（按 conversation-id 自动累积历史）
 
    参数:
    - agent:   Agent 实例
    - message: 用户消息字符串
-   - opts:    可选选项 map
-     {:system-prompt  覆盖系统提示词
-      :max-iterations 覆盖最大迭代次数
-      :tool-choice    工具选择策略}
+   - opts:    可选 {:system-prompt :max-iterations :tool-choice}
 
    返回:
    {:text \"...\" :tool-calls-made [...]}"
   ([agent message]
    (chat agent message nil))
   ([agent message opts]
-   (let [user-msg {:role "user" :content message}
-         settings (:settings agent)
-         system-prompts (when-let [sp (or (:system-prompt opts)
-                                          (:system-prompt settings))]
-                          [{:role "system" :content sp}])
-         invoke-opts (cond-> {:context @(:context-atom agent)
+   (let [settings (:settings agent)
+         sp (or (:system-prompt opts) (:system-prompt settings))
+         tctx (ctx/with-conversation-id (ctx/create) (:conversation-id agent))
+         invoke-opts (cond-> {:context tctx
                               :max-iterations (or (:max-iterations opts)
                                                   (:max-iterations settings) 10)}
-                       system-prompts (assoc :system-prompts system-prompts)
+                       sp (assoc :system-prompts [{:role "system" :content sp}])
                        (:tool-choice opts) (assoc :tool-choice (:tool-choice opts)))
-         result (kernel/invoke (:kernel agent) [user-msg] invoke-opts)]
-     (clojure.core/reset! (:context-atom agent) (:context result))
+         result (kernel/invoke (:kernel agent) [(msg/user message)] invoke-opts)]
      {:text (get-in result [:response :text])
       :tool-calls-made (:tool-calls-made result)})))
 
 (defn reset!
-  "重置 context
-
-   参数:
-   - agent: Agent 实例
-
-   返回: nil"
+  "清空该会话历史"
   [agent]
-  (clojure.core/reset! (:context-atom agent) (ctx/create))
+  (memory/mem-clear (:memory (:kernel agent)) (:conversation-id agent))
   nil)
 
-(defn get-context
-  "获取当前 context
-
-   参数:
-   - agent: Agent 实例
-
-   返回: Context map"
-  [agent]
-  @(:context-atom agent))
-
 (defn get-history
-  "获取完整历史
-
-   参数:
-   - agent: Agent 实例
-
-   返回: 消息列表"
+  "获取该会话的完整中立消息历史"
   [agent]
-  (ctx/get-history @(:context-atom agent)))
+  (memory/mem-get (:memory (:kernel agent)) (:conversation-id agent)))
 
-(defn get-messages
-  "获取工作消息
-
-   参数:
-   - agent: Agent 实例
-
-   返回: 消息列表"
-  [agent]
-  (ctx/get-messages @(:context-atom agent)))
+;; 兼容别名：工作消息等同于完整历史（不再有双轨）
+(def get-messages get-history)

@@ -175,11 +175,8 @@
                             (when (:context result)
                               (swap! context
                                      (fn [old-ctx]
-                                       (-> old-ctx
-                                           (update :variables merge
-                                                   (:variables (:context result)))
-                                           (assoc :messages (:messages (:context result)))
-                                           (assoc :history (:history (:context result)))))))
+                                       ;; ToolContext 为扁平 map：直接合并变量
+                                       (merge old-ctx (:context result)))))
                             ;; 事件入队
                             (let [events (or (:events result) [])]
                               (if (seq events)
@@ -226,11 +223,8 @@
                             (when (:context result)
                               (swap! context
                                      (fn [old-ctx]
-                                       (-> old-ctx
-                                           (update :variables merge
-                                                   (:variables (:context result)))
-                                           (assoc :messages (:messages (:context result)))
-                                           (assoc :history (:history (:context result)))))))
+                                       ;; ToolContext 为扁平 map：直接合并变量
+                                       (merge old-ctx (:context result)))))
                             (swap! in-flight dec)
                             (dec-active!)
                             ;; 如果 step 返回 :terminate true，发送终止信号

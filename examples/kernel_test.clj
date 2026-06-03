@@ -145,8 +145,7 @@
                      {:context my-ctx})]
         (println "  text:" (get-in result [:response :text]))
         (println "  tools:" (mapv :name (:tool-calls-made result)))
-        (println "  context.messages count:" (count (ctx/get-messages (:context result))))
-        (println "  context.history count:" (count (ctx/get-history (:context result))))))))
+        (println "  tool-context:" (:tool-context result))))))
 
 (defn test-invoke-with-system-prompts []
   (separator "测试 7: invoke 带 system-prompts")

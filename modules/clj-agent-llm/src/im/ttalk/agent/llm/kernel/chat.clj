@@ -2,8 +2,11 @@
   "LLM Chat Service 工厂
 
    创建符合 Kernel service 接口的 LLM 服务 map。
+   service 的 chat-fn 接收**中立消息**（见 core/llm/message），
+   在此处按 provider 转成各家 wire 格式后再调用底层 provider。
+
    Service 格式：
-     {:chat-fn           (fn [messages opts] -> normalized-response)
+     {:chat-fn           (fn [neutral-messages opts] -> normalized-response)
       :build-result-msgs (fn [assistant-msg tool-results] -> [msg ...])}
 
    使用示例：
@@ -11,7 +14,6 @@
    (require '[im.ttalk.agent.llm.kernel.chat :as chat])
    (require '[im.ttalk.agent.core.kernel :as kernel])
 
-   ;; 方式 1: 使用 create-service 创建 service 并传给 Kernel
    (def service (chat/create-service
                   {:model \"glm-4-flash-250414\"
                    :base-url \"https://open.bigmodel.cn/api/anthropic\"
@@ -21,11 +23,27 @@
      (-> (kernel/create-kernel-builder)
          (kernel/add-tools my-tools)
          (kernel/add-service service)
-         (kernel/build-kernel)))
+         (kernel/build-kernel)))"
+  (:require [im.ttalk.agent.core.kernel.service :as service]
+            [im.ttalk.agent.core.llm.provider :as provider]
+            [im.ttalk.agent.llm.wire.openai :as wire-openai]
+            [im.ttalk.agent.llm.wire.anthropic :as wire-anthropic]))
 
-   ;; 对话
-   (kernel/invoke-chat-with-tools app-kernel messages {})"
-  (:require [im.ttalk.agent.core.kernel.service :as service]))
+;;; ============================================================
+;;; 中立消息 → provider wire
+;;; ============================================================
+
+(defn neutral->wire
+  "把中立消息列表转成指定 provider 的 wire 形态。
+
+   返回 {:messages [...] :system <str|nil>}
+   （OpenAI 家族 system 内联在 messages，:system 为 nil；
+     Anthropic system 提到顶层 :system）"
+  [llm-provider neutral-msgs]
+  (case (provider/provider-name llm-provider)
+    :anthropic (wire-anthropic/neutral->wire neutral-msgs)
+    ;; 默认 OpenAI 兼容家族（openai/zhipu/ollama/gemini/mistral/mock/...）
+    (wire-openai/neutral->wire neutral-msgs)))
 
 ;;; ============================================================
 ;;; Service 工厂
@@ -34,7 +52,7 @@
 (defn create-service
   "创建 LLM Chat Service
 
-   创建符合 Kernel service 接口的 map，包含 :chat-fn 和 :build-result-msgs。
+   chat-fn 接收中立消息，内部转 wire 后委托底层 provider。
 
    参数:
    - opts: 配置 map
@@ -47,20 +65,26 @@
       :temperature   温度参数（可选）}
 
    返回:
-   {:chat-fn (fn [messages opts] -> normalized-response)
+   {:chat-fn (fn [neutral-messages opts] -> normalized-response)
     :build-result-msgs (fn [assistant-msg tool-results] -> [msg ...])}"
   [{:keys [provider model max-tokens base-url api-key
            system-prompt temperature]}]
-  (let [;; 创建或使用已有 provider
-        llm-provider (or provider
+  (let [llm-provider (or provider
                          (let [create-fn (requiring-resolve
                                            'im.ttalk.agent.llm.provider.anthropic/create-provider)]
                            (create-fn (cond-> {}
                                         api-key  (assoc :api-key api-key)
                                         base-url (assoc :base-url base-url)))))
-        ;; 模型配置
         config (cond-> {:model      (or model "glm-4")
                         :max-tokens (or max-tokens 4096)}
                  system-prompt (assoc :system-prompt system-prompt)
-                 temperature   (assoc :temperature temperature))]
-    (service/create-service llm-provider config)))
+                 temperature   (assoc :temperature temperature))
+        base (service/create-service llm-provider config)]
+    ;; 包装 chat-fn：中立消息 → wire（system 并入 opts）
+    (assoc base :chat-fn
+      (fn [neutral-msgs opts]
+        (let [{:keys [messages system]} (neutral->wire llm-provider neutral-msgs)
+              opts* (cond-> opts
+                      (and system (not (:system-prompt opts)))
+                      (assoc :system-prompt system))]
+          ((:chat-fn base) messages opts*))))))

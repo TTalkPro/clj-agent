@@ -97,20 +97,21 @@
 
 (defn test-multi-turn []
   (separator "测试 2: 多轮对话（context 累积）")
-  (let [ctx (ctx/create)
+  (let [;; 多轮：共享同一 conversation-id，历史由 Memory Filter 自管
+        cid (str "it-" (java.util.UUID/randomUUID))
+        conv-ctx (ctx/with-conversation-id (ctx/create) cid)
         ;; 第一轮
         r1 (kernel/invoke app-kernel
              [{:role "user" :content "我叫小明，我住在深圳。请记住这些信息。"}]
-             {:context ctx :tool-choice :none})
-        ctx1 (:context r1)
+             {:context conv-ctx :tool-choice :none})
         _ (println (str "  轮1 问: 我叫小明，我住在深圳。"))
         _ (println (str "  轮1 答: " (get-in r1 [:response :text])))
 
-        ;; 第二轮（使用 ctx1 中的 messages 历史）
+        ;; 第二轮（同一 conversation-id，自动带历史）
         _ (wait 2000)
         r2 (kernel/invoke app-kernel
              [{:role "user" :content "我叫什么名字？住在哪里？"}]
-             {:context ctx1 :tool-choice :none})
+             {:context conv-ctx :tool-choice :none})
         _ (println (str "  轮2 问: 我叫什么名字？住在哪里？"))
         _ (println (str "  轮2 答: " (get-in r2 [:response :text])))]
     (let [answer (get-in r2 [:response :text])]

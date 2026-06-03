@@ -130,7 +130,7 @@
 
       (pa/reset! agent)
       (is (not (pa/paused? agent)))
-      (is (empty? (ctx/get-messages (pa/get-context agent)))))))
+      (is (empty? (pa/get-history agent))))))
 
 (deftest test-on-pause-callback
   (testing "on-pause 回调被调用"
@@ -179,13 +179,13 @@
         (is (= :paused (:status result)))
         (is (= :dangerous-tool (:name (:pending-tool result))))))))
 
-(deftest test-get-context
-  (testing "get-context 返回当前上下文"
+(deftest test-get-history
+  (testing "get-history 返回会话历史"
     (let [provider (ts/create-mock-provider
                      [{:text "回复" :tool-calls nil}])
           agent (pa/create-process-agent {:provider provider
                                           :model "test"
                                           :tools ts/test-plugin})]
-      (is (ctx/context? (pa/get-context agent)))
+      (is (empty? (pa/get-history agent)))
       (pa/chat agent "消息")
-      (is (seq (ctx/get-messages (pa/get-context agent)))))))
+      (is (seq (pa/get-history agent))))))

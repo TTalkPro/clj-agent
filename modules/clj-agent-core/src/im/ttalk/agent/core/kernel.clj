@@ -44,13 +44,16 @@
             [im.ttalk.agent.core.kernel.filter :as filters]
             [im.ttalk.agent.core.kernel.context :as ctx]
             [im.ttalk.agent.core.kernel.tool :as tool]
+            [im.ttalk.agent.core.kernel.memory-filter :as mf]
+            [im.ttalk.agent.core.memory :as memory]
+            [im.ttalk.agent.core.llm.message :as msg]
             [im.ttalk.agent.core.llm.response :as response]))
 
 ;;; ============================================================
 ;;; Kernel Record
 ;;; ============================================================
 
-(defrecord Kernel [service filters tools tool-vars settings])
+(defrecord Kernel [service filters tools tool-vars settings memory])
 
 ;;; ============================================================
 ;;; Build API
@@ -67,6 +70,7 @@
    {:service   nil
     :tool-vars []
     :filters   []
+    :memory    nil
     :settings  settings}))
 
 (defn add-tool
@@ -133,6 +137,18 @@
   [builder filter-def]
   (update builder :filters conj filter-def))
 
+(defn add-memory
+  "设置 ChatMemory store 到 builder（不设则 build-kernel 默认用 in-memory）
+
+   参数:
+   - builder: kernel builder
+   - store:   实现 core.memory/ChatMemory 协议的 store
+
+   返回:
+   更新后的 builder"
+  [builder store]
+  (assoc builder :memory store))
+
 ;;; ============================================================
 ;;; 构建 Kernel
 ;;; ============================================================
@@ -163,12 +179,18 @@
   [builder]
   (let [tool-vars-list (:tool-vars builder)
         tools (compile-tools tool-vars-list)
-        tool-vars-map (build-tool-vars-map tool-vars-list)]
+        tool-vars-map (build-tool-vars-map tool-vars-list)
+        ;; ChatMemory store：未指定则默认 in-memory
+        store (or (:memory builder) (memory/in-memory-store))
+        ;; 自动挂载 Memory Filter（pre/post-chat），并保留用户 filters
+        all-filters (into (vec (mf/memory-filters store))
+                          (:filters builder))]
     (->Kernel (:service builder)
-              (:filters builder)
+              all-filters
               tools
               tool-vars-map
-              (:settings builder))))
+              (:settings builder)
+              store)))
 
 ;;; ============================================================
 ;;; Query API
@@ -452,143 +474,103 @@
   "工具调用循环默认最大次数"
   10)
 
-(defn- encode-tool-result
-  "将工具执行结果编码为 tool message"
-  [tool-call result-value]
-  {:role         "tool"
-   :tool_call_id (:id tool-call)
-   :content      (if (string? result-value)
-                   result-value
-                   (pr-str result-value))})
+(defn run-tools
+  "批量执行一组工具调用，返回中立 tool 结果消息 + 执行记录 + 更新后的 ToolContext。
 
-(defn- execute-tool-calls
-  "批量执行工具调用，累积 context 和结果记录
+   单个工具异常被捕获为错误结果，不中断其余工具。供外部手搓工具循环使用。
 
    参数:
-   - kernel:     Kernel 实例
-   - tool-calls: 工具调用列表
-   - context:    当前 Context
+   - kernel:       Kernel 实例
+   - tool-calls:   [{:id :name :input} ...]（来自 response/response-tool-calls）
+   - tool-context: ToolContext（扁平 map）
 
    返回:
-   {:results [{:tool-id :name :result}...]
-    :context updated-ctx
-    :records [{:name :args :result}...]}"
-  [kernel tool-calls context]
+   {:messages [中立 tool 消息 ...]
+    :records  [{:name :args :result} ...]
+    :context  更新后的 ToolContext}"
+  [kernel tool-calls tool-context]
   (reduce
-    (fn [acc tc]
-      (let [fn-name (keyword (:name tc))
+    (fn [{:keys [messages records context]} tc]
+      (let [fn-key (keyword (:name tc))
             args (:input tc)
             {:keys [value context]}
             (try
-              (invoke-tool kernel fn-name args (:context acc))
+              (invoke-tool kernel fn-key args context)
               (catch Exception e
-                {:value (str "错误: " (.getMessage e))
-                 :context (:context acc)}))
-            tool-msg (encode-tool-result tc value)
-            new-ctx (ctx/track-message context tool-msg)]
-        {:results (conj (:results acc)
-                        {:tool-id (:id tc) :name fn-name :result value})
-         :context new-ctx
-         :records (conj (:records acc)
-                        {:name fn-name :args args :result value})}))
-    {:results [] :context context :records []}
+                {:value (str "错误: " (.getMessage e)) :context context}))]
+        {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
+         :records  (conj records {:name fn-key :args args :result value})
+         :context  context}))
+    {:messages [] :records [] :context tool-context}
     tool-calls))
 
-(defn- build-tool-messages
-  "构建工具调用的追加消息（assistant-msg + tool-result-msgs）
-
-   使用 service 的 build-result-msgs 格式化"
-  [service assistant-msg results]
-  ((:build-result-msgs service) assistant-msg results))
-
 (defn invoke
-  "工具调用循环主入口
+  "工具调用循环主入口（Memory Filter 模式）
 
-   组合 context.messages + 新 messages，驱动 LLM + 工具调用循环，
-   直到 LLM 返回文本响应或达到最大迭代次数。
+   消息不再 thread 在 Context 里，而是由 Memory Filter 按 conversation-id
+   存进 Kernel 的 ChatMemory store。每轮只向 invoke-chat 传 delta，
+   pre-chat 的 Memory Filter 负责拼出完整历史。
 
    执行流程:
-   1. 组合 context.messages + 新 messages
-   2. 记录新消息到 context（track-message）
-   3. tool-calling-loop:
-      a. system-prompts ++ conversation-msgs → LLM（经过 pre/post chat filter）
-      b. 如果返回 tool_calls:
-         - 逐个执行 invoke-tool（经过 pre/post invocation filter）
-         - track-message: assistant msg + tool result msgs
-         - 继续循环
-      c. 如果返回文本:
-         - track-message: assistant msg
-         - 返回结果
+   1. 确保 conversation-id（ToolContext 没有则生成临时 UUID，结束后清理）
+   2. tool-calling-loop:
+      a. invoke-chat 传 delta → Memory Filter 存入并展开历史 → LLM
+         （assistant 回复由 post-chat Memory Filter 存入）
+      b. 有 tool_calls：run-tools 执行 → 把中立 tool 结果作为下一轮 delta
+      c. 纯文本：返回
 
    参数:
-   - kernel:   Kernel 实例（需注册函数和 LLM 服务）
-   - messages: 新消息列表
+   - kernel:   Kernel 实例（需注册 LLM 服务）
+   - messages: 本轮新消息（中立消息，通常 [(message/user \"...\")]）
    - opts:     选项 map
-     {:context          Context 对象（可选，默认创建空 Context）
-      :system-prompts   系统提示消息列表（每次 LLM 调用前拼接）
+     {:context          ToolContext（扁平 map，含 :conversation-id 则多轮持久）
+      :system-prompts   系统提示消息列表
       :max-iterations   最大循环次数（默认 10）
       :tool-choice      :auto/:none/:required（默认 :auto）
-      :tags             只使用带这些 tags 的工具（OR 逻辑）
-      :exclude-tags     排除带这些 tags 的工具（OR 逻辑）}
+      :tags / :exclude-tags  工具 tag 过滤}
 
    返回:
-   {:response final-response :context updated-ctx :tool-calls-made [...]}"
+   {:response final-response :tool-context updated-ctx :tool-calls-made [...]}"
   [kernel messages opts]
   (when-not (:service kernel)
     (throw (ex-info "Kernel 未配置 LLM 服务（调用 add-service）"
                     {:kernel-keys (keys kernel)})))
-  (let [context (or (:context opts) (ctx/create))
-        system-prompts (or (:system-prompts opts) [])
-        ;; 将 system-prompts 消息列表合并为单个 system-prompt 字符串
+  (let [system-prompts (or (:system-prompts opts) [])
         system-prompt-str (when (seq system-prompts)
-                            (->> system-prompts
-                                 (map :content)
+                            (->> system-prompts (map :content)
                                  (clojure.string/join "\n")))
         max-iter (or (:max-iterations opts)
                      (get-in kernel [:settings :max-tool-iterations])
                      default-max-iterations)
-        ;; 根据 tags 过滤工具
         tool-schemas (filter-tools-by-tags kernel opts)
         tool-choice (or (:tool-choice opts) :auto)
-        service (:service kernel)
-
-        ;; 记录新消息到 context
-        ctx-with-new (reduce ctx/track-message context messages)
-        ;; 从更新后的 context 获取完整对话消息（避免重复追加）
-        conv-msgs (ctx/get-messages ctx-with-new)]
-
-    (loop [conv-msgs      conv-msgs
-           remaining      max-iter
-           all-tool-calls []
-           ctx            ctx-with-new]
-
-      (when (zero? remaining)
-        (throw (ex-info "工具调用循环次数超过上限"
-                        {:max-iterations max-iter
-                         :tool-calls-made all-tool-calls})))
-
-      (let [;; 调用 invoke-chat（经过 pre/post chat filter）
-            chat-opts (cond-> {:tools tool-schemas
-                               :tool-choice tool-choice
-                               :context ctx}
-                        system-prompt-str (assoc :system-prompt system-prompt-str))
-            {:keys [response context]} (invoke-chat kernel conv-msgs chat-opts)
-            ctx context]
-
-        (if (response/has-tool-calls? response)
-          ;; 工具调用分支
-          (let [assistant-msg (response/response-assistant-msg response)
-                ctx (ctx/track-message ctx assistant-msg)
-                {:keys [results context records]}
-                (execute-tool-calls kernel (response/response-tool-calls response) ctx)
-                new-msgs (build-tool-messages service assistant-msg results)]
-            (recur (into conv-msgs new-msgs)
-                   (dec remaining)
-                   (into all-tool-calls records)
-                   context))
-
-          ;; 文本响应分支
-          (let [ctx (ctx/track-message ctx (response/response-assistant-msg response))]
+        ;; 确保 conversation-id（临时会话用 UUID，结束清理）
+        base-ctx (or (:context opts) (ctx/create))
+        ephemeral? (nil? (ctx/conversation-id base-ctx))
+        conv-id (or (ctx/conversation-id base-ctx)
+                    (str "conv-" (java.util.UUID/randomUUID)))
+        init-ctx (ctx/with-conversation-id base-ctx conv-id)
+        chat-opts (cond-> {:tools tool-schemas :tool-choice tool-choice}
+                    system-prompt-str (assoc :system-prompt system-prompt-str))]
+    (try
+      (loop [delta          (mapv msg/normalize messages)
+             remaining      max-iter
+             all-tool-calls []
+             tctx           init-ctx]
+        (when (zero? remaining)
+          (throw (ex-info "工具调用循环次数超过上限"
+                          {:max-iterations max-iter
+                           :tool-calls-made all-tool-calls})))
+        (let [{:keys [response context]}
+              (invoke-chat kernel delta (assoc chat-opts :context tctx))
+              tctx context]
+          (if (response/has-tool-calls? response)
+            (let [{:keys [messages records context]}
+                  (run-tools kernel (response/response-tool-calls response) tctx)]
+              (recur messages (dec remaining) (into all-tool-calls records) context))
             {:response response
-             :context ctx
-             :tool-calls-made all-tool-calls}))))))
+             :tool-context tctx
+             :tool-calls-made all-tool-calls})))
+      (finally
+        (when ephemeral?
+          (memory/mem-clear (:memory kernel) conv-id))))))
