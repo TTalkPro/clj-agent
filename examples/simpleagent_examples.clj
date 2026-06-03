@@ -20,11 +20,7 @@
             [im.ttalk.agent.simpleagent.kernel-agent :as ka]
             [im.ttalk.agent.simpleagent.process-agent :as pa]
             [im.ttalk.agent.llm.provider.zhipu :as zhipu]
-            [im.ttalk.agent.llm.provider.anthropic :as anthropic]
-            [im.ttalk.agent.memory.store.in-memory :as mem-store]
-            [im.ttalk.agent.memory.manager.snapshot :as snap-mgr]
-            [im.ttalk.agent.memory.protocol :as mem-proto]
-            [im.ttalk.agent.memory.process-snapshot-adapter :as psa]))
+            [im.ttalk.agent.llm.provider.anthropic :as anthropic]))
 
 ;;; ============================================================
 ;;; 工具定义
@@ -376,121 +372,15 @@
             (let [rejected (pa/resume agent "rejected")]
               (println (str "    拒绝后: " (:text rejected))))))))))
 
-(defn test-save-restore-kernel [provider]
-  (subsection "Kernel Agent: 保存与恢复对话状态")
-  (safe-call "使用 SnapshotManager 保存/恢复 Agent 状态"
-    (fn []
-      (let [;; 创建 SnapshotManager
-            store (mem-store/create-in-memory-store)
-            snap-manager (snap-mgr/create-snapshot-manager store)
-            thread-id "kernel-session-001"]
-
-        ;; Phase 1: 对话并保存
-        (println "    === Phase 1: 建立对话 ===")
-        (let [agent (ka/create-agent
-                      {:provider provider
-                       :model "glm-4.7"
-                       :max-tokens 512
-                       :system-prompt "回答简短。"})]
-          (let [r1 (ka/chat agent "我叫王五，在深圳做AI研发。")]
-            (println (str "    对话1: " (:text r1))))
-          (wait api-delay)
-          (let [r2 (ka/chat agent "我最喜欢的语言是 Clojure。")]
-            (println (str "    对话2: " (:text r2))))
-
-          ;; 保存上下文快照
-          (let [context (ka/get-context agent)
-                snapshot {:context context
-                          :settings (:settings agent)}]
-            (mem-proto/snap-put snap-manager
-                               {:thread-id thread-id}
-                               snapshot
-                               {:reason :user-save :created-at (System/currentTimeMillis)})
-            (println (str "    已保存快照，消息数: " (count (ctx/get-messages context))))))
-
-        (wait api-delay)
-
-        ;; Phase 2: 恢复并继续对话
-        (println "    === Phase 2: 恢复对话 ===")
-        (let [loaded (mem-proto/snap-get snap-manager {:thread-id thread-id})
-              saved-snapshot (:snapshot loaded)
-              restored-context (:context saved-snapshot)
-              ;; 用恢复的 context 创建新 Agent
-              agent2 (ka/create-agent
-                       {:provider provider
-                        :model "glm-4.7"
-                        :max-tokens 512
-                        :system-prompt "回答简短。"})]
-          ;; 恢复 context
-          (reset! (:context-atom agent2) restored-context)
-          (println (str "    恢复消息数: " (count (ctx/get-messages restored-context))))
-          ;; 验证记忆
-          (let [r3 (ka/chat agent2 "我叫什么名字？在哪工作？直接回答。")]
-            (println (str "    恢复后对话: " (:text r3)))))))))
-
-(defn test-save-restore-process [provider]
-  (subsection "Process Agent: 保存与恢复对话状态")
-  (safe-call "Process Agent 状态保存/恢复"
-    (fn []
-      (let [store (mem-store/create-in-memory-store)
-            snap-manager (snap-mgr/create-snapshot-manager store)
-            thread-id "process-session-001"]
-
-        ;; Phase 1: 对话并保存
-        (println "    === Phase 1: 建立对话 ===")
-        (let [agent (pa/create-process-agent
-                      {:provider provider
-                       :model "glm-4.7"
-                       :max-tokens 512
-                       :system-prompt "回答简短。"
-                       :tools agent-tools})]
-          (let [r1 (pa/chat agent "我的项目叫 clj-agent，是一个 AI Agent 框架。")]
-            (println (str "    对话1: " (:text r1))))
-          (wait api-delay)
-          (let [r2 (pa/chat agent "项目用 Clojure 语言编写。")]
-            (println (str "    对话2: " (:text r2))))
-
-          ;; 保存
-          (let [context (pa/get-context agent)
-                snapshot {:context context
-                          :settings (:settings agent)}]
-            (mem-proto/snap-put snap-manager
-                               {:thread-id thread-id}
-                               snapshot
-                               {:reason :checkpoint :created-at (System/currentTimeMillis)})
-            (println "    已保存 Process Agent 状态")))
-
-        (wait api-delay)
-
-        ;; Phase 2: 恢复并继续
-        (println "    === Phase 2: 恢复对话 ===")
-        (let [loaded (mem-proto/snap-get snap-manager {:thread-id thread-id})
-              saved-snapshot (:snapshot loaded)
-              restored-context (:context saved-snapshot)
-              agent2 (pa/create-process-agent
-                       {:provider provider
-                        :model "glm-4.7"
-                        :max-tokens 512
-                        :system-prompt "回答简短。"
-                        :tools agent-tools})]
-          (reset! (:context-atom agent2) restored-context)
-          (let [r3 (pa/chat agent2 "我的项目叫什么名字？用什么语言？直接回答。")]
-            (println (str "    恢复后状态: " (:status r3)))
-            (println (str "    恢复后回复: " (:text r3)))))))))
-
 (defn run-part3 [provider provider-name]
-  (separator (str "Part 3: Memory 存储 (" provider-name ")"))
+  (separator (str "Part 3: 多轮对话与人工审批 (" provider-name ")"))
   (test-long-conversation provider)
   (wait api-delay)
   (test-hil-approve provider)
   (wait api-delay)
   (test-hil-reject provider)
   (wait api-delay)
-  (test-hil-multi-sensitive provider)
-  (wait api-delay)
-  (test-save-restore-kernel provider)
-  (wait api-delay)
-  (test-save-restore-process provider))
+  (test-hil-multi-sensitive provider))
 
 ;;; ============================================================
 ;;; Part 4: 双 Provider 验证
