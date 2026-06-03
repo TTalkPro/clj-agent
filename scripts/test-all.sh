@@ -10,9 +10,6 @@ MODULES=(
   "clj-agent-core"
   "clj-agent-llm"
   "clj-agent-tools"
-  "clj-agent-rag"
-  "clj-agent-mcp"
-  "clj-agent-memory"
 )
 
 for module in "${MODULES[@]}"; do
