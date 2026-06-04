@@ -1,7 +1,7 @@
-(ns im.ttalk.agent.llm.prompt.api-test
+(ns im.ttalk.agent.core.llm.prompt.api-test
   "提示词模板测试"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.llm.prompt.api :as prompt]))
+            [im.ttalk.agent.core.llm.prompt.api :as prompt]))
 
 ;; ============================================================
 ;; PromptTemplate 测试
