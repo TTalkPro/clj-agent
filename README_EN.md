@@ -277,13 +277,16 @@ Context manages shared state within a conversation:
 ```clojure
 (require '[im.ttalk.agent.context :as ctx])
 
-(def my-ctx (ctx/create {:user-id "u123"}))   ;; Create (with initial variables)
+(def my-ctx (ctx/create {:user-id "u123"}))    ;; Create (with initial variables)
+(ctx/context? my-ctx)                          ;; Predicate
 (ctx/get-var my-ctx :user-id)                  ;; Get variable
-(ctx/set-var my-ctx :key "value")              ;; Set variable (returns new ctx)
-(ctx/get-messages my-ctx)                      ;; Get working messages
-(ctx/get-history my-ctx)                       ;; Get full history
-(ctx/track-message my-ctx msg)                 ;; Track message (returns new ctx)
+(ctx/set-var my-ctx :key "value")              ;; Set one variable (returns new ctx)
+(ctx/set-vars my-ctx {:a 1 :b 2})              ;; Set multiple (returns new ctx)
+(ctx/conversation-id my-ctx)                   ;; Get conversation id
+(ctx/with-conversation-id my-ctx "u1")         ;; Set conversation id (returns new ctx)
 ```
+
+> Conversation history is NOT in Context; it is maintained by a ChatMemory store keyed by conversation-id (see `im.ttalk.agent.memory` / Memory Filter).
 
 ## LLM Providers
 
@@ -295,7 +298,7 @@ Context manages shared state within a conversation:
 | `:anthropic` | Anthropic Claude series | `ANTHROPIC_API_KEY` |
 | `:zhipu` | Zhipu GLM series | `ZHIPU_API_KEY` |
 | `:ollama` | Local Ollama models | - |
-| `:gemini` | Google Gemini | `GEMINI_API_KEY` |
+| `:gemini` | Google Gemini | `GOOGLE_API_KEY` |
 | `:mistral` | Mistral | `MISTRAL_API_KEY` |
 | `:openai-compat` | OpenAI-compatible protocol | Custom |
 

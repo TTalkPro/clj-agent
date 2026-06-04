@@ -339,13 +339,16 @@ Context 管理对话中的共享状态：
 ```clojure
 (require '[im.ttalk.agent.context :as ctx])
 
-(def my-ctx (ctx/create {:user-id "u123"}))   ;; 创建（可带初始变量）
+(def my-ctx (ctx/create {:user-id "u123"}))    ;; 创建（可带初始变量）
+(ctx/context? my-ctx)                          ;; 谓词
 (ctx/get-var my-ctx :user-id)                  ;; 获取变量
-(ctx/set-var my-ctx :key "value")              ;; 设置变量（返回新 ctx）
-(ctx/get-messages my-ctx)                      ;; 获取工作消息
-(ctx/get-history my-ctx)                       ;; 获取完整历史
-(ctx/track-message my-ctx msg)                 ;; 追踪消息（返回新 ctx）
+(ctx/set-var my-ctx :key "value")              ;; 设置单个变量（返回新 ctx）
+(ctx/set-vars my-ctx {:a 1 :b 2})              ;; 批量设置（返回新 ctx）
+(ctx/conversation-id my-ctx)                   ;; 取会话 id
+(ctx/with-conversation-id my-ctx "u1")         ;; 设会话 id（返回新 ctx）
 ```
+
+> 对话历史不在 Context 里，而是由 ChatMemory store 按 conversation-id 维护（见 `im.ttalk.agent.memory` / Memory Filter）。
 
 ## LLM Provider
 
@@ -357,7 +360,7 @@ Context 管理对话中的共享状态：
 | `:anthropic` | Anthropic Claude 系列 | `ANTHROPIC_API_KEY` | claude-3-opus, claude-3-sonnet |
 | `:zhipu` | 智谱 GLM 系列 | `ZHIPU_API_KEY` | glm-4, glm-4-plus |
 | `:ollama` | 本地 Ollama 模型 | - | llama2, mistral, codellama |
-| `:gemini` | Google Gemini | `GEMINI_API_KEY` | gemini-pro, gemini-ultra |
+| `:gemini` | Google Gemini | `GOOGLE_API_KEY` | gemini-pro, gemini-ultra |
 | `:mistral` | Mistral | `MISTRAL_API_KEY` | mistral-large, mistral-medium |
 | `:openai-compat` | OpenAI 兼容协议 | 自定义 | 取决于后端 |
 
@@ -394,7 +397,7 @@ Context 管理对话中的共享状态：
 ### 直接调用 Provider
 
 ```clojure
-(require '[im.ttalk.agent.kernel.provider :as proto])
+(require '[im.ttalk.agent.model :as proto])
 
 ;; 简单对话
 (proto/call-simple provider
