@@ -4,10 +4,10 @@
    运行: clojure -M -e \"(load-file \\\"examples/simpleagent_test.clj\\\")\"
 
    需要环境变量: ZHIPU_API_KEY"
-  (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.simpleagent :as ka]
-            [im.ttalk.agent.simpleagent :as pa]
-            [im.ttalk.agent.llm.provider.zhipu :as zhipu]))
+  (:require [im.ttalk.agent.tool :refer [deftool]]
+            [im.ttalk.agent.client :as ka]
+            [im.ttalk.agent.client :as pa]
+            [im.ttalk.agent.model.provider.zhipu :as zhipu]))
 
 ;;; ============================================================
 ;;; 工具定义

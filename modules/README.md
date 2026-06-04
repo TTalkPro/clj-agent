@@ -8,7 +8,7 @@ clj-agent 分为多个独立模块：
 clj-agent/
 ├── modules/
 │   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, ChatMemory）
-│   ├── clj-agent-llm/          # LLM Provider + Service 工厂
+│   ├── clj-agent-model/          # LLM Provider + Service 工厂
 │   ├── clj-agent-simpleagent/  # 高级 Agent 封装（SimpleAgent，含 pause/resume）
 │   └── clj-agent-tools/       # 预置插件库（File, HTTP, Shell）
 ├── scripts/                     # 构建脚本
@@ -34,7 +34,7 @@ clj-agent/
 
 ---
 
-### 2. clj-agent-llm
+### 2. clj-agent-model
 
 **职责**: LLM Provider 实现 + Service 工厂
 
@@ -62,7 +62,7 @@ clj-agent/
 - `im.ttalk.agent.simpleagent.memory-filter` - 按 conversation-id 串历史的 chat filter
 - `im.ttalk.agent.simpleagent.common` - 共享构建逻辑
 
-**依赖**: `clj-agent-core`, `clj-agent-llm`, next.jdbc, sqlite-jdbc
+**依赖**: `clj-agent-core`, `clj-agent-model`, next.jdbc, sqlite-jdbc
 
 ---
 
@@ -119,7 +119,7 @@ clojure -M:test
 ```mermaid
 graph LR
     core[clj-agent-core]
-    llm[clj-agent-llm]
+    llm[clj-agent-model]
     sa[clj-agent-simpleagent]
     tools[clj-agent-tools]
 

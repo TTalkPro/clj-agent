@@ -15,12 +15,12 @@
 
    环境变量:
      ZHIPU_API_KEY - 智谱 AI API Key（必需）"
-  (:require [im.ttalk.agent.core.kernel.tool :refer [deftool]]
-            [im.ttalk.agent.core.kernel.context :as ctx]
-            [im.ttalk.agent.simpleagent :as ka]
-            [im.ttalk.agent.simpleagent :as pa]
-            [im.ttalk.agent.llm.provider.zhipu :as zhipu]
-            [im.ttalk.agent.llm.provider.anthropic :as anthropic]))
+  (:require [im.ttalk.agent.tool :refer [deftool]]
+            [im.ttalk.agent.context :as ctx]
+            [im.ttalk.agent.client :as ka]
+            [im.ttalk.agent.client :as pa]
+            [im.ttalk.agent.model.provider.zhipu :as zhipu]
+            [im.ttalk.agent.model.provider.anthropic :as anthropic]))
 
 ;;; ============================================================
 ;;; 工具定义
