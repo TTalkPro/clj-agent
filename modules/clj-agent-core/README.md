@@ -6,12 +6,16 @@
 
 ## 概述
 
-`clj-agent-core` 是框架的基础模块，提供：
+`clj-agent-core` 同时是**协议（端口）层**与 **Agent 运行时**：
 
-- **Kernel**：中央编排器，统一管理工具调用和 LLM 交互
+- **协议 / 契约**：`ILLMProvider`、中立消息、统一响应、通用 Service —— 任何实现协议的 jar 都能作为 provider 注入
+- **client**：高层 Agent（`create-agent`/`chat`/`resume`），内置按 conversation-id 的记忆
+- **Kernel**：中央编排器，提供 `invoke-chat` / `invoke-tool` 原语（经 advisor 洋葱链）
 - **deftool**：宏，同时定义函数和生成 LLM tool schema
-- **Filter**：Ring-style 中间件（pre/post invocation、pre/post chat）
-- **Context**：对话共享状态管理
+- **Advisor**：洋葱式 around 中间件（对标 Spring AI Advisor），含记忆 advisor
+- **Memory**：ChatMemory（in-memory / windowed / SQLite）
+- **Context**：请求级共享状态
+- **converter / prompt**：结构化输出解析（OutputConverter）与提示词模板（PromptTemplate），provider 无关
 
 ## 依赖
 
@@ -20,10 +24,13 @@
 {:deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}}}
 ```
 
+内部依赖：无（core 定义协议/契约 + Agent 运行时；provider 反过来依赖 core）
+
 外部依赖：
-- cheshire/cheshire 5.12.0
-- com.taoensso/timbre 6.3.0
-- http-kit/http-kit 2.8.0
+- cheshire/cheshire 5.12.0（converter）
+- com.taoensso/timbre 6.3.0（日志）
+- com.github.seancorfield/next.jdbc 1.3.939（memory/sqlite，按需）
+- org.xerial/sqlite-jdbc 3.45.1.0（memory/sqlite，按需）
 
 ## 命名空间
 
@@ -54,6 +61,28 @@
 > 各厂商实现（`im.ttalk.agent.provider.*`）在 `clj-agent-provider`，依赖本模块的协议。
 
 ## API 参考
+
+### 高层 Agent API（client，推荐入门）
+
+```clojure
+(require '[im.ttalk.agent.client :as agent])
+
+;; 创建 Agent（默认带 in-memory 记忆，按 conversation-id 累积）
+(def a (agent/create-agent
+         {:provider provider          ;; 任意 ILLMProvider 实例（必需）
+          :model "gpt-4"
+          :system-prompt "你是助手"
+          :tools [#'my-tool]          ;; 可选
+          :memory store               ;; 可选，默认 (memory/in-memory-store)
+          :conversation-id "u1"       ;; 可选，默认随机 UUID
+          :on-pause (fn [info] ...)}))  ;; 可选，配置即启用敏感工具 pause/resume
+
+(agent/chat a "你好")        ;; => {:status :completed :text "..." :tool-calls-made [...]}
+(agent/resume a "approved")  ;; pause 后批准/拒绝
+(agent/paused? a)
+(agent/get-history a)        ;; 该会话中立消息历史
+(agent/reset! a)             ;; 清空当前会话
+```
 
 ### Kernel Build API
 
@@ -143,13 +172,51 @@ filters/logging-filter
 ```clojure
 (require '[im.ttalk.agent.context :as ctx])
 
-(ctx/create)                         ;; 空 Context
-(ctx/create {:user-id "u1"})         ;; 带变量
-(ctx/get-var ctx :key)               ;; 获取变量
-(ctx/set-var ctx :key val)           ;; 设置变量（返回新 ctx）
-(ctx/get-messages ctx)               ;; 工作消息列表
-(ctx/get-history ctx)                ;; 完整历史
-(ctx/track-message ctx msg)          ;; 追踪消息（返回新 ctx）
+(ctx/create)                          ;; 空 Context
+(ctx/create {:user-id "u1"})          ;; 带变量
+(ctx/context? x)                      ;; 谓词
+(ctx/get-var ctx :key)                ;; 获取变量
+(ctx/set-var ctx :key val)            ;; 设置单个变量（返回新 ctx）
+(ctx/set-vars ctx {:a 1 :b 2})        ;; 批量设置
+(ctx/conversation-id ctx)             ;; 取会话 id
+(ctx/with-conversation-id ctx "u1")   ;; 设会话 id（返回新 ctx）
+```
+
+### Memory（ChatMemory）
+
+```clojure
+(require '[im.ttalk.agent.memory :as memory]
+         '[im.ttalk.agent.memory.sqlite :as sqlite])
+
+(memory/in-memory-store)                              ;; 进程内（默认）
+(memory/windowed (memory/in-memory-store)
+                 {:max-messages 20})                  ;; 滑动窗口（pairing-safe）
+(sqlite/sqlite-store "agent.db")                      ;; SQLite 持久化（":memory:" 为进程内库）
+
+;; ChatMemory 协议：mem-get / mem-add / mem-clear —— 自定义后端实现此协议即可
+```
+
+### 中立消息 / 通用 Service
+
+```clojure
+(require '[im.ttalk.agent.model.message :as msg]
+         '[im.ttalk.agent.model.service :as service])
+
+;; 中立消息构造
+(msg/system "...") (msg/user "...") (msg/assistant "...")
+(msg/assistant-tool-calls [(msg/tool-call "id" "name" {:arg 1})])
+(msg/tool-result "id" "name" "result")
+
+;; 通用 Service：仅凭协议把任意 provider 包成 kernel service
+(service/create-service provider {:model "gpt-4" :max-tokens 4096})
+;; => {:chat-fn ... :build-result-msgs ...}
+```
+
+### 结构化输出 / 提示词模板（provider 无关库）
+
+```clojure
+(require '[im.ttalk.agent.converter.api :as conv]   ;; OutputConverter：defparser/json-parser/parse/...
+         '[im.ttalk.agent.prompt.api :as prompt])   ;; PromptTemplate：template/chat-template/render/...
 ```
 
 ---
@@ -160,18 +227,24 @@ filters/logging-filter
 
 ### Overview
 
-`clj-agent-core` is the foundation module providing:
+`clj-agent-core` is both the **protocol (port) layer** and the **Agent runtime**:
 
-- **Kernel**: Central orchestrator for tool invocation and LLM interaction
-- **deftool**: Macro that simultaneously defines functions and generates LLM tool schemas
-- **Filter**: Ring-style middleware (pre/post invocation, pre/post chat)
-- **Context**: Shared conversation state management
+- **Protocol / contract**: `ILLMProvider`, neutral messages, unified response, generic Service — any jar implementing the protocol can be injected as a provider
+- **client**: High-level Agent (`create-agent`/`chat`/`resume`) with built-in per-conversation-id memory
+- **Kernel**: Central orchestrator exposing `invoke-chat` / `invoke-tool` primitives (through the advisor onion chain)
+- **deftool**: Macro that defines a function and generates its LLM tool schema
+- **Advisor**: Onion-style around middleware (mirrors Spring AI Advisor), incl. memory advisor
+- **Memory**: ChatMemory (in-memory / windowed / SQLite)
+- **Context**: Per-request shared state
+- **converter / prompt**: Structured output (OutputConverter) and prompt templates (PromptTemplate), provider-agnostic
 
 ### Key APIs
 
+- `agent/create-agent` → `agent/chat` / `agent/resume` - High-level Agent with memory
 - `kernel/create-kernel-builder` → `add-tools` → `add-service` → `add-filter` → `build-kernel`
-- `kernel/invoke-tool` - Single tool invocation through the :tool filter chain
-- `kernel/invoke-chat` - LLM call through the :chat filter chain
-  (the tool-calling loop lives in `im.ttalk.agent.client`, not the kernel)
+- `kernel/invoke-tool` / `kernel/invoke-chat` - Primitives through the :tool / :chat advisor chains
+  (the tool-calling loop lives in `im.ttalk.agent.react` / `client`, not the kernel)
 - `deftool` - Define tool with auto-generated schema
-- `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/track-message` - Context management
+- `service/create-service` - Wrap any `ILLMProvider` into a kernel service (protocol-only)
+- `memory/in-memory-store` / `memory/windowed` / `sqlite/sqlite-store` - ChatMemory backends
+- `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/set-vars`, `ctx/with-conversation-id` - Context
