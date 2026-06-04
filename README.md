@@ -362,6 +362,8 @@ Context 管理对话中的共享状态：
 | `:ollama` | 本地 Ollama 模型 | - | llama2, mistral, codellama |
 | `:gemini` | Google Gemini | `GOOGLE_API_KEY` | gemini-pro, gemini-ultra |
 | `:mistral` | Mistral | `MISTRAL_API_KEY` | mistral-large, mistral-medium |
+| `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | deepseek-chat, deepseek-reasoner |
+| `:minimax` | MiniMax | `MINIMAX_API_KEY` | abab6.5s-chat, abab6.5-chat |
 | `:openai-compat` | OpenAI 兼容协议 | 自定义 | 取决于后端 |
 
 ### 创建 Provider

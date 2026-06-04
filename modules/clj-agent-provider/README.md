@@ -35,6 +35,7 @@ LLM Provider 和 Service 工厂模块
 2. **配置灵活** - 环境变量、代码配置、默认值三级合并
 3. **Kernel 兼容** - 输出标准 `{:chat-fn :build-result-msgs}` Service map
 4. **延迟加载** - Provider 首次使用时才注册，避免循环依赖
+5. **声明式** - OpenAI 兼容 provider 一律用 `base/defprovider` 一处声明（base-url/env-key/default-model + 可选 `:api-key`/`:require-api-key?`/`:require-model?`），自动生成 config、调用函数与 `create-provider`，消除样板
 
 ## 依赖
 
@@ -61,6 +62,8 @@ LLM Provider 和 Service 工厂模块
 | 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列，Function Call |
 | Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
 | Mistral | `:mistral` | `MISTRAL_*` | Mistral |
+| DeepSeek | `:deepseek` | `DEEPSEEK_*` | deepseek-chat / reasoner，Function Call |
+| MiniMax | `:minimax` | `MINIMAX_*` | abab 系列（chatcompletion_v2 端点） |
 | Ollama | `:ollama` | `OLLAMA_*` | 本地模型 |
 | OpenAI 兼容 | `:openai-compat` | 自定义 | vLLM、LocalAI 等 |
 | Mock | `:mock` | - | 测试用 |
@@ -78,6 +81,8 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.ollama` | Ollama 实现 |
 | `im.ttalk.agent.provider.gemini` | Gemini 实现 |
 | `im.ttalk.agent.provider.mistral` | Mistral 实现 |
+| `im.ttalk.agent.provider.deepseek` | DeepSeek 实现 |
+| `im.ttalk.agent.provider.minimax` | MiniMax 实现 |
 | `im.ttalk.agent.provider.openai_compat` | OpenAI 兼容 |
 | `im.ttalk.agent.provider.mock` | Mock Provider |
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |

@@ -300,6 +300,8 @@ Context manages shared state within a conversation:
 | `:ollama` | Local Ollama models | - |
 | `:gemini` | Google Gemini | `GOOGLE_API_KEY` |
 | `:mistral` | Mistral | `MISTRAL_API_KEY` |
+| `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` |
+| `:minimax` | MiniMax | `MINIMAX_API_KEY` |
 | `:openai-compat` | OpenAI-compatible protocol | Custom |
 
 ### Creating Providers

@@ -48,7 +48,7 @@ clj-agent/
 **职责**: 实现 `im.ttalk.agent.model/ILLMProvider`;`call-llm` 收**中立消息**、内部转各厂商 wire 格式再请求 API。
 
 **包含**（`im.ttalk.agent.provider.*`）:
-- `im.ttalk.agent.provider.{openai,anthropic,zhipu,ollama,gemini,mistral,bailian,mock,base,openai-compat}` - 各实现
+- `im.ttalk.agent.provider.{openai,anthropic,zhipu,ollama,gemini,mistral,deepseek,minimax,bailian,mock,base,openai-compat}` - 各实现
 - `im.ttalk.agent.provider.{wire,schema,stream}.*` - wire 格式 / 工具 schema / 流式解析（provider 内部）
 - `im.ttalk.agent.provider.http.client` - HTTP 客户端
 - `im.ttalk.agent.provider.factory.*` - Provider 注册/配置/创建
