@@ -1,26 +1,14 @@
 (ns im.ttalk.agent.llm.factory.builder
-  "LLM 提供商构建器
+  "LLM 提供商构建器（编排已迁移到 core 模块）
 
-   根据配置创建 Provider 实例。
-
-   使用示例：
-
-   (require '[im.ttalk.agent.llm.factory.builder :as builder])
-
-   ;; 创建基本 Provider
-   (builder/create-provider :openai)
-
-   ;; 带配置创建
-   (builder/create-provider :openai {:api-key \"sk-...\"})
-
-   ;; 从环境变量创建
-   (builder/create-provider-from-env :openai)
-
-   ;; 自动解析配置并创建
-   (builder/create-provider-auto :openai {:model \"gpt-4\"})"
-  (:require [im.ttalk.agent.llm.factory.registry :as registry]
-            [im.ttalk.agent.llm.factory.config :as config]
-            [taoensso.timbre :as log]))
+   本命名空间负责：
+   1. 持有 provider 的延迟注册逻辑 `ensure-providers-registered!`
+      （硬编码具体 provider，属 llm 模块知识）；
+   2. 把该回调注入 core builder，保持原有公共 API 不变。"
+  (:require [im.ttalk.agent.core.llm.factory.builder :as core]
+            [im.ttalk.agent.core.llm.factory.registry :as registry]
+            ;; 加载以触发 provider 配置数据注入 core
+            [im.ttalk.agent.llm.factory.config]))
 
 ;;; ============================================================
 ;;; 初始化 Provider 注册
@@ -49,7 +37,7 @@
     (registry/register-provider! :mistral   (resolve 'im.ttalk.agent.llm.provider.mistral/create-provider))))
 
 ;;; ============================================================
-;;; 基本创建函数
+;;; 公共 API（委托 core，注入 ensure-providers-registered!）
 ;;; ============================================================
 
 (defn create-provider
@@ -57,136 +45,29 @@
 
    参数：
    - provider-type: Provider 类型（关键字）
-   - opts:          配置选项（可选）
-
-   返回：
-   Provider 实例
-
-   抛出：
-   ExceptionInfo - 如果 Provider 类型未知
-
-   示例：
-   (create-provider :anthropic)
-   (create-provider :openai {:api-key \"sk-...\"})"
+   - opts:          配置选项（可选）"
   ([provider-type]
-   (ensure-providers-registered!)
-   (if-let [factory (registry/get-factory provider-type)]
-     (factory)
-     (throw (ex-info "Unknown LLM provider"
-                     {:provider provider-type
-                      :supported (registry/supported-providers)}))))
+   (core/create-provider ensure-providers-registered! provider-type))
   ([provider-type opts]
-   (ensure-providers-registered!)
-   (if-let [factory (registry/get-factory provider-type)]
-     (factory opts)
-     (throw (ex-info "Unknown LLM provider"
-                     {:provider provider-type
-                      :supported (registry/supported-providers)})))))
-
-;;; ============================================================
-;;; 环境变量创建
-;;; ============================================================
+   (core/create-provider ensure-providers-registered! provider-type opts)))
 
 (defn create-provider-from-env
-  "从环境变量创建 Provider
-
-   自动从环境变量加载配置并创建 Provider 实例。
-
-   参数：
-   - provider-type: Provider 类型
-
-   返回：
-   Provider 实例
-
-   抛出：
-   ExceptionInfo - 如果配置验证失败
-
-   示例：
-   (create-provider-from-env :openai)
-   ; 使用 OPENAI_API_KEY, OPENAI_BASE_URL 等环境变量"
+  "从环境变量创建 Provider"
   [provider-type]
-  (let [loaded-config (config/load-config-from-env provider-type)
-        [status result] (config/validate-config provider-type loaded-config)]
-    (log/info ::creating-provider-from-env
-              {:provider provider-type})
-    (case status
-      :ok    (create-provider provider-type result)
-      :error (throw (ex-info "Invalid provider configuration from environment"
-                             {:provider provider-type
-                              :errors result})))))
-
-;;; ============================================================
-;;; 默认配置创建
-;;; ============================================================
+  (core/create-provider-from-env ensure-providers-registered! provider-type))
 
 (defn create-provider-with-defaults
-  "使用默认配置创建 Provider
-
-   合并默认配置和用户配置。
-
-   参数：
-   - provider-type: Provider 类型
-   - user-opts:     用户配置（可选）
-
-   返回：
-   Provider 实例
-
-   抛出：
-   ExceptionInfo - 如果配置验证失败
-
-   示例：
-   (create-provider-with-defaults :openai)
-   (create-provider-with-defaults :openai {:model \"gpt-4-turbo\"})"
+  "使用默认配置创建 Provider"
   ([provider-type]
-   (create-provider-with-defaults provider-type {}))
+   (core/create-provider-with-defaults ensure-providers-registered! provider-type))
   ([provider-type user-opts]
-   (let [default-config (or (config/get-default-config provider-type) {})
-         merged-config (merge default-config user-opts)
-         [status result] (config/validate-config provider-type merged-config)]
-     (case status
-       :ok    (create-provider provider-type result)
-       :error (throw (ex-info "Invalid provider configuration"
-                              {:provider provider-type
-                               :errors result}))))))
-
-;;; ============================================================
-;;; 自动配置创建
-;;; ============================================================
+   (core/create-provider-with-defaults ensure-providers-registered! provider-type user-opts)))
 
 (defn create-provider-auto
-  "自动创建 Provider（智能配置解析）
-
-   自动从多个来源解析配置：
-   1. 默认配置（最低优先级）
-   2. 环境变量
-   3. 用户配置（最高优先级）
-
-   参数：
-   - provider-type: Provider 类型
-   - opts:          用户配置（可选）
-   - use-env?:      是否使用环境变量（默认 true）
-
-   返回：
-   Provider 实例
-
-   抛出：
-   ExceptionInfo - 如果配置解析失败
-
-   示例：
-   ;; 使用环境变量 + 用户配置
-   (create-provider-auto :openai {:model \"gpt-4\"})
-
-   ;; 仅使用用户配置（不读取环境变量）
-   (create-provider-auto :openai {:api-key \"sk-...\"} false)"
+  "自动创建 Provider（智能配置解析）"
   ([provider-type]
-   (create-provider-auto provider-type {}))
+   (core/create-provider-auto ensure-providers-registered! provider-type))
   ([provider-type opts]
-   (create-provider-auto provider-type opts true))
+   (core/create-provider-auto ensure-providers-registered! provider-type opts))
   ([provider-type opts use-env?]
-   (let [[status result] (config/resolve-config provider-type opts use-env?)]
-     (case status
-       :ok    (create-provider provider-type result)
-       :error (throw (ex-info "Failed to resolve provider configuration"
-                              {:provider provider-type
-                               :errors result}))))))
-
+   (core/create-provider-auto ensure-providers-registered! provider-type opts use-env?)))

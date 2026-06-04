@@ -26,8 +26,7 @@
    (llm/extract-text provider response)
    (llm/extract-tool-calls provider response)"
   (:require [im.ttalk.agent.llm.factory.builder :as builder]
-            [im.ttalk.agent.llm.factory.registry :as registry]
-            [im.ttalk.agent.llm.factory.config :as config]
+            [im.ttalk.agent.core.llm.factory.registry :as registry]
             [im.ttalk.agent.core.llm.provider :as proto]
             [im.ttalk.agent.core.kernel.types :as types]
             [im.ttalk.agent.core.llm.response :as response]
