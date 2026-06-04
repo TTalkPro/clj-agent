@@ -158,7 +158,9 @@
    :zhipu   "ZHIPU"
    :ollama  "OLLAMA"
    :gemini  "GOOGLE"
-   :mistral "MISTRAL"})
+   :mistral "MISTRAL"
+   :deepseek "DEEPSEEK"
+   :minimax "MINIMAX"})
 
 (def ^:private builtin-default-configs
   {:openai  {:api-key  ""
@@ -183,7 +185,15 @@
    :mistral {:api-key  ""
              :base-url "https://api.mistral.ai"
              :timeout  120000
-             :model    "mistral-large-latest"}})
+             :model    "mistral-large-latest"}
+   :deepseek {:api-key  ""
+              :base-url "https://api.deepseek.com"
+              :timeout  120000
+              :model    "deepseek-chat"}
+   :minimax {:api-key  ""
+             :base-url "https://api.minimax.chat"
+             :timeout  120000
+             :model    "abab6.5s-chat"}})
 
 (defonce ^:private _init
   (do

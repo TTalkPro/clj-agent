@@ -21,14 +21,18 @@
              '[im.ttalk.agent.provider.mock]
              '[im.ttalk.agent.provider.ollama]
              '[im.ttalk.agent.provider.gemini]
-             '[im.ttalk.agent.provider.mistral])
+             '[im.ttalk.agent.provider.mistral]
+             '[im.ttalk.agent.provider.deepseek]
+             '[im.ttalk.agent.provider.minimax])
     (registry/register-provider! :anthropic (resolve 'im.ttalk.agent.provider.anthropic/create-provider))
     (registry/register-provider! :openai    (resolve 'im.ttalk.agent.provider.openai/create-provider))
     (registry/register-provider! :zhipu     (resolve 'im.ttalk.agent.provider.zhipu/create-provider))
     (registry/register-provider! :mock      (resolve 'im.ttalk.agent.provider.mock/create-mock-provider))
     (registry/register-provider! :ollama    (resolve 'im.ttalk.agent.provider.ollama/create-provider))
     (registry/register-provider! :gemini    (resolve 'im.ttalk.agent.provider.gemini/create-provider))
-    (registry/register-provider! :mistral   (resolve 'im.ttalk.agent.provider.mistral/create-provider))))
+    (registry/register-provider! :mistral   (resolve 'im.ttalk.agent.provider.mistral/create-provider))
+    (registry/register-provider! :deepseek  (resolve 'im.ttalk.agent.provider.deepseek/create-provider))
+    (registry/register-provider! :minimax   (resolve 'im.ttalk.agent.provider.minimax/create-provider))))
 
 ;;; ============================================================
 ;;; 基本创建
