@@ -13,7 +13,7 @@
    ;; 使用重试解析
    (parse-with-llm retry-parser text llm-provider config)"
   (:require [im.ttalk.agent.converter.protocol :as proto]
-            [im.ttalk.agent.model.provider :as llm]
+            [im.ttalk.agent.model :as llm]
             [clojure.string :as str]))
 
 ;; ============================================================

@@ -5,7 +5,7 @@
     对话历史由 Kernel 的 ChatMemory store 自管（Memory Filter 模式），
     Agent 自身只持 conversation-id + 轻量 state。"
   (:require [im.ttalk.agent.kernel :as kernel]
-            [im.ttalk.agent.model.chat :as chat]
+            [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.advisor.memory :as memory-filter]))
 
 ;;; ============================================================
@@ -25,11 +25,11 @@
     - :memory        ChatMemory store（已解析；以 memory-filter 形态挂进 kernel）
     - :max-iterations 最大工具调用循环次数（默认 10）"
   [opts]
-  (let [service (chat/create-service
-                  {:provider    (:provider opts)
-                   :model       (:model opts "glm-4")
-                   :max-tokens  (:max-tokens opts 4096)
-                   :temperature (:temperature opts)})
+  (let [service (service/create-service
+                  (:provider opts)
+                  (cond-> {:model      (:model opts "glm-4")
+                           :max-tokens (:max-tokens opts 4096)}
+                    (:temperature opts) (assoc :temperature (:temperature opts))))
         tools (:tools opts [])
         store (:memory opts)
         user-filters (if (vector? (:filters opts))

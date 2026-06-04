@@ -11,7 +11,7 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.memory.sqlite :as sqlite]
             [im.ttalk.agent.model.message :as msg]
-            [im.ttalk.agent.model.provider :as provider])
+            [im.ttalk.agent.model :as provider])
   (:import [java.io File]))
 
 ;;; ============================================================
