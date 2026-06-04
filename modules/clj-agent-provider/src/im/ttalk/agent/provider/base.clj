@@ -273,20 +273,29 @@
 ;;; ============================================================
 
 (defmacro defprovider
-  "定义 OpenAI 兼容的 Provider
+  "定义 OpenAI 兼容的 Provider —— 一处声明，消除各 provider 重复样板。
+
+   必需：
+   - :base-url       API 基础 URL
+   - :env-key        API Key 的环境变量名
+
+   可选：
+   - :endpoint       API 端点路径（默认 \"/chat/completions\"）
+   - :timeout        请求超时毫秒（默认 120000）
+   - :default-model  默认模型名
+   - :api-key        预置 API Key（如本地 Ollama 用 \"ollama\"）
+   - :require-api-key?  创建时校验 api-key 非空，缺失抛错（gemini/mistral）
+   - :require-model?    创建时校验 :model 必填，缺失抛错（ollama）
 
    用法：
    (defprovider openai
      :base-url \"https://api.openai.com/v1\"
      :env-key \"OPENAI_API_KEY\"
-     :endpoint \"/chat/completions\"
-     :timeout 120000)
+     :default-model \"gpt-4\")
 
-   将生成：
-   - default-config atom
-   - call-openai, call-openai-stream 等函数
-   - create-provider 函数"
-  [provider-name & {:keys [base-url env-key endpoint timeout default-model]
+   生成：default-config、call-<name>{,-stream,-async,-stream-async}、create-provider。"
+  [provider-name & {:keys [base-url env-key endpoint timeout default-model
+                           api-key require-api-key? require-model?]
                     :or {endpoint "/chat/completions"
                          timeout 120000}}]
   (let [name-str (name provider-name)
@@ -294,15 +303,21 @@
         call-fn (symbol (str "call-" name-str))
         call-stream-fn (symbol (str "call-" name-str "-stream"))
         call-async-fn (symbol (str "call-" name-str "-async"))
-        call-stream-async-fn (symbol (str "call-" name-str "-stream-async"))]
+        call-stream-async-fn (symbol (str "call-" name-str "-stream-async"))
+        ;; 显式 gensym：需跨嵌套 syntax-quote 引用，不能用 auto-gensym
+        cfg (gensym "cfg")
+        opts (gensym "opts")
+        prov (gensym "prov")]
     `(do
        ;; 配置
        (def ~config-sym
          ~(str "默认 " name-str " 配置")
-         (make-config ~(keyword provider-name) ~base-url ~env-key
-                      :endpoint ~endpoint
-                      :timeout ~timeout
-                      :default-model ~default-model))
+         (let [~cfg (make-config ~(keyword provider-name) ~base-url ~env-key
+                                 :endpoint ~endpoint
+                                 :timeout ~timeout
+                                 :default-model ~default-model)]
+           ~@(when api-key [`(update-config! ~cfg {:api-key ~api-key})])
+           ~cfg))
 
        ;; 同步调用
        (defn ~call-fn
@@ -332,6 +347,16 @@
        ;; 工厂函数
        (defn ~'create-provider
          ~(str "创建 " name-str " Provider")
-         ([] (create-provider ~config-sym))
-         ([opts#] (create-provider-with-opts ~config-sym opts#))))))
+         ([] (~'create-provider {}))
+         ([~opts]
+          ~@(when require-model?
+              [`(when-not (:model ~opts)
+                  (throw (ex-info ~(str name-str " provider requires :model option")
+                                  {:required :model})))])
+          (let [~prov (create-provider-with-opts ~config-sym ~opts)]
+            ~@(when require-api-key?
+                [`(when (clojure.string/blank? (get-api-key ~config-sym))
+                    (throw (ex-info ~(str name-str " provider requires :api-key or " env-key)
+                                    {:required :api-key})))])
+            ~prov))))))
 
