@@ -451,7 +451,7 @@ Process Framework 支持从外部向运行中的 Process 注入事件，实现�
 #### 异步启动
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.process.runtime :as runtime])
+(require '[im.ttalk.agent.kernel.process.runtime :as runtime])
 
 ;; 异步启动，返回 ProcessHandle
 (def handle (runtime/start-process-async process-spec opts))

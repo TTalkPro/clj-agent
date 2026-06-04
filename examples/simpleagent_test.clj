@@ -7,7 +7,7 @@
   (:require [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.client :as ka]
             [im.ttalk.agent.client :as pa]
-            [im.ttalk.agent.model.provider.zhipu :as zhipu]))
+            [im.ttalk.agent.provider.zhipu :as zhipu]))
 
 ;;; ============================================================
 ;;; 工具定义

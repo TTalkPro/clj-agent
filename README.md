@@ -39,24 +39,22 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 ## 架构概览
 
+采用依赖倒置(DIP)：**Core 定义协议(端口)+ Agent 运行时;Provider 实现协议并依赖 Core**。任何实现 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能注入 agent。
+
 ```mermaid
 graph TB
-    subgraph "用户层 (User Layer)"
-        SA[SimpleAgent<br/>同步有状态对话<br/>可选 pause/resume 审批]
-    end
-
-    subgraph "编排层 (Orchestration Layer)"
+    subgraph "clj-agent-core（协议 + Agent 运行时）"
+        PROTO[ILLMProvider 协议<br/>im.ttalk.agent.model<br/>中立消息边界]
+        SV[通用 Service<br/>仅凭协议包装任意 provider]
+        SA[SimpleAgent / client<br/>同步有状态 + pause/resume]
         K[Kernel<br/>中央编排器]
-        F[Filter<br/>中间件链]
-        T[deftool<br/>工具定义宏]
+        RE[ReAct<br/>工具调用循环]
+        AD[Advisor<br/>中间件洋葱链]
+        T[deftool]
+        ME[ChatMemory]
     end
 
-    subgraph "服务层 (Service Layer)"
-        S[Service<br/>LLM 调用协议]
-        PR[Provider Registry<br/>多 Provider 工厂]
-    end
-
-    subgraph "Provider 实现"
+    subgraph "clj-agent-provider（适配器，依赖 core）"
         AN[Anthropic]
         OA[OpenAI]
         ZP[Zhipu]
@@ -65,32 +63,24 @@ graph TB
         MS[Mistral]
     end
 
-    subgraph "扩展层 (Extension Layer)"
-        PLG[Tool Library<br/>File/HTTP/Shell]
-    end
-
     SA --> K
+    SA --> RE
     K --> T
-    K --> F
-    K --> S
-    S --> PR
-    PR --> AN & OA & ZP & OL & GM & MS
-    PLG --> K
+    K --> AD
+    K --> SV
+    RE --> ME
+    SV --> PROTO
+    AN & OA & ZP & OL & GM & MS -. 实现 .-> PROTO
 ```
 
 ## 模块依赖关系
 
 ```mermaid
 graph LR
-    core[clj-agent-core<br/>Kernel, Tool, Filter<br/>ChatMemory]
-    llm[clj-agent-llm<br/>Provider, Service]
-    sa[clj-agent-simpleagent<br/>SimpleAgent]
-    tools[clj-agent-tools<br/>File, HTTP, Shell]
+    provider[clj-agent-provider<br/>厂商适配器]
+    core[clj-agent-core<br/>协议 + Agent 运行时]
 
-    llm --> core
-    sa --> core
-    sa --> llm
-    tools --> core
+    provider --> core
 ```
 
 ## 模块结构
@@ -98,14 +88,12 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # 核心（Kernel, Tool, Filter, deftool, ChatMemory）
-│   ├── clj-agent-llm/          # LLM Provider + Service 工厂
-│   ├── clj-agent-simpleagent/  # 高级 Agent 封装（SimpleAgent）
-│   └── clj-agent-tools/       # 预置插件库（File, HTTP, Shell, Security）
-├── examples/                   # 使用示例
-├── docs/                       # 设计文档
-├── scripts/                    # 开发脚本
-└── deps.edn                    # 根依赖配置
+│   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + Agent 运行时(kernel/tool/advisor/react/...)；零内部依赖
+│   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
+├── examples/              # 使用示例
+├── docs/                  # 设计文档
+├── scripts/               # 开发脚本
+└── deps.edn               # 根依赖配置
 ```
 
 ## 快速开始
@@ -122,7 +110,7 @@ clj-agent/
 
 ;; 或者只引用特定模块
 {:deps {im.ttalk/clj-agent-core {:local/root "/path/to/clj-agent/modules/clj-agent-core"}
-        im.ttalk/clj-agent-llm  {:local/root "/path/to/clj-agent/modules/clj-agent-llm"}}}
+        im.ttalk/clj-agent-provider  {:local/root "/path/to/clj-agent/modules/clj-agent-provider"}}}
 ```
 
 #### 方式 B：Git 依赖（推荐团队协作）
@@ -164,9 +152,9 @@ clj -T:build install  # 安装到本地 Maven 仓库
 最简单的使用方式，自动管理对话状态：
 
 ```clojure
-(require '[im.ttalk.agent.simpleagent :as ka])
-(require '[im.ttalk.agent.core.kernel.tool :refer [deftool]])
-(require '[im.ttalk.agent.llm.factory.builder :as factory])
+(require '[im.ttalk.agent.client :as ka])
+(require '[im.ttalk.agent.tool :refer [deftool]])
+(require '[im.ttalk.agent.provider.factory.builder :as factory])
 
 ;; 1. 定义工具
 (deftool get-weather
@@ -200,7 +188,7 @@ clj -T:build install  # 安装到本地 Maven 仓库
 SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensitive` 的工具时自动暂停，等待人工审批：
 
 ```clojure
-(require '[im.ttalk.agent.simpleagent :as ka])
+(require '[im.ttalk.agent.client :as ka])
 
 (deftool delete-file
   "删除文件"
@@ -231,14 +219,14 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 直接使用 Kernel 获取最大灵活性：
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel :as kernel])
-(require '[im.ttalk.agent.core.kernel.filter :as filters])
-(require '[im.ttalk.agent.llm.kernel.chat :as chat])
+(require '[im.ttalk.agent.kernel :as kernel])
+(require '[im.ttalk.agent.advisor :as filters])
+(require '[im.ttalk.agent.model.service :as service])
 
-;; 创建 LLM Service
-(def service (chat/create-service
-               {:provider provider
-                :model "gpt-4"
+;; 创建 LLM Service（通用：仅凭协议包装任意 provider）
+(def service (service/create-service
+               provider
+               {:model "gpt-4"
                 :max-tokens 4096}))
 
 ;; 构建 Kernel（kernel 只提供原语：invoke-chat / invoke-tool）
@@ -261,7 +249,7 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
   (println value))
 
 ;; 完整的「工具调用循环」是 SimpleAgent 的职责（见上文方式一），不在 kernel：
-;; (require '[im.ttalk.agent.simpleagent :as agent])
+;; (require '[im.ttalk.agent.client :as agent])
 ;; (agent/chat (agent/create-agent {:provider provider :tools my-tools}) "北京天气怎么样？")
 ```
 
@@ -299,7 +287,7 @@ Kernel 提供三类 API：
 ;; Invoke API - 调用（两个原语，均经 filter 洋葱链）
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; 调用函数（:tool 链）
 (kernel/invoke-chat kernel messages opts)                   ;; 纯 LLM（:chat 链，不含工具循环）
-;; 工具调用循环不在 kernel —— 见 im.ttalk.agent.simpleagent（create-agent + chat）
+;; 工具调用循环不在 kernel —— 见 im.ttalk.agent.client（create-agent + chat）
 
 ;; Query API - 查询
 (:tools kernel)                       ;; 所有 tool schema
@@ -317,7 +305,7 @@ Service 是一个 map，定义 LLM 调用协议：
  :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
 ```
 
-`clj-agent-llm` 模块的 `chat/create-service` 可自动创建。也可自行实现此 map 接入任意 LLM。
+core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议）可从任意 provider 创建。也可自行实现此 map 接入任意 LLM。
 
 ### Filter 中间件（洋葱式 around，对标 Spring AI Advisor）
 
@@ -349,7 +337,7 @@ filters/logging-filter        ;; 调用前后日志
 Context 管理对话中的共享状态：
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.context :as ctx])
+(require '[im.ttalk.agent.context :as ctx])
 
 (def my-ctx (ctx/create {:user-id "u123"}))   ;; 创建（可带初始变量）
 (ctx/get-var my-ctx :user-id)                  ;; 获取变量
@@ -376,7 +364,7 @@ Context 管理对话中的共享状态：
 ### 创建 Provider
 
 ```clojure
-(require '[im.ttalk.agent.llm.factory.builder :as factory])
+(require '[im.ttalk.agent.provider.factory.builder :as factory])
 
 ;; 方式 1: 从环境变量自动配置（推荐）
 (def provider (factory/create-provider-from-env :openai))
@@ -392,13 +380,13 @@ Context 管理对话中的共享状态：
                  :base-url "http://localhost:8000/v1"}))
 
 ;; 方式 4: 智谱 GLM（国产大模型）
-(require '[im.ttalk.agent.llm.provider.zhipu :as zhipu])
+(require '[im.ttalk.agent.provider.zhipu :as zhipu])
 (def provider (zhipu/create-provider
                 {:api-key (System/getenv "ZHIPU_API_KEY")
                  :base-url "https://open.bigmodel.cn/api/paas/v4"}))
 
 ;; 方式 5: 本地 Ollama
-(require '[im.ttalk.agent.llm.provider.ollama :as ollama])
+(require '[im.ttalk.agent.provider.ollama :as ollama])
 (def provider (ollama/create-provider
                 {:base-url "http://localhost:11434"}))
 ```
@@ -406,7 +394,7 @@ Context 管理对话中的共享状态：
 ### 直接调用 Provider
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.provider :as proto])
+(require '[im.ttalk.agent.kernel.provider :as proto])
 
 ;; 简单对话
 (proto/call-simple provider
@@ -473,7 +461,7 @@ Context 管理对话中的共享状态：
 - http-kit/http-kit 2.8.0
 - net.clojars.wkok/openai-clojure 0.21.0
 
-持久化 ChatMemory（SQLite 后端，按需引入 `im.ttalk.agent.simpleagent.memory.sqlite`）：
+持久化 ChatMemory（SQLite 后端，按需引入 `im.ttalk.agent.memory.sqlite`）：
 
 - com.github.seancorfield/next.jdbc 1.3.939
 - org.xerial/sqlite-jdbc 3.45.1.0

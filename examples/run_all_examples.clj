@@ -14,9 +14,9 @@
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.advisor :as filters]
             [im.ttalk.agent.context :as ctx]
-            [im.ttalk.agent.model.chat :as chat]
-            [im.ttalk.agent.model.provider.zhipu :as zhipu]
-            [im.ttalk.agent.model.provider.anthropic :as anthropic]
+            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.provider.zhipu :as zhipu]
+            [im.ttalk.agent.provider.anthropic :as anthropic]
             [im.ttalk.agent.client :as ka]
             [im.ttalk.agent.client :as pa]))
 
@@ -113,9 +113,9 @@
 (defn run-kernel-tests [provider provider-name]
   (separator (str "Example 1: Kernel 基础功能 (" provider-name ")"))
 
-  (let [service (chat/create-service
-                  {:provider provider
-                   :model "glm-4.7"
+  (let [service (service/create-service
+                  provider
+                  {:model "glm-4.7"
                    :max-tokens 1024})
         app-kernel (kernel/build-kernel
                      {:service  service
@@ -296,9 +296,9 @@
   (separator (str "Example 5: Filter 系统 (" provider-name ")"))
 
   (let [filter-log (atom [])
-        service (chat/create-service
-                  {:provider provider
-                   :model "glm-4.7"
+        service (service/create-service
+                  provider
+                  {:model "glm-4.7"
                    :max-tokens 1024})
 
         ;; 创建自定义 Filter（around 模式，tool 和 chat 可并存）

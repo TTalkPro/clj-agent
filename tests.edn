@@ -1,4 +1,4 @@
 #kaocha/v1
 {:tests [{:id :unit
-          :test-paths ["modules/clj-agent-model/test"
+          :test-paths ["modules/clj-agent-provider/test"
                        "modules/clj-agent-core/test"]}]}

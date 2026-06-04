@@ -27,22 +27,38 @@
 
 ## 命名空间
 
+**协议 / 契约（端口）**
+
 | 命名空间 | 说明 |
 |---------|------|
-| `im.ttalk.agent.core.kernel` | Kernel 构建、调用、查询 API |
-| `im.ttalk.agent.core.kernel.tool` | `deftool` 宏定义 |
-| `im.ttalk.agent.core.kernel.filter` | Filter 创建和内置 Filter |
-| `im.ttalk.agent.core.kernel.context` | Context 状态管理 |
-| `im.ttalk.agent.core.kernel.types` | ToolCall、Response 数据结构 |
-| `im.ttalk.agent.core.kernel.service` | Service 抽象接口 |
-| `im.ttalk.agent.core.http.client` | HTTP 客户端工具 |
+| `im.ttalk.agent.model` | `ILLMProvider` 协议（端口，中立消息边界） |
+| `im.ttalk.agent.model.message` / `.response` / `.error` / `.types` | 中立消息、统一响应、错误、构造器 |
+| `im.ttalk.agent.model.service` | 通用 create-service（仅凭协议包装任意 provider） |
+
+**Agent 运行时**
+
+| 命名空间 | 说明 |
+|---------|------|
+| `im.ttalk.agent.kernel` | Kernel 构建、调用、查询 API |
+| `im.ttalk.agent.tool` | `deftool` 宏定义 |
+| `im.ttalk.agent.advisor` | Advisor 洋葱链创建和内置 Advisor |
+| `im.ttalk.agent.advisor.memory` | 按 conversation-id 串历史的记忆 advisor |
+| `im.ttalk.agent.context` | Context 状态管理 |
+| `im.ttalk.agent.converter.*` | 结构化输出解析（OutputConverter） |
+| `im.ttalk.agent.prompt.*` | 提示词模板（PromptTemplate） |
+| `im.ttalk.agent.memory` / `.memory.sqlite` | ChatMemory store |
+| `im.ttalk.agent.react` | ReAct 工具调用循环 |
+| `im.ttalk.agent.client` | 高级 Agent API（create-agent / chat / resume） |
+| `im.ttalk.agent.common` | 共享 Kernel 构建逻辑 |
+
+> 各厂商实现（`im.ttalk.agent.provider.*`）在 `clj-agent-provider`，依赖本模块的协议。
 
 ## API 参考
 
 ### Kernel Build API
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel :as kernel])
+(require '[im.ttalk.agent.kernel :as kernel])
 
 ;; 创建 Builder
 (kernel/create-kernel-builder)
@@ -60,7 +76,7 @@
 ### Kernel Invoke API
 
 kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环不在 kernel**，已下沉到
-`im.ttalk.agent.simpleagent`（`create-agent` + `chat`，或 `simpleagent.loop/invoke`）。
+`im.ttalk.agent.client`（`create-agent` + `chat`，或 `im.ttalk.agent.react/invoke`）。
 
 ```clojure
 ;; 调用工具函数（经过 :phase :tool filter 链）
@@ -84,7 +100,7 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 ### deftool 宏
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.tool :refer [deftool]])
+(require '[im.ttalk.agent.tool :refer [deftool]])
 
 (deftool get-weather
   "获取天气信息"
@@ -101,7 +117,7 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 ### Filter API（洋葱式 around，对标 Spring AI Advisor）
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.filter :as filters])
+(require '[im.ttalk.agent.advisor :as filters])
 
 ;; 创建 Filter —— 根抽象 around(req, chain)；before/after 为糖
 (filters/create-filter :name :chat :order 10
@@ -125,7 +141,7 @@ filters/logging-filter
 ### Context API
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.context :as ctx])
+(require '[im.ttalk.agent.context :as ctx])
 
 (ctx/create)                         ;; 空 Context
 (ctx/create {:user-id "u1"})         ;; 带变量
@@ -156,6 +172,6 @@ filters/logging-filter
 - `kernel/create-kernel-builder` → `add-tools` → `add-service` → `add-filter` → `build-kernel`
 - `kernel/invoke-tool` - Single tool invocation through the :tool filter chain
 - `kernel/invoke-chat` - LLM call through the :chat filter chain
-  (the tool-calling loop lives in `im.ttalk.agent.simpleagent`, not the kernel)
+  (the tool-calling loop lives in `im.ttalk.agent.client`, not the kernel)
 - `deftool` - Define tool with auto-generated schema
 - `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/track-message` - Context management

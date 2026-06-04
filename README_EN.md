@@ -18,24 +18,22 @@ English | [中文](README.md)
 
 ## Architecture Overview
 
+Dependency Inversion: **Core defines the protocol (port) + Agent runtime; Provider implements the protocol and depends on Core.** Any jar implementing `im.ttalk.agent.model/ILLMProvider` can be injected as a provider.
+
 ```mermaid
 graph TB
-    subgraph "User Layer"
-        SA[SimpleAgent<br/>Synchronous Stateful<br/>Optional Pause/Resume Approval]
-    end
-
-    subgraph "Orchestration Layer"
+    subgraph "clj-agent-core (protocol + Agent runtime)"
+        PROTO[ILLMProvider protocol<br/>im.ttalk.agent.model<br/>neutral-message boundary]
+        SV[Generic Service<br/>wraps any provider via protocol only]
+        SA[SimpleAgent / client<br/>Synchronous Stateful + Pause/Resume]
         K[Kernel<br/>Central Orchestrator]
-        F[Filter<br/>Middleware Chain]
-        T[deftool<br/>Tool Definition Macro]
+        RE[ReAct<br/>Tool-call Loop]
+        AD[Advisor<br/>Middleware Onion Chain]
+        T[deftool]
+        ME[ChatMemory]
     end
 
-    subgraph "Service Layer"
-        S[Service<br/>LLM Call Protocol]
-        PR[Provider Registry<br/>Multi-Provider Factory]
-    end
-
-    subgraph "Provider Implementations"
+    subgraph "clj-agent-provider (adapters, depend on core)"
         AN[Anthropic]
         OA[OpenAI]
         ZP[Zhipu]
@@ -44,32 +42,24 @@ graph TB
         MS[Mistral]
     end
 
-    subgraph "Extension Layer"
-        PLG[Tool Library<br/>File/HTTP/Shell]
-    end
-
     SA --> K
+    SA --> RE
     K --> T
-    K --> F
-    K --> S
-    S --> PR
-    PR --> AN & OA & ZP & OL & GM & MS
-    PLG --> K
+    K --> AD
+    K --> SV
+    RE --> ME
+    SV --> PROTO
+    AN & OA & ZP & OL & GM & MS -. implement .-> PROTO
 ```
 
 ## Module Dependencies
 
 ```mermaid
 graph LR
-    core[clj-agent-core<br/>Kernel, Tool, Filter<br/>ChatMemory]
-    llm[clj-agent-llm<br/>Provider, Service]
-    sa[clj-agent-simpleagent<br/>SimpleAgent]
-    tools[clj-agent-tools<br/>File, HTTP, Shell]
+    provider[clj-agent-provider<br/>vendor adapters]
+    core[clj-agent-core<br/>protocol + Agent runtime]
 
-    llm --> core
-    sa --> core
-    sa --> llm
-    tools --> core
+    provider --> core
 ```
 
 ## Module Structure
@@ -77,14 +67,12 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # Core (Kernel, Tool, Filter, deftool, ChatMemory)
-│   ├── clj-agent-llm/          # LLM Provider + Service Factory
-│   ├── clj-agent-simpleagent/  # High-level Agent Wrapper (SimpleAgent)
-│   └── clj-agent-tools/       # Pre-built Plugin Library (File, HTTP, Shell, Security)
-├── examples/                   # Usage Examples
-├── docs/                       # Design Documents
-├── scripts/                    # Development Scripts
-└── deps.edn                    # Root Dependency Configuration
+│   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + Agent runtime; no internal deps
+│   └── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
+├── examples/              # Usage Examples
+├── docs/                  # Design Documents
+├── scripts/               # Development Scripts
+└── deps.edn               # Root Dependency Configuration
 ```
 
 ## Quick Start
@@ -101,9 +89,9 @@ clj-agent/
 The simplest way to use the framework with automatic state management:
 
 ```clojure
-(require '[im.ttalk.agent.simpleagent :as ka])
-(require '[im.ttalk.agent.core.kernel.tool :refer [deftool]])
-(require '[im.ttalk.agent.llm.factory.builder :as factory])
+(require '[im.ttalk.agent.client :as ka])
+(require '[im.ttalk.agent.tool :refer [deftool]])
+(require '[im.ttalk.agent.provider.factory.builder :as factory])
 
 ;; 1. Define tools
 (deftool get-weather
@@ -137,7 +125,7 @@ The simplest way to use the framework with automatic state management:
 Configuring `:on-pause` enables pause/resume: the agent automatically pauses when encountering tools marked as `:sensitive`, awaiting human approval:
 
 ```clojure
-(require '[im.ttalk.agent.simpleagent :as ka])
+(require '[im.ttalk.agent.client :as ka])
 
 (deftool delete-file
   "Delete a file"
@@ -168,14 +156,14 @@ Configuring `:on-pause` enables pause/resume: the agent automatically pauses whe
 Use the Kernel directly for maximum flexibility:
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel :as kernel])
-(require '[im.ttalk.agent.core.kernel.filter :as filters])
-(require '[im.ttalk.agent.llm.kernel.chat :as chat])
+(require '[im.ttalk.agent.kernel :as kernel])
+(require '[im.ttalk.agent.advisor :as filters])
+(require '[im.ttalk.agent.model.service :as service])
 
-;; Create LLM Service
-(def service (chat/create-service
-               {:provider provider
-                :model "gpt-4"
+;; Create LLM Service (generic: wraps any provider via protocol only)
+(def service (service/create-service
+               provider
+               {:model "gpt-4"
                 :max-tokens 4096}))
 
 ;; Build Kernel (kernel provides only the primitives: invoke-chat / invoke-tool)
@@ -198,7 +186,7 @@ Use the Kernel directly for maximum flexibility:
   (println value))
 
 ;; The full tool-calling loop is SimpleAgent's job (see Option 1 above), not the kernel:
-;; (require '[im.ttalk.agent.simpleagent :as agent])
+;; (require '[im.ttalk.agent.client :as agent])
 ;; (agent/chat (agent/create-agent {:provider provider :tools my-tools}) "What's the weather in Beijing?")
 ```
 
@@ -236,7 +224,7 @@ Kernel provides three categories of APIs:
 ;; Invoke API - two primitives (both through the filter onion chain)
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; Function call (:tool chain)
 (kernel/invoke-chat kernel messages opts)                   ;; Pure LLM (:chat chain, no tool loop)
-;; The tool-calling loop is NOT in the kernel — see im.ttalk.agent.simpleagent (create-agent + chat)
+;; The tool-calling loop is NOT in the kernel — see im.ttalk.agent.client (create-agent + chat)
 
 ;; Query API - Query
 (:tools kernel)                       ;; All tool schemas
@@ -254,7 +242,7 @@ Service is a map defining the LLM call protocol:
  :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
 ```
 
-`chat/create-service` from `clj-agent-llm` module creates this automatically. You can also implement this map yourself to integrate any LLM.
+Core's generic `im.ttalk.agent.model.service/create-service` (protocol-only) builds this from any provider. You can also implement this map yourself to integrate any LLM.
 
 ### Filter Middleware (onion-style around, mirrors Spring AI Advisor)
 
@@ -287,7 +275,7 @@ filters/logging-filter        ;; Pre/post-call logging
 Context manages shared state within a conversation:
 
 ```clojure
-(require '[im.ttalk.agent.core.kernel.context :as ctx])
+(require '[im.ttalk.agent.context :as ctx])
 
 (def my-ctx (ctx/create {:user-id "u123"}))   ;; Create (with initial variables)
 (ctx/get-var my-ctx :user-id)                  ;; Get variable
@@ -314,7 +302,7 @@ Context manages shared state within a conversation:
 ### Creating Providers
 
 ```clojure
-(require '[im.ttalk.agent.llm.factory.builder :as factory])
+(require '[im.ttalk.agent.provider.factory.builder :as factory])
 
 ;; Auto-configure from environment variables
 (def provider (factory/create-provider-from-env :openai))
@@ -353,7 +341,7 @@ Core:
 - http-kit/http-kit 2.8.0
 - net.clojars.wkok/openai-clojure 0.21.0
 
-Persistent ChatMemory (SQLite backend, opt-in via `im.ttalk.agent.simpleagent.memory.sqlite`):
+Persistent ChatMemory (SQLite backend, opt-in via `im.ttalk.agent.memory.sqlite`):
 
 - com.github.seancorfield/next.jdbc 1.3.939
 - org.xerial/sqlite-jdbc 3.45.1.0

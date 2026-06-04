@@ -19,8 +19,8 @@
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.client :as ka]
             [im.ttalk.agent.client :as pa]
-            [im.ttalk.agent.model.provider.zhipu :as zhipu]
-            [im.ttalk.agent.model.provider.anthropic :as anthropic]))
+            [im.ttalk.agent.provider.zhipu :as zhipu]
+            [im.ttalk.agent.provider.anthropic :as anthropic]))
 
 ;;; ============================================================
 ;;; 工具定义

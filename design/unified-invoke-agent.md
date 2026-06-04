@@ -6,7 +6,7 @@
 > - `kernel.clj`：新增 `build-chat-opts`/`execute-batch`/`run-tool-loop`/`resume`，`run-tools` 改为 execute-batch 无 gate 特例，`invoke` 走统一循环并返回 `:status`；`:tool-gate` opt。
 > - `simpleagent.clj`：单一 `create-agent`/`chat`/`resume`/`paused?`/`reset!`/`get-history`；`:on-pause` 启用 gate（敏感工具暂停）。
 > - 删除 `simpleagent/kernel_agent.clj` 与 `simpleagent/process_agent.clj`；`common.clj` 移除 finalize-result。
-> - 测试与 examples 全部改用 `im.ttalk.agent.simpleagent`。
+> - 测试与 examples 全部改用 `im.ttalk.agent.client`。
 > - 重构相关测试 53 tests / 157 assertions / 0 failures；全量仅余 1 个与本次无关的 http_test 网络超时。
 >
 > ---
@@ -180,7 +180,7 @@
 ## 6. 命名空间收敛（决策点）
 
 三选一：
-- **A（推荐）**：保留 `im.ttalk.agent.simpleagent` 单一 `create-agent`；删除 `kernel-agent` / `process-agent` 两个 ns。最干净，**破坏 API**。
+- **A（推荐）**：保留 `im.ttalk.agent.client` 单一 `create-agent`；删除 `kernel-agent` / `process-agent` 两个 ns。最干净，**破坏 API**。
 - **B**：保留两个 ns 作**薄 shim**（都委托统一 agent，`process-agent/create-process-agent` = `create-agent` 注入 on-pause）。不破坏 API，但留两个名字。
 - **C**：合并实现到 simpleagent，`kernel-agent`/`process-agent` 标记 deprecated 后续删。渐进。
 

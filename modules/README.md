@@ -2,82 +2,60 @@
 
 ## 模块结构
 
-clj-agent 分为多个独立模块：
+clj-agent 采用**依赖倒置(DIP)**的两层划分:**Core 定义协议(端口)+ Agent 运行时;Provider 实现协议(适配器)并依赖 Core。** 任何实现了 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能作为 provider 注入 Core 的 agent。
 
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/         # 核心框架（Kernel, Tool, Filter, deftool, ChatMemory）
-│   ├── clj-agent-model/          # LLM Provider + Service 工厂
-│   ├── clj-agent-simpleagent/  # 高级 Agent 封装（SimpleAgent，含 pause/resume）
-│   └── clj-agent-tools/       # 预置插件库（File, HTTP, Shell）
-├── scripts/                     # 构建脚本
-└── deps.edn                     # 根配置
+│   ├── clj-agent-core/      # 协议(端口) + Agent 运行时;零内部依赖
+│   └── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
+├── scripts/
+└── deps.edn                 # 根配置(开发/测试一次性加载两模块)
 ```
+
+依赖方向:**Provider → Core**(实现依赖抽象)。应用层在运行时构造一个 provider 注入 agent。
 
 ---
 
 ## 模块说明
 
-### 1. clj-agent-core
+### 1. clj-agent-core — 协议 + Agent 运行时
 
-**职责**: Kernel 编排器、工具系统、Filter 中间件
+**职责**: 定义 LLM 抽象契约(端口),并在其上构建 Agent 运行时。**不依赖任何 provider 实现**。
 
-**包含**:
-- `im.ttalk.agent.core.kernel` - Kernel（Build/invoke-chat/invoke-tool/Query API）
-- `im.ttalk.agent.core.kernel.tool` - deftool 宏（工具函数定义 + schema 生成）
-- `im.ttalk.agent.core.kernel.filter` - Filter 洋葱链（对标 Spring AI Advisor）
-- `im.ttalk.agent.core.kernel.context` - Context 共享状态管理
-- `im.ttalk.agent.core.http.client` - HTTP 客户端
+**契约 / 端口**(`im.ttalk.agent.model.*`):
+- `im.ttalk.agent.model` — `ILLMProvider` 协议(≈ Spring AI `ChatModel`),以**中立消息**为边界
+- `im.ttalk.agent.model.message` / `.response` / `.error` / `.types` — 中立消息、统一响应、错误、构造器
+- `im.ttalk.agent.model.service` — **通用** `create-service`:仅凭协议把任意 provider 包成 kernel service
 
-**依赖**: cheshire, timbre, http-kit
+**Agent 运行时**:
+- `im.ttalk.agent.kernel` - Kernel（build-kernel / invoke-chat / invoke-tool）
+- `im.ttalk.agent.tool` - deftool 宏（≈ `ToolCallback`）
+- `im.ttalk.agent.advisor` / `.advisor.memory` - Advisor 洋葱链 / 记忆 advisor（≈ `CallAdvisorChain` / `MessageChatMemoryAdvisor`）
+- `im.ttalk.agent.context` - 请求级上下文
+- `im.ttalk.agent.converter.*` / `.prompt.*` - 结构化输出 / 提示词模板（≈ `OutputConverter` / `PromptTemplate`）
+- `im.ttalk.agent.memory` / `.memory.sqlite` - ChatMemory
+- `im.ttalk.agent.react` - ReAct 工具调用循环
+- `im.ttalk.agent.client` - 高级 Agent API（≈ `ChatClient`）
+- `im.ttalk.agent.common` - 共享 Kernel 构建
 
----
-
-### 2. clj-agent-model
-
-**职责**: LLM Provider 实现 + Service 工厂
-
-**包含**:
-- `im.ttalk.agent.llm.factory.builder` - Provider 创建（手动/环境变量/自动）
-- `im.ttalk.agent.llm.factory.registry` - Provider 注册表
-- `im.ttalk.agent.llm.factory.config` - 配置管理
-- `im.ttalk.agent.llm.kernel.chat` - Service 工厂（create-service）
-- `im.ttalk.agent.llm.provider.*` - Provider 实现（OpenAI, Anthropic, Zhipu, Ollama, Gemini, Mistral）
-- `im.ttalk.agent.llm.schema.*` - 请求 Schema 转换
-- `im.ttalk.agent.llm.stream.*` - 流式响应解析
-
-**依赖**: `clj-agent-core`, openai-clojure, clj-http
+**依赖**: 无内部依赖;cheshire, timbre, next.jdbc, sqlite-jdbc
 
 ---
 
-### 3. clj-agent-simpleagent
+### 2. clj-agent-provider — 厂商适配器
 
-**职责**: 开箱即用的 Agent 封装
+**职责**: 实现 `im.ttalk.agent.model/ILLMProvider`;`call-llm` 收**中立消息**、内部转各厂商 wire 格式再请求 API。
 
-**包含**:
-- `im.ttalk.agent.simpleagent` - SimpleAgent（同步有状态，可选 pause/resume 审批）
-- `im.ttalk.agent.simpleagent.loop` - 工具调用循环（invoke/resume，从 kernel 下沉）
-- `im.ttalk.agent.simpleagent.memory` / `.memory.sqlite` - ChatMemory store（in-memory / windowed / SQLite）
-- `im.ttalk.agent.simpleagent.memory-filter` - 按 conversation-id 串历史的 chat filter
-- `im.ttalk.agent.simpleagent.common` - 共享构建逻辑
+**包含**（`im.ttalk.agent.provider.*`）:
+- `im.ttalk.agent.provider.{openai,anthropic,zhipu,ollama,gemini,mistral,bailian,mock,base,openai-compat}` - 各实现
+- `im.ttalk.agent.provider.{wire,schema,stream}.*` - wire 格式 / 工具 schema / 流式解析（provider 内部）
+- `im.ttalk.agent.provider.http.client` - HTTP 客户端
+- `im.ttalk.agent.provider.factory.*` - Provider 注册/配置/创建
+- `im.ttalk.agent.provider.api` - Provider 统一门面
+- `im.ttalk.agent.provider.response-parser` - OpenAI 响应解析
 
-**依赖**: `clj-agent-core`, `clj-agent-model`, next.jdbc, sqlite-jdbc
-
----
-
-### 4. clj-agent-tools
-
-**职责**: 预置工具插件库
-
-**包含**:
-- `im.ttalk.agent.tools.file` - 文件操作（read, write, delete, copy, move）
-- `im.ttalk.agent.tools.http` - HTTP 请求（GET, POST, PUT, DELETE）
-- `im.ttalk.agent.tools.shell` - Shell 命令（安全/非安全模式）
-- `im.ttalk.agent.tools.security` - 安全工具
-- `im.ttalk.agent.tools.resilience` - 重试/超时
-
-**依赖**: `clj-agent-core`
+**依赖**: `clj-agent-core`(协议/契约), openai-clojure, clj-http, http-kit, cheshire, timbre
 
 ---
 
@@ -85,16 +63,11 @@ clj-agent/
 
 ### 方式 1: 根目录开发（推荐）
 
-在根目录开发，可以同时加载所有模块：
-
 ```bash
-# 运行所有测试
-clojure -M:test
+clojure -M:test          # 运行所有测试
 ```
 
 ### 方式 2: 单模块开发
-
-在单个模块目录中开发：
 
 ```bash
 cd modules/clj-agent-core
@@ -104,27 +77,14 @@ clojure -M:test
 
 ---
 
-## 构建和发布
-
-```bash
-./scripts/build-all.sh      # 构建所有模块
-./scripts/install-all.sh    # 安装到本地 Maven
-./scripts/test-all.sh       # 测试所有模块
-```
-
----
-
 ## 依赖关系
 
 ```mermaid
 graph LR
-    core[clj-agent-core]
-    llm[clj-agent-model]
-    sa[clj-agent-simpleagent]
-    tools[clj-agent-tools]
+    core[clj-agent-core<br/>协议 + Agent 运行时]
+    provider[clj-agent-provider<br/>厂商适配器]
 
-    llm --> core
-    sa --> core
-    sa --> llm
-    tools --> core
+    provider --> core
 ```
+
+> 第三方只需依赖 `clj-agent-core`、实现 `im.ttalk.agent.model/ILLMProvider`，即可作为 provider 被 agent 使用。

@@ -4,9 +4,9 @@
    使用方法：
    1. 设置环境变量 ZHIPU_API_KEY
    2. 运行: clj -M examples/test_glm_providers.clj"
-  (:require [im.ttalk.agent.model.provider.anthropic :as anthropic]
-            [im.ttalk.agent.model.provider.base :as base]
-            [im.ttalk.agent.kernel.provider :as proto]))
+  (:require [im.ttalk.agent.provider.anthropic :as anthropic]
+            [im.ttalk.agent.provider.base :as base]
+            [im.ttalk.agent.model :as proto]))
 
 (def api-key (System/getenv "ZHIPU_API_KEY"))
 
