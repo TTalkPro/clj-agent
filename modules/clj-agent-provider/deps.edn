@@ -1,0 +1,31 @@
+{:paths ["src"]
+
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        ;; 内部依赖 - Core（protocol/契约：im.ttalk.agent.model.*）
+        im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
+
+        ;; LLM API
+        net.clojars.wkok/openai-clojure {:mvn/version "0.21.0"}
+        clj-http/clj-http {:mvn/version "3.12.3"}
+        cheshire/cheshire {:mvn/version "5.12.0"}
+
+        ;; HTTP 客户端（http/client.clj、provider/bailian.clj）
+        http-kit/http-kit {:mvn/version "2.8.0"}
+
+        ;; 日志
+        com.taoensso/timbre {:mvn/version "6.3.0"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]
+        :extra-deps {nrepl/nrepl {:mvn/version "1.0.0"}
+                     cider/cider-nrepl {:mvn/version "0.30.0"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}
+                      lambdaisland/kaocha-cloverage {:mvn/version "1.1.89"}}
+         :main-opts ["-m" "kaocha.runner"]}
+
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}}}
