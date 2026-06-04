@@ -1,7 +1,0 @@
-{:paths ["src" "test"]
- :deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
-        im.ttalk/clj-agent-llm  {:local/root "../clj-agent-llm"}
-
-        ;; 持久化 ChatMemory（SQLite 后端，按需加载 simpleagent.memory.sqlite）
-        com.github.seancorfield/next.jdbc {:mvn/version "1.3.939"}
-        org.xerial/sqlite-jdbc {:mvn/version "3.45.1.0"}}}
