@@ -191,9 +191,9 @@
               :timeout  120000
               :model    "deepseek-chat"}
    :minimax {:api-key  ""
-             :base-url "https://api.minimax.chat"
+             :base-url "https://api.minimaxi.com"
              :timeout  120000
-             :model    "abab6.5s-chat"}})
+             :model    "MiniMax-M2.7"}})
 
 (defonce ^:private _init
   (do
