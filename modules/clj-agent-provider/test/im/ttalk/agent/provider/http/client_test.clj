@@ -106,32 +106,34 @@
 ;; 注意：以下测试需要网络连接，可能会被跳过
 ;; 使用 httpbin.org 作为测试服务
 
+;; 注意：http-kit 网络失败不抛异常而是返回 {:status 0 :error ...}，
+;; 因此跳过逻辑须判断 :error 而非 catch。
+
 (deftest ^:integration get-request-test
   (testing "GET 请求到 httpbin"
-    (try
-      (let [response (http/get "https://httpbin.org/get"
-                               :timeout 10000)]
-        (is (map? response))
-        (is (contains? response :status))
-        (is (contains? response :body))
-        (when (:success? response)
-          (is (= 200 (:status response)))))
-      (catch Exception e
-        ;; 网络不可用时跳过测试
-        (println "Skipping integration test - network unavailable")))))
+    (let [response (http/get "https://httpbin.org/get"
+                             :timeout 10000)]
+      (if (:error response)
+        (println "Skipping integration test - network unavailable:" (:error response))
+        (do
+          (is (map? response))
+          (is (contains? response :status))
+          (is (contains? response :body))
+          (when (:success? response)
+            (is (= 200 (:status response)))))))))
 
 (deftest ^:integration post-json-test
   (testing "POST JSON 请求到 httpbin"
-    (try
-      (let [response (http/post-json "https://httpbin.org/post"
-                                     {:name "test" :value 123}
-                                     {:timeout 10000})]
-        (is (map? response))
-        (when (:success? response)
-          (is (= 200 (:status response)))
-          (is (= "test" (get-in response [:body :json :name])))))
-      (catch Exception e
-        (println "Skipping integration test - network unavailable")))))
+    (let [response (http/post-json "https://httpbin.org/post"
+                                   {:name "test" :value 123}
+                                   {:timeout 10000})]
+      (if (:error response)
+        (println "Skipping integration test - network unavailable:" (:error response))
+        (do
+          (is (map? response))
+          (when (:success? response)
+            (is (= 200 (:status response)))
+            (is (= "test" (get-in response [:body :json :name])))))))))
 
 ;; ============================================================
 ;; 模拟请求测试（不需要网络）

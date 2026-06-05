@@ -2,7 +2,7 @@
   "build-params 提示词控制 / 缓存集成单测（Anthropic + OpenAI 兼容）"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.provider.anthropic :as anthropic]
-            [im.ttalk.agent.provider.openai-compat :as compat]))
+            [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
 ;; build-params 在 anthropic 命名空间是私有的，用 var 取出
 (def anthropic-build-params #'anthropic/build-params)
@@ -85,6 +85,13 @@
       (is (= "u1" (:user p)))
       (is (= ["x"] (:stop p)))
       (is (= {:type "json_object"} (:response_format p)))))
+  (testing "GLM thinking 开关透传（仅显式提供时发送）"
+    (let [p (compat/build-params
+              {:model "glm-4.7" :thinking {:type "enabled" :clear_thinking true}}
+              [{:role "user" :content "hi"}] [])]
+      (is (= {:type "enabled" :clear_thinking true} (:thinking p))))
+    (let [p (compat/build-params {:model "glm-4.7"} [{:role "user" :content "hi"}] [])]
+      (is (not (contains? p :thinking)))))
   (testing "extra-body 直接 merge，覆盖各家私有字段"
     (let [p (compat/build-params
               {:model "deepseek-chat" :extra-body {:enable_thinking false :foo 1}}

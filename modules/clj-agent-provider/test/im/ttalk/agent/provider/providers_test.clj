@@ -42,9 +42,23 @@
       #(gemini/create-provider {:api-key ""})
       #(mistral/create-provider {:api-key ""})
       #(deepseek/create-provider {:api-key ""})
-      #(minimax/create-provider {:api-key ""})))
+      #(minimax/create-provider {:api-key ""})
+      #(zhipu/create-provider {:api-key ""})
+      #(zhipu/create-anthropic-provider {:api-key ""})))
   (testing "提供 api-key 即可正常创建"
     (is (= :deepseek (model/provider-name (deepseek/create-provider {:api-key "sk-x"}))))))
+
+;;; ============================================================
+;;; 智谱双协议
+;;; ============================================================
+
+(deftest zhipu-dual-protocol
+  (testing "Anthropic 兼容协议 provider：provider-name 仍为 :zhipu，能力齐全"
+    (let [p (zhipu/create-anthropic-provider {:api-key "k"})]
+      (is (satisfies? model/ILLMProvider p))
+      (is (= :zhipu (model/provider-name p)))
+      (is (model/supports-function-calling? p))
+      (is (model/supports-stream? p)))))
 
 ;;; ============================================================
 ;;; 宏选项：:require-model? 与 :api-key 预置（ollama）

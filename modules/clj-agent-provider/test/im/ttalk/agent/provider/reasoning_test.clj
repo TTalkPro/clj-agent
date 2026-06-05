@@ -2,7 +2,7 @@
   "推理/思考内容提取单测（Anthropic thinking + DeepSeek reasoning_content）"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.provider.response-parser :as oai-parser]
+            [im.ttalk.agent.provider.common.response-parser :as oai-parser]
             [im.ttalk.agent.provider.anthropic :as anthropic]
             [im.ttalk.agent.provider.stream.openai :as oai-stream]
             [im.ttalk.agent.provider.stream.anthropic :as ant-stream]))

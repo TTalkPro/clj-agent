@@ -1,7 +1,7 @@
 (ns im.ttalk.agent.provider.cache-test
   "Anthropic prompt caching 策略层单测"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.provider.cache :as cache]))
+            [im.ttalk.agent.provider.common.cache :as cache]))
 
 (def base-params
   {:model "claude-opus-4-8"
