@@ -63,7 +63,7 @@ LLM Provider 和 Service 工厂模块
 | Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
 | Mistral | `:mistral` | `MISTRAL_*` | Mistral |
 | DeepSeek | `:deepseek` | `DEEPSEEK_*` | deepseek-chat / reasoner，Function Call |
-| MiniMax | `:minimax` | `MINIMAX_*` | abab 系列（chatcompletion_v2 端点） |
+| MiniMax | `:minimax` | `MINIMAX_*` | MiniMax-M 系列，**Anthropic 兼容端点**（`/anthropic/v1/messages`，Bearer 鉴权） |
 | Ollama | `:ollama` | `OLLAMA_*` | 本地模型 |
 | OpenAI 兼容 | `:openai-compat` | 自定义 | vLLM、LocalAI 等 |
 | Mock | `:mock` | - | 测试用 |
@@ -76,13 +76,13 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.factory.registry` | Provider 注册表 |
 | `im.ttalk.agent.provider.factory.config` | 环境变量配置管理 |
 | `im.ttalk.agent.provider.openai` | OpenAI 实现 |
-| `im.ttalk.agent.provider.anthropic` | Anthropic 实现 |
+| `im.ttalk.agent.provider.anthropic` | Anthropic 实现（含可配置端点，支持 Anthropic 兼容服务） |
 | `im.ttalk.agent.provider.zhipu` | Zhipu 实现 |
 | `im.ttalk.agent.provider.ollama` | Ollama 实现 |
 | `im.ttalk.agent.provider.gemini` | Gemini 实现 |
 | `im.ttalk.agent.provider.mistral` | Mistral 实现 |
 | `im.ttalk.agent.provider.deepseek` | DeepSeek 实现 |
-| `im.ttalk.agent.provider.minimax` | MiniMax 实现 |
+| `im.ttalk.agent.provider.minimax` | MiniMax 实现（复用 anthropic provider 的 Anthropic 兼容端点） |
 | `im.ttalk.agent.provider.openai_compat` | OpenAI 兼容 |
 | `im.ttalk.agent.provider.mock` | Mock Provider |
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |
@@ -235,6 +235,25 @@ LLM Provider 和 Service 工厂模块
 
 可重试：408/409/425/429/5xx/529 及网络层错误；不可重试：其余 4xx。
 失败抛 `ex-info`，data 含 `:status :request-id :retryable? :headers`。
+
+### Anthropic 兼容端点（复用 anthropic provider）
+
+`anthropic` provider 的端点可配置（base-url / 路径 / 鉴权方式 / 版本头），
+任何「Anthropic Messages API 兼容」的服务都能直接复用其请求/响应/流式/工具调用/
+缓存/重试机制。MiniMax 即按此实现：
+
+```clojure
+(anthropic/create-provider
+  {:provider-name :minimax
+   :base-url "https://api.minimaxi.com"
+   :api-path "/anthropic/v1/messages"
+   :auth-scheme :bearer        ;; :x-api-key（官方）| :bearer（MiniMax 等）
+   :anthropic-version nil       ;; nil 则不发送该头
+   :api-key "..."})
+```
+
+MiniMax 用 `MiniMax-M2.7` 等推理模型，Anthropic 格式下推理内容独立成块，
+`extract-text` 直接得到干净答案；流式也能拿到 usage（含 cache token）。
 
 ## 环境变量
 
