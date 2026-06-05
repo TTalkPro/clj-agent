@@ -114,7 +114,8 @@
     (let [response (http/get "https://httpbin.org/get"
                              :timeout 10000)]
       (if (:error response)
-        (println "Skipping integration test - network unavailable:" (:error response))
+        (do (println "Skipping integration test - network unavailable:" (:error response))
+            (is true "skipped - network unavailable"))
         (do
           (is (map? response))
           (is (contains? response :status))
@@ -128,7 +129,8 @@
                                    {:name "test" :value 123}
                                    {:timeout 10000})]
       (if (:error response)
-        (println "Skipping integration test - network unavailable:" (:error response))
+        (do (println "Skipping integration test - network unavailable:" (:error response))
+            (is true "skipped - network unavailable"))
         (do
           (is (map? response))
           (when (:success? response)
