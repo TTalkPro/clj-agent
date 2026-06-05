@@ -106,14 +106,16 @@
       (let [delta (:delta event)
             delta-type (:type delta)]
         (cond
-          ;; 文本增量
+          ;; 文本增量：同时累积到 :accumulated 和对应内容块的 :text，
+          ;; 使 build-response 走内容块路径（真实流总会先发 content_block_start）时文本不丢
           (= delta-type "text_delta")
           (let [text (:text delta)
+                block-index (:index event)
                 new-accumulated (str (:accumulated state) text)
                 new-index (inc (:index state))]
-            [(assoc state
-                    :accumulated new-accumulated
-                    :index new-index)
+            [(-> state
+                 (assoc :accumulated new-accumulated :index new-index)
+                 (update-in [:content-blocks block-index :text] (fnil str "") text))
              {:token text
               :index new-index
               :accumulated new-accumulated}])
@@ -145,13 +147,21 @@
              nil])
           [state nil]))
 
-      ;; 消息增量更新
+      ;; 消息增量更新（delta 含 stop_reason；usage 在事件顶层，需并入 message.usage）
       "message_delta"
-      [(update state :message merge (:delta event)) nil]
+      [(update state :message
+               (fn [m]
+                 (-> (merge m (:delta event))
+                     (update :usage merge (:usage event)))))
+       nil]
 
       ;; 消息结束
       "message_stop"
       [state nil]
+
+      ;; 流式错误事件（如 overloaded_error / api_error）：记录到 state
+      "error"
+      [(assoc state :error (:error event)) nil]
 
       ;; 其他事件类型
       [state nil])))
@@ -173,6 +183,9 @@
    (build-response final-state)
    ; => {:id \"...\" :content [...] :stop_reason \"end_turn\" ...}"
   [state]
+  (when-let [err (:error state)]
+    (throw (ex-info "Anthropic streaming error"
+                    {:error err :provider :anthropic :stream? true})))
   (let [message (:message state)
         accumulated (:accumulated state)
         content-blocks (:content-blocks state)]

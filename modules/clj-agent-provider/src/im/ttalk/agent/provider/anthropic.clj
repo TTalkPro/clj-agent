@@ -22,11 +22,12 @@
 
    ;; 流式调用
    (anthropic/call-anthropic-stream config messages tools on-token)"
-  (:require [wkok.openai-clojure.api :as api]
-            [im.ttalk.agent.provider.http.client :as http]
+  (:require [im.ttalk.agent.provider.http.client :as http]
+            [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]
+            [im.ttalk.agent.provider.cache :as cache]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
             [im.ttalk.agent.provider.wire.anthropic :as wire]
             [im.ttalk.agent.provider.stream.anthropic :as stream]))
@@ -173,21 +174,36 @@
   "构建 Anthropic API 请求参数
 
    参数：
-   - config:       配置 map
-   - messages:     消息列表
+   - config:       配置 map，支持：
+     - 必需：:model
+     - 采样/提示词控制：:max-tokens :temperature :top-p :top-k
+       :stop（=> stop_sequences）:metadata :thinking
+     - 工具：:tool-choice :tools（预置 schema）
+     - 系统提示：:system-prompt
+     - 缓存：:cache-strategy（见 cache 命名空间）:cache-ttl
+   - messages:     消息列表（Anthropic wire 形态）
    - tool-schemas: 工具 schema 列表
 
    返回：
-   API 参数 map"
-  [{:keys [model max-tokens system-prompt tool-choice tools]} messages tool-schemas]
+   API 参数 map（已按 cache-strategy 注入 cache_control）"
+  [{:keys [model max-tokens system-prompt tool-choice tools
+           temperature top-p top-k stop metadata thinking
+           cache-strategy cache-ttl]} messages tool-schemas]
   (let [all-tools (into (vec tools) tool-schemas)
-        max-tokens (or max-tokens 4094)]
-    (cond-> {:model model
-             :max_tokens max-tokens
-             :messages messages}
-      (seq all-tools) (assoc :tools all-tools)
-      system-prompt   (assoc :system system-prompt)
-      tool-choice     (assoc :tool_choice tool-choice))))
+        max-tokens (or max-tokens 4096)
+        params (cond-> {:model model
+                        :max_tokens max-tokens
+                        :messages messages}
+                 (seq all-tools)     (assoc :tools all-tools)
+                 system-prompt       (assoc :system system-prompt)
+                 tool-choice         (assoc :tool_choice tool-choice)
+                 (some? temperature) (assoc :temperature temperature)
+                 (some? top-p)       (assoc :top_p top-p)
+                 (some? top-k)       (assoc :top_k top-k)
+                 (seq stop)          (assoc :stop_sequences (vec stop))
+                 metadata            (assoc :metadata metadata)
+                 thinking            (assoc :thinking thinking))]
+    (cache/apply-anthropic-cache params cache-strategy cache-ttl)))
 
 ;;; ============================================================
 ;;; 同步 API 调用
@@ -213,23 +229,28 @@
   (let [tool-schemas (schema/tools->schemas tools)
         params (build-params config messages tool-schemas)
         api-url (get-api-url)
-        api-key (:api-key @default-opts)
+        api-key (or (:api-key config) (:api-key @default-opts))
+        timeout (or (:timeout config) 120000)
         headers {"Content-Type" "application/json"
                  "x-api-key" api-key
                  "anthropic-version" "2023-06-01"}
-        response (http/post api-url
-                            :headers headers
-                            :body params
-                            :timeout 120000)]
-    ;; 检查响应是否成功（HTTP status 2xx）
-    (if (or (:success? response)
-            (and (>= (:status response 200) 200)
-                 (< (:status response 200) 300)))
+        ;; opt-in 重试：仅当 config 含 :retry 时启用
+        response (retry/maybe-with-retry
+                   config
+                   #(http/post api-url
+                               :headers headers
+                               :body params
+                               :timeout timeout))]
+    (if (:success? response)
       (:body response)
       (throw (ex-info "Anthropic API call failed"
                       {:status (:status response)
                        :body (:body response)
-                       :error (:error response)})))))
+                       :error (:error response)
+                       :headers (:headers response)
+                       :request-id (:request-id response)
+                       :provider :anthropic
+                       :retryable? (retry/transient-response? response)})))))
 
 ;;; ============================================================
 ;;; 异步 API 调用
@@ -250,7 +271,7 @@
   (let [tool-schemas (schema/tools->schemas tools)
         params (build-params config messages tool-schemas)
         api-url (get-api-url)
-        api-key (:api-key @default-opts)
+        api-key (or (:api-key config) (:api-key @default-opts))
         headers {"Content-Type" "application/json"
                  "x-api-key" api-key
                  "anthropic-version" "2023-06-01"}]
@@ -280,7 +301,7 @@
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
         api-url (get-api-url)
-        api-key (:api-key @default-opts)
+        api-key (or (:api-key config) (:api-key @default-opts))
         headers {"Content-Type" "application/json"
                  "x-api-key" api-key
                  "anthropic-version" "2023-06-01"}
@@ -317,7 +338,7 @@
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
         api-url (get-api-url)
-        api-key (:api-key @default-opts)
+        api-key (or (:api-key config) (:api-key @default-opts))
         headers {"Content-Type" "application/json"
                  "x-api-key" api-key
                  "anthropic-version" "2023-06-01"}]
