@@ -76,12 +76,16 @@
                          (:prompt_cache_hit_tokens usage))
           ;; 缓存写入（创建）：Anthropic cache_creation_input_tokens
           cache-write (or (:cache-write-tokens usage)
-                          (:cache_creation_input_tokens usage))]
+                          (:cache_creation_input_tokens usage))
+          ;; 缓存未命中：DeepSeek prompt_cache_miss_tokens
+          cache-miss (or (:cache-miss-tokens usage)
+                         (:prompt_cache_miss_tokens usage))]
       (cond-> {:input-tokens input
                :output-tokens output
                :total-tokens total}
         cache-read  (assoc :cache-read-tokens cache-read)
-        cache-write (assoc :cache-write-tokens cache-write)))))
+        cache-write (assoc :cache-write-tokens cache-write)
+        cache-miss  (assoc :cache-miss-tokens cache-miss)))))
 
 ;;; ============================================================
 ;;; 推理/思考内容提取
