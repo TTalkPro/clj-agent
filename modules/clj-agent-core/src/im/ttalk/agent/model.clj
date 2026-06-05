@@ -210,6 +210,8 @@
       :id (:id resp)
       :model (:model resp)
       :text text
+      ;; 推理/思考内容（deepseek-reasoner reasoning_content / Claude thinking 等）
+      :reasoning (response/extract-reasoning resp)
       :tool-calls tool-calls
       :usage usage
       :finish-reason finish-reason

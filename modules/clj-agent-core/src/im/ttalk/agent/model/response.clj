@@ -84,6 +84,40 @@
         cache-write (assoc :cache-write-tokens cache-write)))))
 
 ;;; ============================================================
+;;; 推理/思考内容提取
+;;; ============================================================
+
+(defn extract-reasoning
+  "从原始 API 响应提取推理/思考内容（与最终答案分离）
+
+   兼容两种形态：
+   - Anthropic / Anthropic 兼容：content 中 type=\"thinking\" 的块，取 :thinking 文本
+   - OpenAI 兼容（DeepSeek-reasoner 等）：choices[0].message.reasoning_content
+
+   返回：推理文本字符串，或 nil（普通模型 / 无推理内容）。
+
+   示例：
+   (extract-reasoning {:content [{:type \"thinking\" :thinking \"让我想想...\"}
+                                 {:type \"text\" :text \"答案\"}]})
+   ; => \"让我想想...\"
+   (extract-reasoning {:choices [{:message {:reasoning_content \"推理...\" :content \"答案\"}}]})
+   ; => \"推理...\""
+  [raw]
+  (when (map? raw)
+    (let [;; Anthropic：thinking 内容块
+          anthropic-thinking (when (sequential? (:content raw))
+                               (->> (:content raw)
+                                    (filter #(= "thinking" (:type %)))
+                                    (map :thinking)
+                                    (remove nil?)
+                                    (str/join)))
+          ;; OpenAI 兼容：reasoning_content
+          openai-reasoning (get-in raw [:choices 0 :message :reasoning_content])
+          reasoning (or (when (seq anthropic-thinking) anthropic-thinking)
+                        openai-reasoning)]
+      (when (and reasoning (seq reasoning)) reasoning))))
+
+;;; ============================================================
 ;;; 完成原因归一化
 ;;; ============================================================
 
@@ -99,6 +133,8 @@
    "tool_use"       :tool-use
    "max_tokens"     :max-tokens
    "stop_sequence"  :stop
+   "pause_turn"     :pause
+   "refusal"        :refusal
    ;; 关键字格式
    :stop            :stop
    :tool_calls      :tool-use
@@ -107,7 +143,9 @@
    :end_turn        :stop
    :tool_use        :tool-use
    :max_tokens      :max-tokens
-   :stop_sequence   :stop})
+   :stop_sequence   :stop
+   :pause_turn      :pause
+   :refusal         :refusal})
 
 (defn normalize-finish-reason
   "归一化完成原因
@@ -207,7 +245,7 @@
 ;;; ============================================================
 
 (defrecord LLMResponse
-  [text tool-calls assistant-msg usage finish-reason
+  [text reasoning tool-calls assistant-msg usage finish-reason
    id model provider raw-response]
 
   ILLMResponse
@@ -221,6 +259,14 @@
   (response-id [_] id)
   (response-model [_] model)
   (response-provider [_] provider))
+
+(defn response-reasoning
+  "获取推理/思考内容（reasoning_content / thinking）
+
+   返回：字符串或 nil。普通模型为 nil；推理模型（deepseek-reasoner、
+   Claude thinking、MiniMax-M 系列等）返回独立于最终答案的推理过程文本。"
+  [resp]
+  (:reasoning resp))
 
 ;;; ============================================================
 ;;; 工厂函数
@@ -252,10 +298,11 @@
      :assistant-msg {:role \"assistant\" :content \"你好\"}
      :usage {:prompt_tokens 100 :completion_tokens 50}
      :finish-reason \"stop\")"
-  [& {:keys [text tool-calls assistant-msg usage finish-reason
+  [& {:keys [text reasoning tool-calls assistant-msg usage finish-reason
              id model provider raw-response]}]
   (->LLMResponse
     text
+    reasoning
     tool-calls
     assistant-msg
     (normalize-usage usage)
