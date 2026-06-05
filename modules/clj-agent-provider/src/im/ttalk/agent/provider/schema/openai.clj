@@ -61,8 +61,19 @@
    :description (:description function)
    :parameters (:parameters function)})
 
+(defn wire-tool?
+  "工具是否已是 wire 格式（带 :type 的预置/原生工具），无需转换
+
+   覆盖 GLM 的 web_search / retrieval / mcp、OpenAI 原生 function wire 格式等。"
+  [tool]
+  (and (map? tool) (contains? tool :type)))
+
 (defn tools->schemas
   "批量转换工具定义为 OpenAI schemas
+
+   - 简单定义 {:name :description :parameters} -> 包装为 function 格式
+   - 已带 :type 的 wire 格式（如 GLM {:type \"web_search\" ...}、
+     {:type \"retrieval\" ...}、{:type \"mcp\" ...}）-> 原样透传
 
    参数：
    - tools: 工具定义列表
@@ -70,7 +81,7 @@
    返回：
    OpenAI schema 列表"
   [tools]
-  (mapv tool->schema tools))
+  (mapv (fn [t] (if (wire-tool? t) t (tool->schema t))) tools))
 
 (defn schemas->tools
   "批量转换 OpenAI schemas 为工具定义

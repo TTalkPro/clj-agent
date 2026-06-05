@@ -64,8 +64,18 @@
    :description description
    :parameters input_schema})
 
+(defn wire-tool?
+  "工具是否已是 Anthropic wire 格式（带 :type 的服务端工具或带 :input_schema 的定义）"
+  [tool]
+  (and (map? tool)
+       (or (contains? tool :type)
+           (contains? tool :input_schema))))
+
 (defn tools->schemas
   "批量转换工具定义为 Anthropic schemas
+
+   - 简单定义 {:name :description :parameters} -> 转为 input_schema 格式
+   - 已是 wire 格式（带 :type 的服务端工具、或已带 :input_schema）-> 原样透传
 
    参数：
    - tools: 工具定义列表
@@ -73,7 +83,7 @@
    返回：
    Anthropic schema 列表"
   [tools]
-  (mapv tool->schema tools))
+  (mapv (fn [t] (if (wire-tool? t) t (tool->schema t))) tools))
 
 (defn schemas->tools
   "批量转换 Anthropic schemas 为工具定义
