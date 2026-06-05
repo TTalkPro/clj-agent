@@ -173,8 +173,8 @@
                :model    "claude-3-5-sonnet-20241022"}
    :zhipu   {:api-key  ""
              :base-url "https://open.bigmodel.cn/api/paas/v4"
-             :timeout  60000
-             :model    "glm-4"}
+             :timeout  120000
+             :model    "glm-4.7"}
    :ollama  {:base-url "http://localhost:11434"
              :timeout  120000
              :model    "llama2"}
