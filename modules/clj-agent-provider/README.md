@@ -62,7 +62,7 @@ LLM Provider 和 Service 工厂模块
 | 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列（glm-5/4.7/4.6），**双协议**：OpenAI 兼容（默认，对话补全文档字段全量支持：`:thinking/:do-sample/:tool-stream/:request-id/:user-id`、预置工具 web_search/retrieval/mcp 透传）+ Anthropic 兼容（`create-anthropic-provider`）；**异步任务**：`submit-async`/`await-async-result` |
 | Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
 | Mistral | `:mistral` | `MISTRAL_*` | Mistral |
-| DeepSeek | `:deepseek` | `DEEPSEEK_*` | deepseek-chat / reasoner，Function Call |
+| DeepSeek | `:deepseek` | `DEEPSEEK_*` | deepseek-chat / reasoner，Function Call；reasoning_content → `:reasoning`；**前缀续写**（`call-prefix-completion{,-stream}`，beta）；SSE 末块 usage（含 cache hit/miss） |
 | MiniMax | `:minimax` | `MINIMAX_*` | MiniMax-M 系列，**Anthropic 兼容端点**（`/anthropic/v1/messages`，Bearer 鉴权） |
 | Ollama | `:ollama` | `OLLAMA_*` | 本地模型 |
 | OpenAI 兼容 | `:openai-compat` | 自定义 | vLLM、LocalAI 等 |
