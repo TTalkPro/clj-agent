@@ -27,7 +27,7 @@
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.provider.cache :as cache]
+            [im.ttalk.agent.provider.common.cache :as cache]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
             [im.ttalk.agent.provider.wire.anthropic :as wire]
             [im.ttalk.agent.provider.stream.anthropic :as stream]))

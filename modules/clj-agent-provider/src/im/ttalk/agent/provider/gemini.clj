@@ -5,7 +5,7 @@
 
    (require '[im.ttalk.agent.provider.gemini :as gemini])
    (def provider (gemini/create-provider {:api-key \"AIza...\"}))"
-  (:require [im.ttalk.agent.provider.base :as base]))
+  (:require [im.ttalk.agent.provider.common.base :as base]))
 
 (base/defprovider gemini
   :base-url "https://generativelanguage.googleapis.com/v1beta"

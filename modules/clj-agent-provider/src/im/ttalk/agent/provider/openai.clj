@@ -5,7 +5,7 @@
 
    (require '[im.ttalk.agent.provider.openai :as openai])
    (def provider (openai/create-provider {:api-key \"sk-...\"}))"
-  (:require [im.ttalk.agent.provider.base :as base]))
+  (:require [im.ttalk.agent.provider.common.base :as base]))
 
 (base/defprovider openai
   :base-url "https://api.openai.com/v1"

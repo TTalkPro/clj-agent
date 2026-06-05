@@ -14,7 +14,7 @@
 
    (require '[im.ttalk.agent.provider.deepseek :as deepseek])
    (def provider (deepseek/create-provider {:api-key \"sk-...\"}))"
-  (:require [im.ttalk.agent.provider.base :as base]))
+  (:require [im.ttalk.agent.provider.common.base :as base]))
 
 (base/defprovider deepseek
   :base-url "https://api.deepseek.com"

@@ -5,7 +5,7 @@
 
    (require '[im.ttalk.agent.provider.mistral :as mistral])
    (def provider (mistral/create-provider {:api-key \"...\"}))"
-  (:require [im.ttalk.agent.provider.base :as base]))
+  (:require [im.ttalk.agent.provider.common.base :as base]))
 
 (base/defprovider mistral
   :base-url "https://api.mistral.ai/v1"

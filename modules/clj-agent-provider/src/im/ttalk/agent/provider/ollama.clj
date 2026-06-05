@@ -8,7 +8,7 @@
    (require '[im.ttalk.agent.provider.ollama :as ollama])
    (def provider (ollama/create-provider {:model \"llama2\"}))"
   (:require [im.ttalk.agent.provider.http.client :as http]
-            [im.ttalk.agent.provider.base :as base]))
+            [im.ttalk.agent.provider.common.base :as base]))
 
 (base/defprovider ollama
   :base-url "http://localhost:11434/v1"
