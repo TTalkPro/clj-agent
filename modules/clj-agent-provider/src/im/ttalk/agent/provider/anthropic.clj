@@ -188,6 +188,7 @@
     :id (:id raw-response)
     :model (:model raw-response)
     :text (extract-text raw-response)
+    :reasoning (response/extract-reasoning raw-response)
     :tool-calls (let [tc (extract-tool-calls raw-response)]
                   (when (seq tc) tc))
     :usage (get-usage raw-response)

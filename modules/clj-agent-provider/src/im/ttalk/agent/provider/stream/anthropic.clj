@@ -39,6 +39,7 @@
    状态 map {:accumulated \"\" :index 0 :content-blocks {} :message nil}"
   []
   {:accumulated ""
+   :reasoning-accumulated ""
    :index 0
    :content-blocks {}
    :message nil})
@@ -127,6 +128,25 @@
                 existing (get-in state [:content-blocks block-index :input] "")]
             [(assoc-in state [:content-blocks block-index :input]
                        (str existing partial-json))
+             nil])
+
+          ;; 思考/推理增量（extended thinking）：累积到块 :thinking 与顶层 :reasoning-accumulated，
+          ;; 通过 :reasoning-token 单独 emit（不放进 :token，避免污染答案流）
+          (= delta-type "thinking_delta")
+          (let [thinking (:thinking delta)
+                block-index (:index event)
+                new-reasoning (str (:reasoning-accumulated state) thinking)]
+            [(-> state
+                 (assoc :reasoning-accumulated new-reasoning)
+                 (update-in [:content-blocks block-index :thinking] (fnil str "") thinking))
+             {:reasoning-token thinking
+              :reasoning? true
+              :reasoning-accumulated new-reasoning}])
+
+          ;; 思考块签名增量：挂到对应块（便于多轮 thinking 回传）
+          (= delta-type "signature_delta")
+          (let [block-index (:index event)]
+            [(assoc-in state [:content-blocks block-index :signature] (:signature delta))
              nil])
 
           ;; 其他增量类型
@@ -247,11 +267,13 @@
         accumulated (:accumulated state)
         content-blocks (:content-blocks state)
         text (extract-text-from-blocks content-blocks accumulated)
-        tool-calls (extract-tool-calls-from-blocks content-blocks)]
+        tool-calls (extract-tool-calls-from-blocks content-blocks)
+        reasoning (:reasoning-accumulated state)]
     (response/make-response
       :id (:id message)
       :model (:model message)
       :text (when (seq text) text)
+      :reasoning (when (seq reasoning) reasoning)
       :tool-calls (when (seq tool-calls) tool-calls)
       :usage (:usage message)
       :finish-reason (:stop_reason message)
