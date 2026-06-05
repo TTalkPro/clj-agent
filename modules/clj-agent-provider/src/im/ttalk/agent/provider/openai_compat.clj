@@ -17,6 +17,7 @@
    ;; 流式调用
    (compat/call-api-stream api-url api-key config messages tools on-token)"
   (:require [im.ttalk.agent.provider.http.client :as http]
+            [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]))
 
@@ -42,26 +43,42 @@
   "构建 API 请求参数
 
    参数：
-   - config:       配置 map
-     {:model \"...\", :max-tokens n, :temperature f, :top-p f,
-      :system-prompt \"...\", :response-format {...}}
+   - config:       配置 map，支持：
+     - 必需：:model
+     - 采样/提示词控制：:max-tokens :temperature :top-p :stop
+       :frequency-penalty :presence-penalty :seed :n :tool-choice :user
+     - 系统提示：:system-prompt
+     - 结构化输出：:response-format
+     - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）
    - messages:     消息列表
    - tool-schemas: 工具 schema 列表
 
    返回：
-   API 参数 map"
-  [{:keys [model max-tokens system-prompt temperature top-p stop response-format]
-    :or {temperature 0.7 top-p 0.9}}
+   API 参数 map
+
+   说明：
+   - temperature/top_p 改为「存在才设」—— 不再强塞默认值（推理类模型对此敏感）。
+   - OpenAI 兼容协议的 prompt caching 是自动的，无需 cache_control；命中情况见
+     响应 usage 的 prompt_tokens_details.cached_tokens（OpenAI）/ prompt_cache_hit_tokens（DeepSeek）。"
+  [{:keys [model max-tokens system-prompt temperature top-p stop response-format
+           frequency-penalty presence-penalty seed n tool-choice user extra-body]}
    messages tool-schemas]
   (let [msgs (build-messages system-prompt messages)]
     (cond-> {:model model
-             :max_tokens max-tokens
-             :temperature temperature
-             :top_p top-p
              :messages msgs}
-      (seq tool-schemas) (assoc :tools tool-schemas)
-      (seq stop) (assoc :stop stop)
-      response-format (assoc :response_format response-format))))
+      max-tokens                (assoc :max_tokens max-tokens)
+      (some? temperature)       (assoc :temperature temperature)
+      (some? top-p)             (assoc :top_p top-p)
+      (seq tool-schemas)        (assoc :tools tool-schemas)
+      tool-choice               (assoc :tool_choice tool-choice)
+      (seq stop)                (assoc :stop stop)
+      response-format           (assoc :response_format response-format)
+      (some? frequency-penalty) (assoc :frequency_penalty frequency-penalty)
+      (some? presence-penalty)  (assoc :presence_penalty presence-penalty)
+      (some? seed)              (assoc :seed seed)
+      (some? n)                 (assoc :n n)
+      user                      (assoc :user user)
+      (map? extra-body)         (merge extra-body))))
 
 ;;; ============================================================
 ;;; 消息构建
@@ -124,11 +141,24 @@
         params (build-params config messages tool-schemas)
         timeout (or (:timeout opts) 120000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
-                       (:extra-headers opts))]
-    (:body (http/post api-url
-                      :headers headers
-                      :body params
-                      :timeout timeout))))
+                       (:extra-headers config)
+                       (:extra-headers opts))
+        ;; opt-in 重试：config 含 :retry 时启用
+        response (retry/maybe-with-retry
+                   config
+                   #(http/post api-url
+                               :headers headers
+                               :body params
+                               :timeout timeout))]
+    (if (:success? response)
+      (:body response)
+      (throw (ex-info "OpenAI-compatible API call failed"
+                      {:status (:status response)
+                       :body (:body response)
+                       :error (:error response)
+                       :headers (:headers response)
+                       :request-id (:request-id response)
+                       :retryable? (retry/transient-response? response)})))))
 
 ;;; ============================================================
 ;;; 流式调用
@@ -160,14 +190,23 @@
                    (assoc :stream true))
         timeout (or (:timeout opts) 120000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
+                       (:extra-headers config)
                        (:extra-headers opts))
         ;; 创建流处理器
         {:keys [process-fn get-id get-model]} (stream/make-stream-processor)
-        ;; 发起流式请求
-        response (http/post-stream api-url
-                                   :headers headers
-                                   :body params
-                                   :timeout timeout)]
+        ;; 发起流式请求（仅对建链阶段做 opt-in 重试，流读取中途不重试）
+        response (retry/maybe-with-retry
+                   config
+                   #(http/post-stream api-url
+                                      :headers headers
+                                      :body params
+                                      :timeout timeout))]
+    (when-not (:success? response)
+      (throw (ex-info "OpenAI-compatible streaming connection failed"
+                      {:status (:status response)
+                       :error (:error response)
+                       :request-id (:request-id response)
+                       :retryable? (retry/transient-response? response)})))
     ;; 处理 SSE 流
     (let [final-state (http/process-sse-stream
                         (:body response)
