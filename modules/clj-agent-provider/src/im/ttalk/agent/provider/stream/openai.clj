@@ -82,7 +82,12 @@
        (print (:token token))))"
   [chunk state]
   (let [choice (first (:choices chunk))
-        delta (:delta choice)]
+        delta (:delta choice)
+        ;; 捕获末块 usage（DeepSeek 原生返回 / OpenAI stream_options.include_usage）
+        ;; 与 finish_reason（length/sensitive 等真实停止原因）
+        state (cond-> state
+                (:usage chunk)           (assoc :usage (:usage chunk))
+                (:finish_reason choice)  (assoc :finish-reason (:finish_reason choice)))]
     (cond
       ;; 推理增量（deepseek-reasoner 等：reasoning_content 在 content 之前流式返回）
       ;; 单独 emit :reasoning-token，不混入 :token，保持答案流干净
@@ -164,13 +169,16 @@
                           (sort-by first)
                           (mapv second)))
         reasoning (:reasoning-accumulated state)]
-    {:id id
-     :model model
-     :choices [{:message (cond-> {:role (or (:role state) "assistant")
-                                  :content (:accumulated state)}
-                           (seq reasoning)   (assoc :reasoning_content reasoning)
-                           (seq tool-calls)  (assoc :tool_calls tool-calls))
-                :finish_reason (if (seq tool-calls) "tool_calls" "stop")}]}))
+    (cond-> {:id id
+             :model model
+             :choices [{:message (cond-> {:role (or (:role state) "assistant")
+                                          :content (:accumulated state)}
+                                   (seq reasoning)   (assoc :reasoning_content reasoning)
+                                   (seq tool-calls)  (assoc :tool_calls tool-calls))
+                        ;; 优先用流中捕获的真实 finish_reason
+                        :finish_reason (or (:finish-reason state)
+                                           (if (seq tool-calls) "tool_calls" "stop"))}]}
+      (:usage state) (assoc :usage (:usage state)))))
 
 (defn normalize-response
   "从流式状态构建统一格式响应
@@ -217,8 +225,9 @@
       :reasoning (let [r (:reasoning-accumulated state)]
                    (when (seq r) r))
       :tool-calls tool-calls
-      :finish-reason (if (seq tool-calls) "tool_calls" "stop")
-      :usage usage
+      :finish-reason (or (:finish-reason state)
+                         (if (seq tool-calls) "tool_calls" "stop"))
+      :usage (or usage (:usage state))
       :provider :openai)))
 
 ;;; ============================================================

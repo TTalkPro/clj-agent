@@ -64,7 +64,7 @@
   [{:keys [model max-tokens system-prompt temperature top-p stop response-format
            frequency-penalty presence-penalty seed n tool-choice user
            logprobs top-logprobs thinking
-           do-sample tool-stream request-id user-id extra-body]}
+           do-sample tool-stream request-id user-id stream-options extra-body]}
    messages tool-schemas]
   (let [msgs (build-messages system-prompt messages)]
     (cond-> {:model model
@@ -91,6 +91,8 @@
       (some? tool-stream)       (assoc :tool_stream tool-stream)
       request-id                (assoc :request_id request-id)
       user-id                   (assoc :user_id user-id)
+      ;; 流式 usage 开关（OpenAI 标准 {:include_usage true}；DeepSeek 末块原生带 usage）
+      stream-options            (assoc :stream_options stream-options)
       (map? extra-body)         (merge extra-body))))
 
 ;;; ============================================================
