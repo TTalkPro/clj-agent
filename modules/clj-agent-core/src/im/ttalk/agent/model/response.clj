@@ -38,16 +38,20 @@
    - usage: 原始 usage map（可能来自不同 Provider）
 
    返回：
-   统一格式 {:input-tokens n :output-tokens m :total-tokens t}
+   统一格式 {:input-tokens n :output-tokens m :total-tokens t
+            :cache-read-tokens r :cache-write-tokens w}
+   （cache 字段仅在原始 usage 含相应数据时出现，向后兼容）
 
    示例：
    ;; OpenAI 格式
    (normalize-usage {:prompt_tokens 100 :completion_tokens 50 :total_tokens 150})
    ; => {:input-tokens 100 :output-tokens 50 :total-tokens 150}
 
-   ;; Anthropic 格式
-   (normalize-usage {:input_tokens 100 :output_tokens 50})
-   ; => {:input-tokens 100 :output-tokens 50 :total-tokens 150}"
+   ;; Anthropic 格式（含 prompt caching）
+   (normalize-usage {:input_tokens 100 :output_tokens 50
+                     :cache_read_input_tokens 800 :cache_creation_input_tokens 200})
+   ; => {:input-tokens 100 :output-tokens 50 :total-tokens 150
+   ;     :cache-read-tokens 800 :cache-write-tokens 200}"
   [usage]
   (when usage
     (let [;; 支持多种命名格式
@@ -63,10 +67,21 @@
                      0)
           total (or (:total-tokens usage)
                     (:total_tokens usage)
-                    (+ input output))]
-      {:input-tokens input
-       :output-tokens output
-       :total-tokens total})))
+                    (+ input output))
+          ;; 缓存命中（读）：Anthropic cache_read_input_tokens /
+          ;; OpenAI prompt_tokens_details.cached_tokens / DeepSeek prompt_cache_hit_tokens
+          cache-read (or (:cache-read-tokens usage)
+                         (:cache_read_input_tokens usage)
+                         (get-in usage [:prompt_tokens_details :cached_tokens])
+                         (:prompt_cache_hit_tokens usage))
+          ;; 缓存写入（创建）：Anthropic cache_creation_input_tokens
+          cache-write (or (:cache-write-tokens usage)
+                          (:cache_creation_input_tokens usage))]
+      (cond-> {:input-tokens input
+               :output-tokens output
+               :total-tokens total}
+        cache-read  (assoc :cache-read-tokens cache-read)
+        cache-write (assoc :cache-write-tokens cache-write)))))
 
 ;;; ============================================================
 ;;; 完成原因归一化
