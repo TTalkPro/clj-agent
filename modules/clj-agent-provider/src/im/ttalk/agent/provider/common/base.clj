@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.provider.base
+(ns im.ttalk.agent.provider.common.base
   "OpenAI 兼容 Provider 基础模块
 
    为所有 OpenAI 兼容的 LLM Provider 提供统一的基础实现。
@@ -11,7 +11,7 @@
 
    使用示例：
 
-   (require '[im.ttalk.agent.provider.base :as base])
+   (require '[im.ttalk.agent.provider.common.base :as base])
 
    ;; 创建配置
    (def config (base/make-config
@@ -24,9 +24,9 @@
   (:require [clojure.string :as str]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.provider.schema.openai :as schema]
-            [im.ttalk.agent.provider.response-parser :as parser]
+            [im.ttalk.agent.provider.common.response-parser :as parser]
             [im.ttalk.agent.provider.wire.openai :as wire]
-            [im.ttalk.agent.provider.openai-compat :as compat]))
+            [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
 ;;; ============================================================
 ;;; 配置构建

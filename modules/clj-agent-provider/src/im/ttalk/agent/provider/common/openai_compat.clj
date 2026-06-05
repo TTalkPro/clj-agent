@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.provider.openai-compat
+(ns im.ttalk.agent.provider.common.openai-compat
   "OpenAI 兼容 API 调用
 
    提供 OpenAI 风格 API 的通用调用代码，供多个 Provider 复用：
@@ -9,7 +9,7 @@
 
    使用示例：
 
-   (require '[im.ttalk.agent.provider.openai-compat :as compat])
+   (require '[im.ttalk.agent.provider.common.openai-compat :as compat])
 
    ;; 同步调用
    (compat/call-api api-url api-key config messages tools)
@@ -47,6 +47,7 @@
      - 必需：:model
      - 采样/提示词控制：:max-tokens :temperature :top-p :stop
        :frequency-penalty :presence-penalty :seed :n :tool-choice :user
+       :logprobs :top-logprobs :thinking（GLM 等支持思考开关的模型）
      - 系统提示：:system-prompt
      - 结构化输出：:response-format
      - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）
@@ -62,7 +63,8 @@
      响应 usage 的 prompt_tokens_details.cached_tokens（OpenAI）/ prompt_cache_hit_tokens（DeepSeek）。"
   [{:keys [model max-tokens system-prompt temperature top-p stop response-format
            frequency-penalty presence-penalty seed n tool-choice user
-           logprobs top-logprobs extra-body]}
+           logprobs top-logprobs thinking
+           do-sample tool-stream request-id user-id extra-body]}
    messages tool-schemas]
   (let [msgs (build-messages system-prompt messages)]
     (cond-> {:model model
@@ -81,6 +83,14 @@
       user                      (assoc :user user)
       (some? logprobs)          (assoc :logprobs logprobs)
       (some? top-logprobs)      (assoc :top_logprobs top-logprobs)
+      ;; 思考/推理开关（GLM 系列：{:type "enabled"|"disabled" :clear_thinking bool}；
+      ;; 仅在显式提供时发送，不影响其他 provider）
+      thinking                  (assoc :thinking thinking)
+      ;; GLM 对话补全文档字段（仅显式提供时发送）
+      (some? do-sample)         (assoc :do_sample do-sample)
+      (some? tool-stream)       (assoc :tool_stream tool-stream)
+      request-id                (assoc :request_id request-id)
+      user-id                   (assoc :user_id user-id)
       (map? extra-body)         (merge extra-body))))
 
 ;;; ============================================================

@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.provider.response-parser
+(ns im.ttalk.agent.provider.common.response-parser
   "响应解析模块
 
    提供统一的 LLM API 响应解析功能，支持 OpenAI 格式的响应。
@@ -6,7 +6,7 @@
 
    使用示例：
 
-   (require '[im.ttalk.agent.provider.response-parser :as parser])
+   (require '[im.ttalk.agent.provider.common.response-parser :as parser])
 
    ;; 提取工具调用
    (parser/extract-tool-calls response)
