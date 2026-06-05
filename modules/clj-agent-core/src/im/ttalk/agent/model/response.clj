@@ -135,6 +135,10 @@
    "stop_sequence"  :stop
    "pause_turn"     :pause
    "refusal"        :refusal
+   ;; GLM 格式（智谱对话补全）
+   "sensitive"                       :content-filter
+   "network_error"                   :error
+   "model_context_window_exceeded"   :context-window-exceeded
    ;; 关键字格式
    :stop            :stop
    :tool_calls      :tool-use
@@ -145,7 +149,10 @@
    :max_tokens      :max-tokens
    :stop_sequence   :stop
    :pause_turn      :pause
-   :refusal         :refusal})
+   :refusal         :refusal
+   :sensitive                       :content-filter
+   :network_error                   :error
+   :model_context_window_exceeded   :context-window-exceeded})
 
 (defn normalize-finish-reason
   "归一化完成原因
