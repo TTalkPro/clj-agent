@@ -113,6 +113,17 @@
 ;; 响应处理
 ;; ============================================================
 
+(defn request-id
+  "从响应头提取请求 ID（用于排障 / 上报），大小写无关
+
+   Anthropic 用 request-id，OpenAI 用 x-request-id。"
+  [headers]
+  (when headers
+    (or (clojure.core/get headers :request-id)
+        (clojure.core/get headers "request-id")
+        (clojure.core/get headers :x-request-id)
+        (clojure.core/get headers "x-request-id"))))
+
 (defn- parse-response
   "解析 HTTP 响应
 
@@ -124,6 +135,7 @@
     {:status 0 :error (str error) :success? false}
     {:status status
      :headers headers
+     :request-id (request-id headers)
      :body (if (= as :json)
              (if (string? body)
                (try (json/parse-string body true)
@@ -471,6 +483,7 @@
     {:status (:status resp)
      :body (:body resp)
      :headers (:headers resp)
+     :request-id (request-id (:headers resp))
      :error (when (:error resp) (str (:error resp)))
      :success? (and (nil? (:error resp))
                     (<= 200 (:status resp) 299))}))
