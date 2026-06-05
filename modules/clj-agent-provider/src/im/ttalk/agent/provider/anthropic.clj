@@ -37,15 +37,44 @@
 ;;; ============================================================
 
 (def ^:private default-opts
-  "默认 Anthropic API 选项"
+  "默认 Anthropic API 选项（env API Key 回退）"
   (atom {:api-key (System/getenv "ANTHROPIC_API_KEY")
          :base-url "https://api.anthropic.com"
          :impl :anthropic}))
 
-(defn- get-api-url
-  "获取 API URL（支持自定义 base-url）"
-  []
-  (str (:base-url @default-opts) "/v1/messages"))
+;;; --- Anthropic 兼容端点抽象 -------------------------------------
+;;; 通过 config 可配置 base-url / 路径 / 鉴权方式 / 版本头，
+;;; 使任何 “Anthropic Messages API 兼容” 的服务（如 MiniMax 的
+;;; /anthropic/v1/messages, Bearer 鉴权）都能复用同一套请求/响应/流式机制。
+
+(def default-endpoint
+  "默认端点：官方 Anthropic API（x-api-key + anthropic-version 头）"
+  {:base-url "https://api.anthropic.com"
+   :api-path "/v1/messages"
+   :auth-scheme :x-api-key            ;; :x-api-key | :bearer
+   :anthropic-version "2023-06-01"})  ;; 设为 nil 则不发送该头
+
+(defn- resolve-endpoint
+  "从 config 解析端点配置（缺省回退官方 Anthropic）"
+  [config]
+  (merge default-endpoint
+         (select-keys config [:base-url :api-path :auth-scheme :anthropic-version])))
+
+(defn- build-url
+  [{:keys [base-url api-path]}]
+  (str base-url api-path))
+
+(defn- build-headers
+  "按鉴权方式构造请求头：官方用 x-api-key，MiniMax 等兼容端点用 Bearer。"
+  [{:keys [auth-scheme anthropic-version]} api-key]
+  (cond-> {"Content-Type" "application/json"}
+    (= :bearer auth-scheme)    (assoc "Authorization" (str "Bearer " api-key))
+    (= :x-api-key auth-scheme) (assoc "x-api-key" api-key)
+    anthropic-version          (assoc "anthropic-version" anthropic-version)))
+
+(defn- resolve-api-key
+  [config]
+  (or (:api-key config) (:api-key @default-opts)))
 
 ;;; ============================================================
 ;;; 响应解析
@@ -228,12 +257,10 @@
   [config messages tools]
   (let [tool-schemas (schema/tools->schemas tools)
         params (build-params config messages tool-schemas)
-        api-url (get-api-url)
-        api-key (or (:api-key config) (:api-key @default-opts))
+        endpoint (resolve-endpoint config)
+        api-url (build-url endpoint)
+        headers (build-headers endpoint (resolve-api-key config))
         timeout (or (:timeout config) 120000)
-        headers {"Content-Type" "application/json"
-                 "x-api-key" api-key
-                 "anthropic-version" "2023-06-01"}
         ;; opt-in 重试：仅当 config 含 :retry 时启用
         response (retry/maybe-with-retry
                    config
@@ -243,13 +270,13 @@
                                :timeout timeout))]
     (if (:success? response)
       (:body response)
-      (throw (ex-info "Anthropic API call failed"
+      (throw (ex-info "Anthropic-compatible API call failed"
                       {:status (:status response)
                        :body (:body response)
                        :error (:error response)
                        :headers (:headers response)
                        :request-id (:request-id response)
-                       :provider :anthropic
+                       :provider (:provider-name config :anthropic)
                        :retryable? (retry/transient-response? response)})))))
 
 ;;; ============================================================
@@ -270,16 +297,14 @@
   [config messages tools callback]
   (let [tool-schemas (schema/tools->schemas tools)
         params (build-params config messages tool-schemas)
-        api-url (get-api-url)
-        api-key (or (:api-key config) (:api-key @default-opts))
-        headers {"Content-Type" "application/json"
-                 "x-api-key" api-key
-                 "anthropic-version" "2023-06-01"}]
+        endpoint (resolve-endpoint config)
+        api-url (build-url endpoint)
+        headers (build-headers endpoint (resolve-api-key config))]
     (http/post-async api-url
                      callback
                      :headers headers
                      :body params
-                     :timeout 120000)))
+                     :timeout (or (:timeout config) 120000))))
 
 ;;; ============================================================
 ;;; 流式 API 调用
@@ -300,23 +325,32 @@
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
-        api-url (get-api-url)
-        api-key (or (:api-key config) (:api-key @default-opts))
-        headers {"Content-Type" "application/json"
-                 "x-api-key" api-key
-                 "anthropic-version" "2023-06-01"}
-        response (http/post-stream api-url
-                                   :headers headers
-                                   :body params
-                                   :timeout 120000)
-        reader (clojure.java.io/reader (:body response))
-        final-state (http/process-sse-stream
-                      reader
-                      stream/parse-sse-line
-                      stream/process-event
-                      (stream/make-initial-state)
-                      on-token)]
-    (stream/build-response final-state)))
+        endpoint (resolve-endpoint config)
+        api-url (build-url endpoint)
+        headers (build-headers endpoint (resolve-api-key config))
+        timeout (or (:timeout config) 120000)
+        ;; 仅对建链阶段做 opt-in 重试，流读取中途不重试
+        response (retry/maybe-with-retry
+                   config
+                   #(http/post-stream api-url
+                                      :headers headers
+                                      :body params
+                                      :timeout timeout))]
+    (when-not (:success? response)
+      (throw (ex-info "Anthropic-compatible streaming connection failed"
+                      {:status (:status response)
+                       :error (:error response)
+                       :request-id (:request-id response)
+                       :provider (:provider-name config :anthropic)
+                       :retryable? (retry/transient-response? response)})))
+    (let [reader (clojure.java.io/reader (:body response))
+          final-state (http/process-sse-stream
+                        reader
+                        stream/parse-sse-line
+                        stream/process-event
+                        (stream/make-initial-state)
+                        on-token)]
+      (stream/build-response final-state))))
 
 (defn call-anthropic-stream-async
   "异步流式调用 Anthropic API（非阻塞）
@@ -337,11 +371,9 @@
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
-        api-url (get-api-url)
-        api-key (or (:api-key config) (:api-key @default-opts))
-        headers {"Content-Type" "application/json"
-                 "x-api-key" api-key
-                 "anthropic-version" "2023-06-01"}]
+        endpoint (resolve-endpoint config)
+        api-url (build-url endpoint)
+        headers (build-headers endpoint (resolve-api-key config))]
     (http/post-stream-async api-url
                             :headers headers
                             :body params
@@ -358,21 +390,22 @@
 ;;; AnthropicProvider 实现
 ;;; ============================================================
 
-(defrecord AnthropicProvider []
+(defrecord AnthropicProvider [opts]
   proto/ILLMProvider
-  ;; 基本信息
-  (provider-name [_] :anthropic)
+  ;; 基本信息（provider-name 可由 opts 覆盖，使 MiniMax 等复用本 record）
+  (provider-name [_] (get opts :provider-name :anthropic))
 
   ;; 核心 API（协议以中立消息为边界：内部转 Anthropic wire，system 提至顶层）
+  ;; 实例 opts（端点/鉴权/api-key）作为默认值并入每次调用的 config（config 优先）
   (call-llm [_ config messages tools]
     (let [{:keys [messages system]} (wire/neutral->wire messages)
-          config (cond-> config system (assoc :system-prompt system))]
+          config (cond-> (merge opts config) system (assoc :system-prompt system))]
       (call-anthropic config messages tools)))
 
   ;; 流式 API
   (call-llm-stream [_ config messages tools on-token]
     (let [{:keys [messages system]} (wire/neutral->wire messages)
-          config (cond-> config system (assoc :system-prompt system))]
+          config (cond-> (merge opts config) system (assoc :system-prompt system))]
       (call-anthropic-stream config messages tools on-token)))
 
   ;; 响应解析
@@ -417,16 +450,24 @@
   "创建 Anthropic Provider 实例
 
    参数：
-   - opts: API 选项（可选）{:api-key \"...\"}
+   - opts: 实例选项（可选），作为每次调用 config 的默认值并入：
+     - :api-key            API Key
+     - :provider-name      逻辑名（默认 :anthropic；MiniMax 等兼容端点可覆盖）
+     - :base-url :api-path :auth-scheme :anthropic-version  端点配置（见 default-endpoint）
 
    返回：
-   AnthropicProvider record
+   AnthropicProvider record（opts 存于实例，不再使用全局可变状态，支持多实例并存）
 
    示例：
-   (def provider (create-provider))
-   (def provider (create-provider {:api-key \"sk-ant-...\"}))"
-  ([] (->AnthropicProvider))
-  ([opts]
-   (swap! default-opts merge opts)
-   (->AnthropicProvider)))
+   (create-provider)
+   (create-provider {:api-key \"sk-ant-...\"})
+   ;; Anthropic 兼容端点（如 MiniMax）：
+   (create-provider {:provider-name :minimax
+                     :base-url \"https://api.minimaxi.com\"
+                     :api-path \"/anthropic/v1/messages\"
+                     :auth-scheme :bearer
+                     :anthropic-version nil
+                     :api-key \"...\"})"
+  ([] (->AnthropicProvider {}))
+  ([opts] (->AnthropicProvider (or opts {}))))
 
