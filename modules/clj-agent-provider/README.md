@@ -59,7 +59,7 @@ LLM Provider 和 Service 工厂模块
 |----------|--------|-------------|------|
 | OpenAI | `:openai` | `OPENAI_*` | GPT 系列，Function Call |
 | Anthropic | `:anthropic` | `ANTHROPIC_*` | Claude 系列，Function Call |
-| 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列，Function Call |
+| 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列（glm-5/4.7/4.6），**双协议**：OpenAI 兼容（默认，对话补全文档字段全量支持：`:thinking/:do-sample/:tool-stream/:request-id/:user-id`、预置工具 web_search/retrieval/mcp 透传）+ Anthropic 兼容（`create-anthropic-provider`）；**异步任务**：`submit-async`/`await-async-result` |
 | Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
 | Mistral | `:mistral` | `MISTRAL_*` | Mistral |
 | DeepSeek | `:deepseek` | `DEEPSEEK_*` | deepseek-chat / reasoner，Function Call |
@@ -77,20 +77,21 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.factory.config` | 环境变量配置管理 |
 | `im.ttalk.agent.provider.openai` | OpenAI 实现 |
 | `im.ttalk.agent.provider.anthropic` | Anthropic 实现（含可配置端点，支持 Anthropic 兼容服务） |
-| `im.ttalk.agent.provider.zhipu` | Zhipu 实现 |
+| `im.ttalk.agent.provider.zhipu` | Zhipu 实现（双协议：OpenAI 兼容 + Anthropic 兼容） |
 | `im.ttalk.agent.provider.ollama` | Ollama 实现 |
 | `im.ttalk.agent.provider.gemini` | Gemini 实现 |
 | `im.ttalk.agent.provider.mistral` | Mistral 实现 |
 | `im.ttalk.agent.provider.deepseek` | DeepSeek 实现 |
 | `im.ttalk.agent.provider.minimax` | MiniMax 实现（复用 anthropic provider 的 Anthropic 兼容端点） |
-| `im.ttalk.agent.provider.openai_compat` | OpenAI 兼容 |
 | `im.ttalk.agent.provider.mock` | Mock Provider |
+| `im.ttalk.agent.provider.common.base` | Provider 基座 + defprovider 宏（辅助层） |
+| `im.ttalk.agent.provider.common.openai-compat` | OpenAI 兼容协议层（辅助层） |
+| `im.ttalk.agent.provider.common.cache` | Anthropic prompt caching 策略层（辅助层） |
+| `im.ttalk.agent.provider.common.response-parser` | 响应归一化（辅助层） |
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |
 | `im.ttalk.agent.provider.schema.anthropic` | Anthropic Schema 转换 |
 | `im.ttalk.agent.provider.stream.openai` | OpenAI 流式处理 |
 | `im.ttalk.agent.provider.stream.anthropic` | Anthropic 流式处理 |
-| `im.ttalk.agent.provider.response-parser` | 响应归一化 |
-| `im.ttalk.agent.provider.cache` | Anthropic prompt caching 策略层 |
 | `im.ttalk.agent.provider.http.retry` | 重试与错误分类（指数退避 + Retry-After） |
 
 ## 快速开始
