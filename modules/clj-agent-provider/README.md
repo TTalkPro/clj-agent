@@ -90,6 +90,8 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.stream.openai` | OpenAI 流式处理 |
 | `im.ttalk.agent.provider.stream.anthropic` | Anthropic 流式处理 |
 | `im.ttalk.agent.provider.response-parser` | 响应归一化 |
+| `im.ttalk.agent.provider.cache` | Anthropic prompt caching 策略层 |
+| `im.ttalk.agent.provider.http.retry` | 重试与错误分类（指数退避 + Retry-After） |
 
 ## 快速开始
 
@@ -187,6 +189,52 @@ LLM Provider 和 Service 工厂模块
 ;; 默认配置
 (config/get-default-config :openai)
 ```
+
+### 提示词控制（采样参数）
+
+调用 config（即传给 Service / `call-llm` 的 map）按「存在才设」透传，不再强塞默认值：
+
+```clojure
+;; Anthropic
+{:model "claude-opus-4-8" :max-tokens 4096
+ :temperature 0.3 :top-p 0.8 :top-k 40
+ :stop ["END"]                 ;; => stop_sequences
+ :metadata {:user_id "u1"}
+ :thinking {:type "adaptive"}} ;; 原样透传
+
+;; OpenAI 兼容（openai / zhipu / deepseek / ...）
+{:model "gpt-4" :max-tokens 512
+ :temperature 0.2 :top-p 0.9
+ :frequency-penalty 0.1 :presence-penalty 0.2 :seed 7 :n 1
+ :tool-choice "auto" :response-format {:type "json_object"}
+ :extra-body {:enable_thinking false}}  ;; 各家私有字段逃生通道，直接 merge 进请求体
+```
+
+### 缓存控制（Anthropic prompt caching）
+
+策略驱动，自动按渲染顺序 tools→system→messages 注入 `cache_control`（≤4 断点）：
+
+```clojure
+{:model "claude-opus-4-8"
+ :cache-strategy :system-and-tools  ;; :none | :system | :tools | :system-and-tools | :conversation
+ :cache-ttl "1h"}                   ;; nil=5min，"1h"=1小时
+```
+
+命中情况见归一化 usage 的 `:cache-read-tokens` / `:cache-write-tokens`
+（OpenAI 兼容协议缓存自动生效，无需 `cache-strategy`，命中同样落在 `:cache-read-tokens`）。
+
+### 重试机制（opt-in）
+
+在 config 设 `:retry` 即启用：指数退避 + 满抖动、可重试/不可重试错误二分类、尊重 `Retry-After`：
+
+```clojure
+{:model "..." :retry {:max-retries 3 :base-delay 1000 :multiplier 2.0 :max-delay 30000}}
+{:model "..." :retry true}   ;; 用默认配置
+;; 不设 :retry 则零开销、不改变默认行为
+```
+
+可重试：408/409/425/429/5xx/529 及网络层错误；不可重试：其余 4xx。
+失败抛 `ex-info`，data 含 `:status :request-id :retryable? :headers`。
 
 ## 环境变量
 
