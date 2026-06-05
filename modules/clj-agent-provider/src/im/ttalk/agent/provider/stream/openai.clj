@@ -30,6 +30,7 @@
    状态 map {:accumulated \"\" :index 0 :tool-calls-acc {} :role nil}"
   []
   {:accumulated ""
+   :reasoning-accumulated ""
    :index 0
    :tool-calls-acc {}
    :role nil})
@@ -83,6 +84,18 @@
   (let [choice (first (:choices chunk))
         delta (:delta choice)]
     (cond
+      ;; 推理增量（deepseek-reasoner 等：reasoning_content 在 content 之前流式返回）
+      ;; 单独 emit :reasoning-token，不混入 :token，保持答案流干净
+      (:reasoning_content delta)
+      (let [rtext (:reasoning_content delta)
+            new-reasoning (str (:reasoning-accumulated state) rtext)]
+        [(assoc state
+                :reasoning-accumulated new-reasoning
+                :role (or (:role delta) (:role state)))
+         {:reasoning-token rtext
+          :reasoning? true
+          :reasoning-accumulated new-reasoning}])
+
       ;; 文本增量
       (:content delta)
       (let [text (:content delta)
@@ -149,12 +162,14 @@
   (let [tool-calls (when (seq (:tool-calls-acc state))
                      (->> (:tool-calls-acc state)
                           (sort-by first)
-                          (mapv second)))]
+                          (mapv second)))
+        reasoning (:reasoning-accumulated state)]
     {:id id
      :model model
      :choices [{:message (cond-> {:role (or (:role state) "assistant")
                                   :content (:accumulated state)}
-                           (seq tool-calls) (assoc :tool_calls tool-calls))
+                           (seq reasoning)   (assoc :reasoning_content reasoning)
+                           (seq tool-calls)  (assoc :tool_calls tool-calls))
                 :finish_reason (if (seq tool-calls) "tool_calls" "stop")}]}))
 
 (defn normalize-response
@@ -199,6 +214,8 @@
       :model model
       :text (let [text (:accumulated state)]
               (when (seq text) text))
+      :reasoning (let [r (:reasoning-accumulated state)]
+                   (when (seq r) r))
       :tool-calls tool-calls
       :finish-reason (if (seq tool-calls) "tool_calls" "stop")
       :usage usage

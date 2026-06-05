@@ -61,7 +61,8 @@
    - OpenAI 兼容协议的 prompt caching 是自动的，无需 cache_control；命中情况见
      响应 usage 的 prompt_tokens_details.cached_tokens（OpenAI）/ prompt_cache_hit_tokens（DeepSeek）。"
   [{:keys [model max-tokens system-prompt temperature top-p stop response-format
-           frequency-penalty presence-penalty seed n tool-choice user extra-body]}
+           frequency-penalty presence-penalty seed n tool-choice user
+           logprobs top-logprobs extra-body]}
    messages tool-schemas]
   (let [msgs (build-messages system-prompt messages)]
     (cond-> {:model model
@@ -78,6 +79,8 @@
       (some? seed)              (assoc :seed seed)
       (some? n)                 (assoc :n n)
       user                      (assoc :user user)
+      (some? logprobs)          (assoc :logprobs logprobs)
+      (some? top-logprobs)      (assoc :top_logprobs top-logprobs)
       (map? extra-body)         (merge extra-body))))
 
 ;;; ============================================================
