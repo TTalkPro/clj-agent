@@ -153,16 +153,18 @@
    返回: 错误列表或空列表"
   [data field-name field-schema]
   (let [value (get data field-name)
-        {:keys [type required]} field-schema]
+        ;; 不要把 :type 解构成 `type`：会遮蔽 clojure.core/type，
+        ;; 导致下面错误信息里的 (type value) 变成 (:string value) -> nil
+        {field-type :type :keys [required]} field-schema]
     (cond
       ;; 检查必填字段
       (and required (nil? value))
       [(str "缺少必填字段: " (name field-name))]
 
       ;; 检查类型（仅当值存在时）
-      (and value type (not (validate-type value type)))
-      [(str "字段 " (name field-name) " 类型错误: 期望 " (name type)
-            ", 实际 " (type value))]
+      (and value field-type (not (validate-type value field-type)))
+      [(str "字段 " (name field-name) " 类型错误: 期望 " (name field-type)
+            ", 实际 " (clojure.core/type value))]
 
       :else
       [])))
