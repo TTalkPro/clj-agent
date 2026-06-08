@@ -57,8 +57,8 @@ LLM Provider 和 Service 工厂模块
 
 | Provider | 关键字 | 环境变量前缀 | 说明 |
 |----------|--------|-------------|------|
-| OpenAI | `:openai` | `OPENAI_*` | GPT 系列，Function Call |
-| Anthropic | `:anthropic` | `ANTHROPIC_*` | Claude 系列，Function Call |
+| OpenAI | `:openai` | `OPENAI_*` | GPT 系列，Function Call；`:parallel-tool-calls`、`:reasoning-effort`/`:verbosity`（o 系列 / GPT-5）、结构化输出（`json_object` / `json_schema`+`strict`）、多模态输出（`:modalities`/`:audio`）；prompt cache 命中归一化到 `:cache-read-tokens` |
+| Anthropic | `:anthropic` | `ANTHROPIC_*` | Claude 系列，Function Call；服务端 `web_search` 工具、Citations 引用、Skills（beta）、`:service-tier`、prompt caching 策略层（含 `:tool-results` / `:system-and-conversation`）、响应限流头解析（`:rate-limit`） |
 | 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列（glm-5/4.7/4.6），**双协议**：OpenAI 兼容（默认，对话补全文档字段全量支持：`:thinking/:do-sample/:tool-stream/:request-id/:user-id`、预置工具 web_search/retrieval/mcp 透传）+ Anthropic 兼容（`create-anthropic-provider`）；**异步任务**：`submit-async`/`await-async-result` |
 | Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
 | Mistral | `:mistral` | `MISTRAL_*` | Mistral |
@@ -207,9 +207,32 @@ LLM Provider 和 Service 工厂模块
 {:model "gpt-4" :max-tokens 512
  :temperature 0.2 :top-p 0.9
  :frequency-penalty 0.1 :presence-penalty 0.2 :seed 7 :n 1
- :tool-choice "auto" :response-format {:type "json_object"}
+ :tool-choice "auto" :parallel-tool-calls false  ;; 并行工具调用开关（精确透传 false）
+ :reasoning-effort "high" :verbosity "low"        ;; o 系列 / GPT-5 推理与冗长度
+ :modalities ["text" "audio"] :audio {:voice "alloy" :format "wav"}  ;; gpt-4o-audio 多模态输出
+ :response-format {:type "json_object"}
  :extra-body {:enable_thinking false}}  ;; 各家私有字段逃生通道，直接 merge 进请求体
 ```
+
+### 结构化输出（OpenAI 兼容）
+
+`:response-format` 透传，支持 JSON 模式与严格 JSON Schema：
+
+```clojure
+;; 1) JSON 对象模式
+{:model "gpt-4" :response-format {:type "json_object"}}
+
+;; 2) 严格 JSON Schema（strict 强约束字段/类型）
+{:model "gpt-4"
+ :response-format {:type "json_schema"
+                   :json_schema {:name "Person" :strict true
+                                 :schema {:type "object"
+                                          :properties {:name {:type "string"}
+                                                       :age {:type "integer"}}
+                                          :required ["name"]}}}}
+```
+
+可用 core 的 `converter.json-schema/to-openai-response-format` 从 clj-agent schema 直接生成上面的 `response_format`。
 
 ### 缓存控制（Anthropic prompt caching）
 
@@ -217,12 +240,80 @@ LLM Provider 和 Service 工厂模块
 
 ```clojure
 {:model "claude-opus-4-8"
- :cache-strategy :system-and-tools  ;; :none | :system | :tools | :system-and-tools | :conversation
+ :cache-strategy :system-and-tools
  :cache-ttl "1h"}                   ;; nil=5min，"1h"=1小时
 ```
 
+可用策略（`:cache-strategy`）：
+
+| 策略 | 断点位置 | 适用场景 |
+|------|---------|---------|
+| `:none`（默认） | 不缓存 | — |
+| `:system` | system 末块 | 长系统提示 |
+| `:tools` | 最后一个工具 | 工具定义大 |
+| `:system-and-tools` | system + tools（2 断点） | 两者都大 |
+| `:conversation` | 最后一条消息末块 | 缓存历史到当前问题前 |
+| `:tool-results` | 最后一个 `tool_result` 块 | **多轮工具循环**跨轮复用工具结果 |
+| `:system-and-conversation` | system + 对话历史（2 断点） | 系统提示 + 历史都长 |
+
 命中情况见归一化 usage 的 `:cache-read-tokens` / `:cache-write-tokens`
 （OpenAI 兼容协议缓存自动生效，无需 `cache-strategy`，命中同样落在 `:cache-read-tokens`）。
+
+### Anthropic 服务端工具与限流
+
+```clojure
+(require '[im.ttalk.agent.provider.schema.anthropic :as schema])
+
+;; web_search 服务端工具（已是 wire 格式，直接放入 tools）
+(anthropic/call-anthropic
+  {:model "claude-opus-4-8" :max-tokens 4096
+   :service-tier "auto"}                     ;; 容量路由："auto" | "standard_only"
+  messages
+  [(schema/web-search-tool {:max-uses 5
+                            :allowed-domains ["docs.anthropic.com"]})])
+```
+
+同步调用成功时，响应体附带 `:rate-limit`（源自 `anthropic-ratelimit-*` 头）：
+
+```clojure
+{:requests-limit 1000 :requests-remaining 999 :requests-reset "2026-..."
+ :tokens-limit 80000 :tokens-remaining 48000 :tokens-reset "2026-..."
+ :retry-after 30}
+```
+
+### Anthropic Citations（引用）
+
+把可引用文档作为 `document` 内容块放入消息，模型回答时会摘引，响应 `text` 块带 `citations`：
+
+```clojure
+(require '[im.ttalk.agent.provider.schema.anthropic :as schema]
+         '[im.ttalk.agent.provider.anthropic :as anthropic])
+
+(let [resp (anthropic/call-anthropic
+             {:model "claude-opus-4-8" :max-tokens 1024}
+             [{:role "user"
+               :content [(schema/text-document "地球绕太阳公转。" {:title "天文常识"})
+                         {:type "text" :text "地球绕什么转？"}]}]
+             [])]
+  (anthropic/extract-citations resp))
+;; => [{:type "char_location" :cited_text "..." :document_index 0
+;;      :document_title "天文常识" :start_char_index .. :end_char_index ..}]
+```
+
+### Anthropic Skills（beta）
+
+> ⚠️ Skills / code_execution 为 Anthropic **beta** 功能，需开 `anthropic-beta` 头；
+> 下列 beta 标识与工具类型字符串可能随官方调整，必要时用构造器 opts 覆盖。
+
+```clojure
+(anthropic/call-anthropic
+  {:model "claude-opus-4-8" :max-tokens 4096
+   :beta schema/default-skills-beta                     ;; 启用相应 anthropic-beta 头
+   :container (schema/skills-container                  ;; => 请求体 container.skills
+                [(schema/skill "xlsx") (schema/skill "pdf")])}
+  messages
+  [(schema/code-execution-tool)])                       ;; Skills 通常需配代码执行工具
+```
 
 ### 重试机制（opt-in）
 
