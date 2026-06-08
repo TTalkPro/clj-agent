@@ -89,17 +89,12 @@
 ```clojure
 (require '[im.ttalk.agent.kernel :as kernel])
 
-;; 创建 Builder
-(kernel/create-kernel-builder)
-(kernel/create-kernel-builder {:max-tool-iterations 10})
-
-;; 配置 Builder
-(kernel/add-tools builder tools)        ;; 添加工具
-(kernel/add-service builder service)    ;; 设置 LLM Service
-(kernel/add-filter builder filter-def)  ;; 添加 Filter
-
-;; 构建 Kernel
-(kernel/build-kernel builder)           ;; 返回 Kernel record
+;; 声明式构建：一次性传入 service / tools / filters / settings
+(kernel/build-kernel
+  {:service  my-service
+   :tools    [#'get-weather #'get-time]   ;; tool var 向量
+   :filters  [memory-filter logging-filter]
+   :settings {:max-tool-iterations 10}})  ;; 返回 Kernel record
 ```
 
 ### Kernel Invoke API
@@ -163,7 +158,7 @@ filters/logging-filter
 (filters/approval-filter)       ;; around：敏感工具人工审批，拒绝则短路
 
 ;; 挂载 + 执行
-(kernel/add-filter builder my-filter) ;; 加入 builder
+(kernel/build-kernel {:service svc :filters [my-filter]}) ;; 经 :filters 挂载
 (filters/build-chain filters terminal) ;; 折成洋葱，返回 (fn [req] -> resp)
 ```
 
@@ -241,7 +236,7 @@ filters/logging-filter
 ### Key APIs
 
 - `agent/create-agent` → `agent/chat` / `agent/resume` - High-level Agent with memory
-- `kernel/create-kernel-builder` → `add-tools` → `add-service` → `add-filter` → `build-kernel`
+- `kernel/build-kernel {:service :tools :filters :settings}` - Declarative kernel construction
 - `kernel/invoke-tool` / `kernel/invoke-chat` - Primitives through the :tool / :chat advisor chains
   (the tool-calling loop lives in `im.ttalk.agent.react` / `client`, not the kernel)
 - `deftool` - Define tool with auto-generated schema

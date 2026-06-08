@@ -8,13 +8,13 @@ English | [中文](README.md)
 
 `clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to tool-calling agents:
 
-- **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, Kernel uses `add-tools` for unified scheduling
+- **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, `build-kernel` declaratively registers and schedules them
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM); the tool-calling loop is provided by SimpleAgent
 - **Filter Middleware**: onion-style around chain (mirrors Spring AI Advisor), :chat / :tool phases, can short-circuit/retry/time
 - **Service Abstraction**: LLM services via `{:chat-fn :build-result-msgs}` map, zero coupling
-- **Multi-Provider Support**: Anthropic, OpenAI, Zhipu, Ollama, Gemini, Mistral, and OpenAI-compatible protocols
-- **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval
-- **ChatMemory**: per-conversation-id history persistence (in-memory / windowed / SQLite)
+- **Multi-Provider Support**: Anthropic, OpenAI, DeepSeek, Zhipu, Ollama, Gemini, Mistral, MiniMax, Bailian, and OpenAI-compatible protocols
+- **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval; LLM/tool errors normalized to `{:status :error}` (configurable `:on-error`)
+- **ChatMemory**: per-conversation-id history persistence (in-memory / windowed / SQLite; the SQLite store is `Closeable`)
 
 ## Architecture Overview
 
@@ -166,13 +166,12 @@ Use the Kernel directly for maximum flexibility:
                {:model "gpt-4"
                 :max-tokens 4096}))
 
-;; Build Kernel (kernel provides only the primitives: invoke-chat / invoke-tool)
+;; Build Kernel (declarative; kernel provides only the primitives: invoke-chat / invoke-tool)
 (def app-kernel
-  (-> (kernel/create-kernel-builder)
-      (kernel/add-service service)
-      (kernel/add-tools my-tools)
-      (kernel/add-filter filters/logging-filter)
-      (kernel/build-kernel)))
+  (kernel/build-kernel
+    {:service service
+     :tools   my-tools                    ;; vector of tool vars
+     :filters [filters/logging-filter]}))
 
 ;; Pure LLM call (:chat filter chain, no tool invocation)
 (let [{:keys [response]} (kernel/invoke-chat app-kernel
@@ -214,12 +213,12 @@ Simultaneously defines a Clojure function and generates an LLM tool schema:
 Kernel provides three categories of APIs:
 
 ```clojure
-;; Build API - Construct Kernel
-(-> (kernel/create-kernel-builder)
-    (kernel/add-tools my-tools)         ;; Add tools
-    (kernel/add-service service)        ;; Set LLM service
-    (kernel/add-filter filter-def)      ;; Add filter
-    (kernel/build-kernel))              ;; Build
+;; Build API - declarative Kernel construction
+(kernel/build-kernel
+  {:service  service                    ;; LLM service
+   :tools    my-tools                   ;; vector of tool vars
+   :filters  [filter-def]               ;; filter list
+   :settings {:max-tool-iterations 10}})
 
 ;; Invoke API - two primitives (both through the filter onion chain)
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; Function call (:tool chain)
@@ -298,11 +297,18 @@ Context manages shared state within a conversation:
 | `:anthropic` | Anthropic Claude series | `ANTHROPIC_API_KEY` |
 | `:zhipu` | Zhipu GLM series | `ZHIPU_API_KEY` |
 | `:ollama` | Local Ollama models | - |
-| `:gemini` | Google Gemini | `GOOGLE_API_KEY` |
+| `:gemini` | Google Gemini (OpenAI-compatible endpoint) | `GOOGLE_API_KEY` |
 | `:mistral` | Mistral | `MISTRAL_API_KEY` |
 | `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` |
-| `:minimax` | MiniMax | `MINIMAX_API_KEY` |
+| `:minimax` | MiniMax (Anthropic-compatible endpoint) | `MINIMAX_API_KEY` |
+| `:bailian` | Alibaba Bailian / DashScope (sync only) | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` |
 | `:openai-compat` | OpenAI-compatible protocol | Custom |
+
+> Advanced per-provider capabilities (structured output, parallel tool calls,
+> `reasoning_effort`, Anthropic prompt caching / web_search / citations / skills,
+> DeepSeek reasoning & prefix completion, etc.) are documented in the
+> [`clj-agent-provider` README](modules/clj-agent-provider/README.md). All providers
+> support both **sync** and **streaming (SSE)** (Bailian is sync-only).
 
 ### Creating Providers
 

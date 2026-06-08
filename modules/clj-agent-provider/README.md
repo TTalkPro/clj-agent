@@ -110,10 +110,8 @@ LLM Provider 和 Service 工厂模块
                 :max-tokens 4096
                 :temperature 0.7}))
 
-;; 3. 注册到 Kernel
-(-> (kernel/create-kernel-builder)
-    (kernel/add-service service)
-    ...)
+;; 3. 注册到 Kernel（声明式）
+(kernel/build-kernel {:service service :tools [...] :filters [...]})
 ```
 
 ## API 参考

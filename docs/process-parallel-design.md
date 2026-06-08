@@ -1,5 +1,9 @@
 # Process Framework 并行化设计
 
+> **状态：📐 设计稿，尚未实现（截至 2026-06）。** 选定的 core.async 方案尚未落地：
+> 仓库 deps.edn 未引入 `org.clojure/core.async`，也无 Process Framework 实现。
+> 依赖于 [Process Framework 设计](./process-framework-design.md)（同为设计稿）。
+
 ## V1 回顾
 
 V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-activated-steps` 中 reduce 顺序执行。Fan-out 场景下多个 step 无法并行。

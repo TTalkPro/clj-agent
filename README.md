@@ -29,13 +29,13 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 `clj-agent` 是一个 Clojure AI Agent 框架，提供从简单对话到工具调用的完整解决方案：
 
-- **Kernel + Tool 编排**：`deftool` 宏定义工具，Kernel 通过 `add-tools` 统一调度
+- **Kernel + Tool 编排**：`deftool` 宏定义工具，`build-kernel` 声明式注册并统一调度
 - **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）；工具调用循环由 SimpleAgent 提供
 - **Filter 中间件**：洋葱式 around 链（对标 Spring AI Advisor），:chat / :tool 两类，可短路/重试/计时
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
-- **多 Provider 支持**：Anthropic、OpenAI、Zhipu、Ollama、Gemini、Mistral 及 OpenAI 兼容协议
-- **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批
-- **ChatMemory**：按 conversation-id 持久化对话历史（in-memory / windowed / SQLite）
+- **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、百炼 及 OpenAI 兼容协议
+- **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error}`（可配 `:on-error`）
+- **ChatMemory**：按 conversation-id 持久化对话历史（in-memory / windowed / SQLite，SQLite store 实现 `Closeable`）
 
 ## 架构概览
 
@@ -57,10 +57,13 @@ graph TB
     subgraph "clj-agent-provider（适配器，依赖 core）"
         AN[Anthropic]
         OA[OpenAI]
+        DS[DeepSeek]
         ZP[Zhipu]
         OL[Ollama]
         GM[Gemini]
         MS[Mistral]
+        MM[MiniMax]
+        BL[百炼]
     end
 
     SA --> K
@@ -70,7 +73,7 @@ graph TB
     K --> SV
     RE --> ME
     SV --> PROTO
-    AN & OA & ZP & OL & GM & MS -. 实现 .-> PROTO
+    AN & OA & DS & ZP & OL & GM & MS & MM & BL -. 实现 .-> PROTO
 ```
 
 ## 模块依赖关系
@@ -176,6 +179,10 @@ clj -T:build install  # 安装到本地 Maven 仓库
               :tools my-tools}))
 
 ;; 5. 对话（自动累积上下文）
+;; chat 返回 {:status :completed|:paused|:error ...}：
+;;   :completed -> {:text "..." :tool-calls-made [...]}
+;;   :paused    -> 见方式二（敏感工具审批）
+;;   :error     -> {:error {:type :network-error|:provider-error ... :retryable? bool}}（不抛裸异常）
 (println (:text (ka/chat agent "北京天气怎么样？")))
 (println (:text (ka/chat agent "上海呢？")))  ;; 自动记住上下文
 
@@ -229,13 +236,12 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
                {:model "gpt-4"
                 :max-tokens 4096}))
 
-;; 构建 Kernel（kernel 只提供原语：invoke-chat / invoke-tool）
+;; 构建 Kernel（声明式；kernel 只提供原语：invoke-chat / invoke-tool）
 (def app-kernel
-  (-> (kernel/create-kernel-builder)
-      (kernel/add-service service)
-      (kernel/add-tools my-tools)
-      (kernel/add-filter filters/logging-filter)
-      (kernel/build-kernel)))
+  (kernel/build-kernel
+    {:service service
+     :tools   my-tools                    ;; tool var 向量
+     :filters [filters/logging-filter]}))
 
 ;; 纯 LLM 调用（经 :chat filter 链，不触发工具）
 (let [{:keys [response]} (kernel/invoke-chat app-kernel
@@ -277,12 +283,12 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 Kernel 提供三类 API：
 
 ```clojure
-;; Build API - 构建 Kernel
-(-> (kernel/create-kernel-builder)
-    (kernel/add-tools my-tools)         ;; 添加工具
-    (kernel/add-service service)        ;; 设置 LLM 服务
-    (kernel/add-filter filter-def)      ;; 添加 Filter
-    (kernel/build-kernel))              ;; 构建
+;; Build API - 声明式构建 Kernel
+(kernel/build-kernel
+  {:service  service                    ;; LLM 服务
+   :tools    my-tools                   ;; tool var 向量
+   :filters  [filter-def]               ;; Filter 列表
+   :settings {:max-tool-iterations 10}})
 
 ;; Invoke API - 调用（两个原语，均经 filter 洋葱链）
 (kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; 调用函数（:tool 链）
@@ -356,15 +362,21 @@ Context 管理对话中的共享状态：
 
 | Provider | 说明 | 环境变量 | 推荐模型 |
 |----------|------|----------|----------|
-| `:openai` | OpenAI GPT 系列 | `OPENAI_API_KEY` | gpt-4, gpt-4-turbo, gpt-3.5-turbo |
-| `:anthropic` | Anthropic Claude 系列 | `ANTHROPIC_API_KEY` | claude-3-opus, claude-3-sonnet |
-| `:zhipu` | 智谱 GLM 系列 | `ZHIPU_API_KEY` | glm-4, glm-4-plus |
-| `:ollama` | 本地 Ollama 模型 | - | llama2, mistral, codellama |
-| `:gemini` | Google Gemini | `GOOGLE_API_KEY` | gemini-pro, gemini-ultra |
-| `:mistral` | Mistral | `MISTRAL_API_KEY` | mistral-large, mistral-medium |
+| `:openai` | OpenAI GPT 系列 | `OPENAI_API_KEY` | gpt-4o, gpt-4.1, o3 |
+| `:anthropic` | Anthropic Claude 系列 | `ANTHROPIC_API_KEY` | claude-opus-4, claude-sonnet-4 |
+| `:zhipu` | 智谱 GLM 系列 | `ZHIPU_API_KEY` | glm-4.7, glm-4.6 |
+| `:ollama` | 本地 Ollama 模型 | - | llama3, mistral, qwen |
+| `:gemini` | Google Gemini（OpenAI 兼容端点） | `GOOGLE_API_KEY` | gemini-2.0-flash, gemini-1.5-pro |
+| `:mistral` | Mistral | `MISTRAL_API_KEY` | mistral-large-latest |
 | `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | deepseek-chat, deepseek-reasoner |
-| `:minimax` | MiniMax | `MINIMAX_API_KEY` | abab6.5s-chat, abab6.5-chat |
+| `:minimax` | MiniMax（Anthropic 兼容端点） | `MINIMAX_API_KEY` | MiniMax-M2 |
+| `:bailian` | 阿里云百炼 / DashScope（仅同步） | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` | qwen-plus, qwen-max |
 | `:openai-compat` | OpenAI 兼容协议 | 自定义 | 取决于后端 |
+
+> **各家进阶能力**（结构化输出、并行工具调用、`reasoning_effort`、Anthropic prompt
+> caching / web_search / citations / skills、DeepSeek 推理与前缀续写等）详见
+> [`clj-agent-provider` README](modules/clj-agent-provider/README.md)。所有 provider
+> 同时支持**同步**与**流式（SSE）**调用（百炼暂仅同步）。
 
 ### 创建 Provider
 
@@ -454,7 +466,12 @@ Context 管理对话中的共享状态：
 
 # 安装到本地 Maven
 ./scripts/install-all.sh
+
+# 单独跑某个模块
+cd modules/clj-agent-core && clojure -M:test
 ```
+
+> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对两个模块并行跑测试。
 
 ## 依赖
 

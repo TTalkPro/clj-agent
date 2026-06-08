@@ -1,5 +1,9 @@
 # Process Framework 设计文档
 
+> **状态：📐 设计稿，尚未实现（截至 2026-06）。** 当前代码库（`clj-agent-core` /
+> `clj-agent-provider`）中没有对应的 process / step / runtime 命名空间。本文档描述
+> 的是规划中的架构，供讨论与后续实现参考，不代表现有功能。
+
 ## 核心概念对照
 
 | 概念 | SK (C#) | BeamAI (Erlang) | Clojure 实现 |

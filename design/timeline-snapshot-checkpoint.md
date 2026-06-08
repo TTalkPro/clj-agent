@@ -1,5 +1,9 @@
 # Timeline / Snapshot 设计方案
 
+> **状态：📐 设计稿，尚未实现（截至 2026-06）。** 文档引用的 `clj-agent-memory`
+> 模块和 TimelineManager / Snapshot 实现当前不在仓库中（现有模块仅 `clj-agent-core`
+> 与 `clj-agent-provider`）。本文为规划方案，供后续实现参考。
+
 ## 一、设计背景
 
 clj-agent 的 **Process 框架**（事件驱动的步骤执行引擎）需要状态持久化和时间旅行能力：
