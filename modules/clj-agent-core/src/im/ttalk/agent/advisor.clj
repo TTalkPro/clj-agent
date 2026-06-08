@@ -84,13 +84,21 @@
 ;;; ============================================================
 
 (defn timeout-filter
-  "超时控制 filter 工厂：下游执行超过 timeout-ms 则返回超时结果（不抛异常）。"
+  "超时控制 filter 工厂：下游执行超过 timeout-ms 则返回超时结果（不抛异常）。
+
+   超时后会中断（future-cancel）后台任务，避免工作线程泄漏 ——
+   前提是下游工具对线程中断敏感（阻塞 IO/Thread.sleep 等可被打断）；
+   纯 CPU 死循环无法中断，需工具自身配合。"
   [timeout-ms]
   {:name :timeout
    :tool (fn [req chain]
-           (let [r (deref (future (chain req)) timeout-ms ::timeout)]
+           (let [f (future (chain req))
+                 r (deref f timeout-ms ::timeout)]
              (if (= r ::timeout)
-               {:result (str "工具调用超时（" timeout-ms "ms）") :context (:context req)}
+               (do
+                 ;; 取消并尝试中断后台线程，释放资源
+                 (future-cancel f)
+                 {:result (str "工具调用超时（" timeout-ms "ms）") :context (:context req)})
                r)))})
 
 ;;; ============================================================
