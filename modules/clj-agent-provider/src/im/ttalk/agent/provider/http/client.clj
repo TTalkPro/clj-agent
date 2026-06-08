@@ -526,9 +526,11 @@
        {:accumulated \"\"}
        (fn [token] (print (:text token)))))"
   [input-stream parse-fn process-fn initial-state on-token]
-  (let [reader (if (instance? java.io.BufferedReader input-stream)
-                 input-stream
-                 (clojure.java.io/reader input-stream))]
+  ;; with-open 确保读取结束/异常时关闭 reader（及底层 InputStream/socket），
+  ;; 避免每次流式调用泄漏 HTTP 连接。process-sse-stream 接管传入流的生命周期。
+  (with-open [reader (if (instance? java.io.BufferedReader input-stream)
+                       input-stream
+                       (clojure.java.io/reader input-stream))]
     (loop [state initial-state]
       (if-let [line (.readLine reader)]
         (if-let [event (parse-fn line)]

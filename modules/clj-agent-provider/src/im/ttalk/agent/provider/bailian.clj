@@ -110,17 +110,6 @@
        :model (or (:model response) "unknown")
        :id (or (:request_id response) "unknown")})))
 
-(defn- parse-tool-calls
-  "解析 tool_calls 响应"
-  [tool-calls]
-  (when (seq tool-calls)
-    (mapv (fn [tc]
-            {:id (:id tc)
-             :type "function"
-             :function {:name (get-in tc [:function :name])
-                        :arguments (get-in tc [:function :arguments])}})
-          tool-calls)))
-
 ;;; ============================================================
 ;;; HTTP 调用
 ;;; ============================================================
@@ -227,9 +216,11 @@
   (call-llm [_ llm-config messages tools]
     (call-bailian llm-config messages tools opts))
 
-  (call-llm-stream [_ llm-config messages tools on-token]
-    ;; DashScope 流式调用需要不同的实现，暂时回退到同步
-    (call-bailian llm-config messages tools opts))
+  (call-llm-stream [_ _llm-config _messages _tools _on-token]
+    ;; DashScope 原生流式（SSE / X-DashScope-SSE）尚未实现。显式抛出，
+    ;; 避免静默回退到同步、on-token 永不触发导致上层 UI 误判（supports-stream? 已返回 false）。
+    (throw (UnsupportedOperationException.
+             "bailian provider 暂不支持流式调用（supports-stream? => false），请用 call-llm 同步调用")))
 
   (extract-tool-calls [_ response]
     (let [message (get-in response [:choices 0 :message])

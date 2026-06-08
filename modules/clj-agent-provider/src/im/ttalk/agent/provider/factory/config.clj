@@ -160,7 +160,8 @@
    :gemini  "GOOGLE"
    :mistral "MISTRAL"
    :deepseek "DEEPSEEK"
-   :minimax "MINIMAX"})
+   :minimax "MINIMAX"
+   :bailian "BAILIAN"})
 
 (def ^:private builtin-default-configs
   {:openai  {:api-key  ""
@@ -179,7 +180,8 @@
              :timeout  120000
              :model    "llama2"}
    :gemini  {:api-key  ""
-             :base-url "https://generativelanguage.googleapis.com"
+             ;; OpenAI 兼容端点须含 /v1beta/openai（再拼 /chat/completions）
+             :base-url "https://generativelanguage.googleapis.com/v1beta/openai"
              :timeout  120000
              :model    "gemini-2.0-flash-exp"}
    :mistral {:api-key  ""
@@ -193,7 +195,11 @@
    :minimax {:api-key  ""
              :base-url "https://api.minimaxi.com"
              :timeout  120000
-             :model    "MiniMax-M2.7"}})
+             :model    "MiniMax-M2.7"}
+   :bailian {:api-key  ""
+             :base-url "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+             :timeout  120000
+             :model    "qwen-plus"}})
 
 (defonce ^:private _init
   (do

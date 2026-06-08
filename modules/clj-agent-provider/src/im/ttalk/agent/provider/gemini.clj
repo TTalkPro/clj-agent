@@ -7,8 +7,10 @@
    (def provider (gemini/create-provider {:api-key \"AIza...\"}))"
   (:require [im.ttalk.agent.provider.common.base :as base]))
 
+;; Google 的 OpenAI 兼容端点为 .../v1beta/openai/chat/completions，
+;; base-url 必须含 /openai（默认 endpoint 再拼 /chat/completions）。
 (base/defprovider gemini
-  :base-url "https://generativelanguage.googleapis.com/v1beta"
+  :base-url "https://generativelanguage.googleapis.com/v1beta/openai"
   :env-key "GOOGLE_API_KEY"
   :default-model "gemini-2.0-flash-exp"
   :require-api-key? true)
