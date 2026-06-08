@@ -113,8 +113,11 @@
   [kernel delta remaining records tctx gate chat-opts]
   (loop [delta delta, remaining remaining, records records, tctx tctx]
     (when (zero? remaining)
-      (throw (ex-info "工具调用循环次数超过上限"
-                      {:max-iterations remaining :tool-calls-made records})))
+      ;; payload 用已执行的工具记录数（之前误报恒为 0 的 remaining）
+      (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
+                      {:reason :max-iterations-exceeded
+                       :tool-call-count (count records)
+                       :tool-calls-made records})))
     (let [{:keys [response context]} (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx))
           tctx context
           calls (response/response-tool-calls response)]
