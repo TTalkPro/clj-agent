@@ -24,6 +24,7 @@
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.tool :as tool]
             [im.ttalk.agent.model.message :as msg]
+            [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.react :as agent-loop]
             [im.ttalk.agent.common :as common]))
@@ -49,6 +50,8 @@
                       不提供则生成随机 UUID
    - :max-iterations 最大工具循环次数（默认 10）
    - :on-pause      暂停回调 (fn [{:keys [reason pending-tool]}])；配置即启用 pause/resume
+   - :on-error      错误回调 (fn [{:keys [error]}])（可选）；LLM/工具循环异常时触发，
+                    chat/resume 返回 {:status :error :error {...}} 而非抛裸异常
 
    返回 Agent map"
   [opts]
@@ -60,7 +63,7 @@
      :conversation-id (or (:conversation-id opts)
                           (str "agent-" (java.util.UUID/randomUUID)))
      :state-atom      (atom {:status :idle :paused-state nil})
-     :settings        (select-keys opts [:system-prompt :max-iterations :on-pause])}))
+     :settings        (select-keys opts [:system-prompt :max-iterations :on-pause :on-error])}))
 
 ;;; ============================================================
 ;;; 内部
@@ -111,7 +114,41 @@
          :text nil
          :pause-reason (:pause-reason result)
          :pending-tool (:pending-tool result)
+         :tool-calls-made (:tool-calls-made result)})
+
+    ;; LLM/工具循环异常：归一化为错误结果，不向调用方抛裸异常
+    :error
+    (do (clojure.core/reset! (:state-atom agent) {:status :error :paused-state nil})
+        (when-let [on-error (:on-error (:settings agent))]
+          (on-error {:error (:error result)}))
+        {:status :error
+         :text nil
+         :error (:error result)
+         :tool-calls-made (:tool-calls-made result)})
+
+    ;; 兜底：未知 status 不再让 case 抛 IllegalArgumentException
+    (do (clojure.core/reset! (:state-atom agent) {:status :error :paused-state nil})
+        {:status :error
+         :text nil
+         :error (errors/error :provider-error
+                              (str "未知的 loop 结果状态: " (:status result))
+                              {:context result})
          :tool-calls-made (:tool-calls-made result)})))
+
+(defn- run-loop
+  "执行 loop 调用并捕获异常为 {:status :error}，再交给 finalize 统一处理。
+   保留 ex-info 里 react 携带的 :tool-calls-made。"
+  [agent f]
+  (finalize agent
+            (try
+              (f)
+              (catch clojure.lang.ExceptionInfo e
+                {:status :error
+                 :error (errors/exception->error e)
+                 :tool-calls-made (:tool-calls-made (ex-data e))})
+              (catch Exception e
+                {:status :error
+                 :error (errors/exception->error e)}))))
 
 ;;; ============================================================
 ;;; 公开 API
@@ -122,14 +159,14 @@
   ([agent message] (chat agent message nil))
   ([agent message opts]
    (cancel-pending! agent)   ;; 未-resume 保护：开新对话前清理悬空 tool_use
-   (let [result (agent-loop/invoke (:kernel agent) (store agent) [(msg/user message)]
-                  (cond-> {:context (tctx agent)
-                           :tool-gate (gate-of agent)
-                           :max-iterations (or (:max-iterations opts)
-                                               (:max-iterations (:settings agent)) 10)}
-                    (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
-                    (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts))))]
-     (finalize agent result))))
+   (run-loop agent
+     #(agent-loop/invoke (:kernel agent) (store agent) [(msg/user message)]
+        (cond-> {:context (tctx agent)
+                 :tool-gate (gate-of agent)
+                 :max-iterations (or (:max-iterations opts)
+                                     (:max-iterations (:settings agent)) 10)}
+          (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
+          (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))))))
 
 (defn paused?
   [agent]
@@ -141,12 +178,12 @@
   (when-not (paused? agent)
     (throw (ex-info "Agent 未处于暂停状态" {:status (:status @(:state-atom agent))})))
   (let [ls (:loop-state (:paused-state @(:state-atom agent)))
-        approved? (or (= decision "approved") (= decision :approved))
-        result (agent-loop/resume (:kernel agent) ls (if approved? :approved :rejected)
-                 (cond-> {:context (tctx agent)
-                          :tool-gate (gate-of agent)}
-                   (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil))))]
-    (finalize agent result)))
+        approved? (or (= decision "approved") (= decision :approved))]
+    (run-loop agent
+      #(agent-loop/resume (:kernel agent) ls (if approved? :approved :rejected)
+         (cond-> {:context (tctx agent)
+                  :tool-gate (gate-of agent)}
+           (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil)))))))
 
 (defn reset!
   "清空会话历史并重置控制状态"

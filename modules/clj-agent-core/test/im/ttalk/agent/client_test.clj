@@ -79,6 +79,41 @@
     (call-llm-stream [this c m t _] (provider/call-llm this c m t))
     (tool->schema [_ t] t)))
 
+(defn- throwing-provider [ex]
+  (reify provider/ILLMProvider
+    (provider-name [_] :boom)
+    (call-llm [_ _config _messages _tools] (throw ex))
+    (extract-tool-calls [_ r] (:tool-calls r))
+    (extract-text [_ r] (:text r))
+    (build-tool-result [_ tid c] {:role "tool" :tool_call_id tid :content c})
+    (build-assistant-message [_ r] {:role "assistant" :content (:text r)})
+    (build-result-messages [_ am trs] (into [am] trs))
+    (supports-function-calling? [_] true)
+    (supports-stream? [_] false)
+    (call-llm-stream [this c m t _] (provider/call-llm this c m t))
+    (tool->schema [_ t] t)))
+
+(deftest error-path-test
+  (testing "provider 抛 IOException -> {:status :error}，分类为 network-error，不抛裸异常"
+    (let [a (agent/create-agent {:provider (throwing-provider (java.io.IOException. "连接失败"))
+                                 :model "test"})
+          r (agent/chat a "你好")]
+      (is (= :error (:status r)))
+      (is (nil? (:text r)))
+      (is (= :network-error (get-in r [:error :type])))
+      (is (true? (get-in r [:error :retryable?])))
+      ;; agent 状态落到 :error
+      (is (= :error (:status @(:state-atom a))))))
+  (testing "普通异常 -> provider-error，并触发 :on-error 回调"
+    (let [seen (atom nil)
+          a (agent/create-agent {:provider (throwing-provider (RuntimeException. "boom"))
+                                 :model "test"
+                                 :on-error (fn [{:keys [error]}] (reset! seen error))})
+          r (agent/chat a "hi")]
+      (is (= :error (:status r)))
+      (is (= :provider-error (get-in r [:error :type])))
+      (is (= :provider-error (:type @seen))))))
+
 (deftest system-prompt-test
   (testing "system-prompt 经 settings 传到 chat-fn config"
     (let [log (atom [])
@@ -284,3 +319,19 @@
       (let [s2 (sqlite/sqlite-store path)]
         (is (= 2 (count (memory/mem-get s2 "u1"))))
         (is (= "你好" (:content (first (memory/mem-get s2 "u1")))))))))
+
+(deftest sqlite-in-memory-persists-within-store-test
+  (testing ":memory: 库在同一 store 生命周期内不丢数据（常开连接修复）"
+    (let [s (sqlite/sqlite-store ":memory:")]
+      (memory/mem-add s "c1" [(msg/user "a")])
+      (memory/mem-add s "c1" [(msg/assistant "b")])
+      ;; 多次操作共享同一内存库，建表与数据都在
+      (is (= [(msg/user "a") (msg/assistant "b")] (memory/mem-get s "c1")))
+      (sqlite/close-store! s))))
+
+(deftest sqlite-closeable-test
+  (testing "store 实现 Closeable，with-open 自动关闭"
+    (let [path (temp-db)]
+      (with-open [s (sqlite/sqlite-store path)]
+        (memory/mem-add s "c1" [(msg/user "x")])
+        (is (= 1 (count (memory/mem-get s "c1"))))))))
