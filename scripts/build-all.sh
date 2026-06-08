@@ -8,8 +8,7 @@ echo "=========================================="
 # 按依赖顺序构建
 MODULES=(
   "clj-agent-core"
-  "clj-agent-llm"
-  "clj-agent-tools"
+  "clj-agent-provider"
 )
 
 for module in "${MODULES[@]}"; do

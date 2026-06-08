@@ -8,22 +8,31 @@ echo "=========================================="
 # 按依赖顺序测试
 MODULES=(
   "clj-agent-core"
-  "clj-agent-llm"
-  "clj-agent-tools"
+  "clj-agent-provider"
 )
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+failed=()
 
 for module in "${MODULES[@]}"; do
   echo ""
   echo "----------------------------------------"
   echo "Testing $module..."
   echo "----------------------------------------"
-  cd "modules/$module"
-  clojure -M:test || true
-  cd ../..
-  echo "✓ $module tested"
+  if (cd "$ROOT/modules/$module" && clojure -M:test); then
+    echo "✓ $module passed"
+  else
+    echo "✗ $module FAILED"
+    failed+=("$module")
+  fi
 done
 
 echo ""
 echo "=========================================="
-echo "✓ All modules tested!"
+if [ ${#failed[@]} -eq 0 ]; then
+  echo "✓ All modules passed!"
+else
+  echo "✗ Failed modules: ${failed[*]}"
+  exit 1
+fi
 echo "=========================================="
