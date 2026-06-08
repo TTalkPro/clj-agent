@@ -28,25 +28,33 @@
     ["CREATE INDEX IF NOT EXISTS idx_chat_conv
         ON chat_messages(conversation_id, id)"]))
 
-(defrecord SqliteStore [ds]
+;; conn 为单个常开 java.sql.Connection（而非每次操作开新连接的 datasource）：
+;; - 修复 :memory: 库——datasource 模式下每次操作是独立内存库，建表后数据即丢失；
+;;   常开连接让进程内库在 store 生命周期内持续可用。
+;; - 文件型库避免每次 mem-get/mem-add 都开/关连接的开销。
+;; SQLite 自身串行化写入；store 用完应 close（实现 java.io.Closeable，支持 with-open）。
+(defrecord SqliteStore [conn]
   memory/ChatMemory
   (mem-get [_ conv-id]
-    (->> (jdbc/execute! ds
+    (->> (jdbc/execute! conn
            ["SELECT content FROM chat_messages WHERE conversation_id = ? ORDER BY id"
             conv-id])
          (mapv (fn [row] (edn/read-string (:chat_messages/content row))))))
   (mem-add [_ conv-id new-msgs]
     (when (seq new-msgs)
-      (jdbc/with-transaction [tx ds]
+      (jdbc/with-transaction [tx conn]
         (doseq [m new-msgs]
           (jdbc/execute! tx
             ["INSERT INTO chat_messages (conversation_id, content) VALUES (?, ?)"
              conv-id (pr-str (msg/normalize m))]))))
     nil)
   (mem-clear [_ conv-id]
-    (jdbc/execute! ds
+    (jdbc/execute! conn
       ["DELETE FROM chat_messages WHERE conversation_id = ?" conv-id])
-    nil))
+    nil)
+
+  java.io.Closeable
+  (close [_] (.close conn)))
 
 (defn sqlite-store
   "创建 SQLite 后端的 ChatMemory。
@@ -54,8 +62,16 @@
    参数:
    - db-path: SQLite 文件路径（如 \"agent.db\"；\":memory:\" 为进程内库）
 
-   返回: 实现 ChatMemory 协议的 store（首次调用自动建表）"
+   返回: 实现 ChatMemory + java.io.Closeable 的 store（首次调用自动建表）。
+   持有单个常开连接，用完请 (close-store! store) 或用 (with-open [s ...] ...) 释放。"
   [db-path]
-  (let [ds (jdbc/get-datasource {:dbtype "sqlite" :dbname db-path})]
-    (ensure-schema! ds)
-    (->SqliteStore ds)))
+  (let [conn (jdbc/get-connection {:dbtype "sqlite" :dbname db-path})]
+    (ensure-schema! conn)
+    (->SqliteStore conn)))
+
+(defn close-store!
+  "关闭 store 持有的数据库连接，释放资源。"
+  [store]
+  (when-let [conn (:conn store)]
+    (.close ^java.sql.Connection conn))
+  nil)
