@@ -25,6 +25,9 @@
    :system-and-tools  缓存 system + tools（两个 breakpoint）
    :conversation      缓存到\"当前用户问题之前\"的对话历史
                       （标记最后一条消息的最后一个内容块）
+   :tool-results      缓存到最后一个 tool_result（多轮工具循环里跨轮复用工具结果，
+                      标记 messages 中最后一个 type=tool_result 的内容块）
+   :system-and-conversation  同时缓存 system 与对话历史（两个 breakpoint）
 
    ttl: nil -> 默认 5 分钟；\"1h\" -> 1 小时。
 
@@ -132,6 +135,43 @@
           params))
       params)))
 
+(defn- tool-result-block?
+  "内容块是否为 tool_result（Anthropic 工具结果块）"
+  [block]
+  (and (map? block) (= "tool_result" (:type block))))
+
+(defn- cache-tool-results
+  "缓存工具结果：在「最后一个 tool_result 内容块」上打断点。
+
+   遍历所有消息的内容块，定位最后一个 type=tool_result 的块并挂 cache_control，
+   使多轮工具循环中此前的工具结果作为可缓存前缀（已带 cache_control 则跳过）。"
+  [params cc]
+  (let [msgs (vec (:messages params))
+        ;; 找到最后一个 tool_result 块的 [消息下标 块下标]
+        loc (reduce
+              (fn [acc mi]
+                (let [c (:content (nth msgs mi))]
+                  (if (sequential? c)
+                    (reduce (fn [a bi]
+                              (if (tool-result-block? (nth c bi)) [mi bi] a))
+                            acc
+                            (range (count c)))
+                    acc)))
+              nil
+              (range (count msgs)))]
+    (if loc
+      (let [[mi bi] loc
+            m (nth msgs mi)
+            blocks (vec (:content m))
+            block (nth blocks bi)]
+        (if (has-cache-control? block)
+          params
+          (assoc params :messages
+                 (assoc msgs mi
+                        (assoc m :content
+                               (assoc blocks bi (assoc block :cache_control cc)))))))
+      params)))
+
 ;; ============================================================
 ;; 入口
 ;; ============================================================
@@ -142,6 +182,7 @@
    参数:
    - params:   已构建好的 Anthropic 请求参数（含 :system :tools :messages）
    - strategy: :none | :system | :tools | :system-and-tools | :conversation
+               | :tool-results | :system-and-conversation
    - ttl:      nil（5 分钟）| \"1h\"（1 小时）
 
    返回: 注入 cache_control 后的 params
@@ -159,6 +200,8 @@
                     :tools            (cache-tools params cc)
                     :system-and-tools (-> params (cache-tools cc) (cache-system cc))
                     :conversation     (cache-conversation params cc)
+                    :tool-results     (cache-tool-results params cc)
+                    :system-and-conversation (-> params (cache-system cc) (cache-conversation cc))
                     ;; 未知策略：原样
                     params)
            n (count-breakpoints result)]
