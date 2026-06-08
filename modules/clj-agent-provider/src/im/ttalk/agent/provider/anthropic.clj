@@ -4,16 +4,35 @@
    实现 ILLMProvider 协议，提供 Anthropic Claude API 的完整访问。
 
    支持功能：
-   - 同步调用
-   - 流式调用（同步阻塞）
-   - 异步调用
-   - 异步流式调用
-   - 工具调用（Function Calling）
-   - 结构化输出
+   - 同步调用 / 流式调用（同步阻塞）/ 异步调用 / 异步流式调用
+   - 工具调用（Function Calling）+ 结构化输出
+   - 服务端内置工具：web_search（见 schema.anthropic/web-search-tool）
+   - Citations 引用：可引用文档块（schema.anthropic/text-document）+ 响应引用提取（extract-citations）
+   - Skills（beta）：技能容器 + code_execution 工具（schema.anthropic/skill 等，配合 config :beta）
+   - prompt caching 策略层（见 common.cache）
+   - 响应限流头解析（parse-rate-limit）
+
+   调用 config 支持的 Anthropic 专属能力（均「存在才发送」，详见 build-params）：
+   - 采样：:temperature :top-p :top-k :max-tokens :stop（=> stop_sequences）
+   - 推理：:thinking（如 {:type \"adaptive\"} / {:type \"enabled\" :budget_tokens 2048}）
+   - :metadata、:service-tier（\"auto\" | \"standard_only\"，容量路由）
+   - 工具：:tools（含 web_search 等 wire 工具）、:tool-choice
+   - 缓存：:cache-strategy + :cache-ttl（见下）
+
+   prompt caching 策略（:cache-strategy）：
+   - :none | :system | :tools | :system-and-tools | :conversation
+   - :tool-results            缓存到最后一个 tool_result（多轮工具循环跨轮复用）
+   - :system-and-conversation system + 对话历史双断点
+   命中/创建 token 归一化到响应 usage 的 :cache-read-tokens / :cache-write-tokens。
+
+   响应限流：同步调用成功时，响应体附加 :rate-limit
+   {:requests-limit :requests-remaining :requests-reset
+    :tokens-limit :tokens-remaining :tokens-reset :retry-after}（源自 anthropic-ratelimit-* 头）。
 
    使用示例：
 
-   (require '[im.ttalk.agent.provider.anthropic :as anthropic])
+   (require '[im.ttalk.agent.provider.anthropic :as anthropic]
+            '[im.ttalk.agent.provider.schema.anthropic :as schema])
 
    (def provider (anthropic/create-provider))
 
@@ -21,7 +40,32 @@
    (anthropic/call-anthropic config messages tools)
 
    ;; 流式调用
-   (anthropic/call-anthropic-stream config messages tools on-token)"
+   (anthropic/call-anthropic-stream config messages tools on-token)
+
+   ;; web_search + 缓存 + 服务层级
+   (anthropic/call-anthropic
+     {:model \"claude-opus-4-8\" :max-tokens 4096
+      :service-tier \"auto\"
+      :cache-strategy :system-and-tools :cache-ttl \"1h\"}
+     messages
+     [(schema/web-search-tool {:max-uses 5})])
+
+   ;; Citations：可引用文档 -> 响应带引用
+   (let [resp (anthropic/call-anthropic
+                {:model \"claude-opus-4-8\" :max-tokens 1024}
+                [{:role \"user\"
+                  :content [(schema/text-document \"地球绕太阳公转。\" {:title \"天文\"})
+                            {:type \"text\" :text \"地球绕什么转？\"}]}]
+                [])]
+     (anthropic/extract-citations resp))
+
+   ;; Skills（beta）：需开 :beta 头 + code_execution 工具
+   (anthropic/call-anthropic
+     {:model \"claude-opus-4-8\" :max-tokens 4096
+      :beta schema/default-skills-beta
+      :container (schema/skills-container [(schema/skill \"xlsx\")])}
+     messages
+     [(schema/code-execution-tool)])"
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.model :as proto]
@@ -58,23 +102,79 @@
   "从 config 解析端点配置（缺省回退官方 Anthropic）"
   [config]
   (merge default-endpoint
-         (select-keys config [:base-url :api-path :auth-scheme :anthropic-version])))
+         (select-keys config [:base-url :api-path :auth-scheme :anthropic-version :beta])))
 
 (defn- build-url
   [{:keys [base-url api-path]}]
   (str base-url api-path))
 
+(defn- beta-header-value
+  "把 :beta（字符串 / 字符串集合）规整为 anthropic-beta 头值（逗号分隔）。
+   nil/空 -> nil。"
+  [beta]
+  (cond
+    (string? beta)            (when-not (clojure.string/blank? beta) beta)
+    (sequential? beta)        (let [v (->> beta (remove clojure.string/blank?) distinct)]
+                                (when (seq v) (clojure.string/join "," v)))
+    :else nil))
+
 (defn- build-headers
-  "按鉴权方式构造请求头：官方用 x-api-key，MiniMax 等兼容端点用 Bearer。"
-  [{:keys [auth-scheme anthropic-version]} api-key]
+  "按鉴权方式构造请求头：官方用 x-api-key，MiniMax 等兼容端点用 Bearer。
+   :beta（如 \"skills-2025-10-02\" 或 [\"a\" \"b\"]）-> anthropic-beta 头，启用 beta 功能。"
+  [{:keys [auth-scheme anthropic-version beta]} api-key]
   (cond-> {"Content-Type" "application/json"}
     (= :bearer auth-scheme)    (assoc "Authorization" (str "Bearer " api-key))
     (= :x-api-key auth-scheme) (assoc "x-api-key" api-key)
-    anthropic-version          (assoc "anthropic-version" anthropic-version)))
+    anthropic-version          (assoc "anthropic-version" anthropic-version)
+    (beta-header-value beta)   (assoc "anthropic-beta" (beta-header-value beta))))
 
 (defn- resolve-api-key
   [config]
   (or (:api-key config) (:api-key @default-opts)))
+
+;;; ============================================================
+;;; 响应头：限流信息
+;;; ============================================================
+
+(defn- header-get
+  "从 headers map 读取某个头（兼容 keyword / 字符串键，大小写不敏感）"
+  [headers k]
+  (when headers
+    (or (get headers k)
+        (get headers (keyword k))
+        (get headers (clojure.string/lower-case k)))))
+
+(defn parse-rate-limit
+  "从 Anthropic 响应头解析限流信息（anthropic-ratelimit-*）。
+
+   参数：
+   - headers: HTTP 响应头 map
+
+   返回：
+   {:requests-limit n :requests-remaining n :requests-reset \"ISO时间\"
+    :tokens-limit n :tokens-remaining n :tokens-reset \"ISO时间\"
+    :retry-after n}
+   仅包含响应实际携带的字段；全部缺失时返回 nil。
+
+   说明：数值字段会尝试解析为 Long，解析失败则保留原字符串。"
+  [headers]
+  (let [->long (fn [s] (when s (try (Long/parseLong (str s)) (catch Exception _ s))))
+        m (cond-> {}
+            (header-get headers "anthropic-ratelimit-requests-limit")
+            (assoc :requests-limit (->long (header-get headers "anthropic-ratelimit-requests-limit")))
+            (header-get headers "anthropic-ratelimit-requests-remaining")
+            (assoc :requests-remaining (->long (header-get headers "anthropic-ratelimit-requests-remaining")))
+            (header-get headers "anthropic-ratelimit-requests-reset")
+            (assoc :requests-reset (header-get headers "anthropic-ratelimit-requests-reset"))
+            (header-get headers "anthropic-ratelimit-tokens-limit")
+            (assoc :tokens-limit (->long (header-get headers "anthropic-ratelimit-tokens-limit")))
+            (header-get headers "anthropic-ratelimit-tokens-remaining")
+            (assoc :tokens-remaining (->long (header-get headers "anthropic-ratelimit-tokens-remaining")))
+            (header-get headers "anthropic-ratelimit-tokens-reset")
+            (assoc :tokens-reset (header-get headers "anthropic-ratelimit-tokens-reset"))
+            (header-get headers "retry-after")
+            (assoc :retry-after (->long (header-get headers "retry-after"))))]
+    (when (seq m) m)))
 
 ;;; ============================================================
 ;;; 响应解析
@@ -112,6 +212,27 @@
        (filter #(= (:type %) "text"))
        (map :text)
        (clojure.string/join "\n")))
+
+(defn extract-citations
+  "从 Anthropic 响应提取引用（Citations）。
+
+   当请求带启用引用的 document 内容块（见 schema.anthropic/text-document）时，
+   响应的 text 块会携带 :citations 数组，标注引用了哪个文档的哪段文本。
+
+   参数：
+   - response: Anthropic API 响应
+
+   返回：
+   引用列表（如 [{:type \"char_location\" :cited_text \"...\" :document_index 0
+                  :document_title \"...\" :start_char_index 0 :end_char_index 12} ...]）
+   无引用时返回 nil。"
+  [response]
+  (let [cits (->> (:content response)
+                  (filter #(= (:type %) "text"))
+                  (mapcat :citations)
+                  (remove nil?)
+                  vec)]
+    (when (seq cits) cits)))
 
 (defn has-tool-calls?
   "检查 Anthropic 响应是否包含工具调用
@@ -211,13 +332,14 @@
      - 工具：:tool-choice :tools（预置 schema）
      - 系统提示：:system-prompt
      - 缓存：:cache-strategy（见 cache 命名空间）:cache-ttl
+     - Skills（beta）：:container（如 {:skills [...]}，需配合 config :beta 头）
    - messages:     消息列表（Anthropic wire 形态）
    - tool-schemas: 工具 schema 列表
 
    返回：
    API 参数 map（已按 cache-strategy 注入 cache_control）"
   [{:keys [model max-tokens system-prompt tool-choice tools
-           temperature top-p top-k stop metadata thinking
+           temperature top-p top-k stop metadata thinking service-tier container
            cache-strategy cache-ttl]} messages tool-schemas]
   (let [all-tools (into (vec tools) tool-schemas)
         max-tokens (or max-tokens 4096)
@@ -232,7 +354,11 @@
                  (some? top-k)       (assoc :top_k top-k)
                  (seq stop)          (assoc :stop_sequences (vec stop))
                  metadata            (assoc :metadata metadata)
-                 thinking            (assoc :thinking thinking))]
+                 thinking            (assoc :thinking thinking)
+                 ;; 服务层级（"auto" | "standard_only"）：容量路由，仅显式提供时发送
+                 service-tier        (assoc :service_tier service-tier)
+                 ;; Skills 容器（beta）：{:skills [{:type "anthropic" :skill_id "xlsx" ...}]}
+                 container           (assoc :container container))]
     (cache/apply-anthropic-cache params cache-strategy cache-ttl)))
 
 ;;; ============================================================
@@ -270,7 +396,10 @@
                                :body params
                                :timeout timeout))]
     (if (:success? response)
-      (:body response)
+      ;; 把限流头信息附加到响应体（内部字段，不影响 normalize-response 的标准解析）
+      (let [rl (parse-rate-limit (:headers response))]
+        (cond-> (:body response)
+          rl (assoc :rate-limit rl)))
       (throw (ex-info "Anthropic-compatible API call failed"
                       {:status (:status response)
                        :body (:body response)
