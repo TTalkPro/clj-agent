@@ -84,19 +84,37 @@
   (let [choice (first (:choices chunk))
         delta (:delta choice)
         ;; 捕获末块 usage（DeepSeek 原生返回 / OpenAI stream_options.include_usage）
-        ;; 与 finish_reason（length/sensitive 等真实停止原因）
+        ;; 与 finish_reason（length/sensitive 等真实停止原因）；role 提前合并。
         state (cond-> state
                 (:usage chunk)           (assoc :usage (:usage chunk))
-                (:finish_reason choice)  (assoc :finish-reason (:finish_reason choice)))]
+                (:finish_reason choice)  (assoc :finish-reason (:finish_reason choice))
+                (:role delta)            (assoc :role (:role delta)))
+        ;; 工具调用增量：始终独立累积——即使同一 chunk 同时携带 content，也不丢工具调用。
+        state (if-let [tool-calls (:tool_calls delta)]
+                (assoc state :tool-calls-acc
+                       (reduce
+                         (fn [acc tc]
+                           (let [idx (:index tc)
+                                 existing (get acc idx {:id nil
+                                                        :function {:name "" :arguments ""}})]
+                             (assoc acc idx
+                                    {:id (or (:id tc) (:id existing))
+                                     :type "function"
+                                     :function
+                                     {:name (str (get-in existing [:function :name])
+                                                 (get-in tc [:function :name] ""))
+                                      :arguments (str (get-in existing [:function :arguments])
+                                                      (get-in tc [:function :arguments] ""))}})))
+                         (:tool-calls-acc state)
+                         tool-calls))
+                state)]
     (cond
       ;; 推理增量（deepseek-reasoner 等：reasoning_content 在 content 之前流式返回）
       ;; 单独 emit :reasoning-token，不混入 :token，保持答案流干净
       (:reasoning_content delta)
       (let [rtext (:reasoning_content delta)
             new-reasoning (str (:reasoning-accumulated state) rtext)]
-        [(assoc state
-                :reasoning-accumulated new-reasoning
-                :role (or (:role delta) (:role state)))
+        [(assoc state :reasoning-accumulated new-reasoning)
          {:reasoning-token rtext
           :reasoning? true
           :reasoning-accumulated new-reasoning}])
@@ -108,40 +126,12 @@
             new-index (inc (:index state))]
         [(assoc state
                 :accumulated new-accumulated
-                :index new-index
-                :role (or (:role delta) (:role state)))
+                :index new-index)
          {:token text
           :index new-index
           :accumulated new-accumulated}])
 
-      ;; 工具调用增量
-      (:tool_calls delta)
-      (let [tool-calls (:tool_calls delta)
-            new-acc (reduce
-                      (fn [acc tc]
-                        (let [idx (:index tc)
-                              existing (get acc idx {:id nil
-                                                      :function {:name "" :arguments ""}})]
-                          (assoc acc idx
-                                 {:id (or (:id tc) (:id existing))
-                                  :type "function"
-                                  :function
-                                  {:name (str (get-in existing [:function :name])
-                                              (get-in tc [:function :name] ""))
-                                   :arguments (str (get-in existing [:function :arguments])
-                                                   (get-in tc [:function :arguments] ""))}})))
-                      (:tool-calls-acc state)
-                      tool-calls)]
-        [(assoc state
-                :tool-calls-acc new-acc
-                :role (or (:role delta) (:role state)))
-         nil])
-
-      ;; 角色信息
-      (:role delta)
-      [(assoc state :role (:role delta)) nil]
-
-      ;; 其他情况
+      ;; 仅工具调用 / 仅角色 / 其他：状态已在上面更新，无 token 下发
       :else
       [state nil])))
 
