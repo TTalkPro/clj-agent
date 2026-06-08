@@ -86,49 +86,6 @@
               settings)))
 
 ;;; ============================================================
-;;; 向后兼容的 Builder API（已废弃，保留兼容）
-;;; ============================================================
-
-(defn create-kernel-builder
-  "已废弃：请使用 build-kernel
-    保留以兼容旧代码。"
-  ([]
-   (create-kernel-builder {}))
-  ([settings]
-   {:service nil
-    :tools []
-    :filters []
-    :settings settings}))
-
-(defn add-tool
-  "已废弃：请使用 build-kernel 的 :tools 参数"
-  [builder tool-var]
-  (update builder :tools conj tool-var))
-
-(defn add-tools
-  "已废弃：请使用 build-kernel 的 :tools 参数"
-  [builder tool-vars]
-  (update builder :tools into tool-vars))
-
-(defn add-service
-  "已废弃：请使用 build-kernel 的 :service 参数"
-  [builder service]
-  (assoc builder :service service))
-
-(defn add-filter
-  "已废弃：请使用 build-kernel 的 :filters 参数"
-  [builder filter-def]
-  (update builder :filters conj filter-def))
-
-(defn ^:no-doc build-kernel-from-builder
-  "从 builder map 构建 Kernel（内部使用，支持旧版 builder API）"
-  [builder]
-  (build-kernel {:service (:service builder)
-                 :tools (vec (:tools builder))
-                 :filters (vec (:filters builder))
-                 :settings (:settings builder)}))
-
-;;; ============================================================
 ;;; Query API
 ;;; ============================================================
 
