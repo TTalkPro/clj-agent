@@ -76,8 +76,16 @@
 ;;; ============================================================
 
 (deftest factory-registers-all-builtins
-  (testing "supported-providers 含全部内置 provider（含新增 deepseek / minimax）"
+  (testing "supported-providers 含全部内置 provider（含 deepseek / minimax / bailian）"
     (llm/create-provider :mock)   ;; 触发延迟注册
     (let [supported (set (llm/supported-providers))]
       (are [k] (contains? supported k)
-        :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :mock))))
+        :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :bailian :mock))))
+
+(deftest bailian-registered-and-creatable
+  (testing "bailian 可经 factory 创建，且声明不支持流式"
+    (let [p (llm/create-provider :bailian {:api-key "k"})]
+      (is (= :bailian (model/provider-name p)))
+      (is (false? (model/supports-stream? p)))
+      (is (thrown? UnsupportedOperationException
+                   (model/call-llm-stream p {:model "qwen-plus"} [] [] (fn [_])))))))
