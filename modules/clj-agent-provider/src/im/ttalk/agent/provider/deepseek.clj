@@ -18,6 +18,11 @@
      temperature/top_p/presence_penalty/frequency_penalty 会被忽略 ——
      本实现「存在才发送」，不传即安全
 
+   作为 OpenAI 兼容实现，同样继承 common.openai-compat 的通用能力：
+   :parallel-tool-calls、:response-format（json_object / json_schema+strict 结构化输出）、
+   :stream-options、:extra-body 等（:reasoning-effort/:verbosity 为 OpenAI 系参数，
+   DeepSeek 当前忽略，但传入安全）。
+
    (require '[im.ttalk.agent.provider.deepseek :as deepseek])
    (def provider (deepseek/create-provider {:api-key \"sk-...\"}))
 
