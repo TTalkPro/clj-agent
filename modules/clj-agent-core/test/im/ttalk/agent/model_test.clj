@@ -380,3 +380,41 @@
     (let [result (errors/with-error-handling #(throw (java.io.IOException. "oops")))]
       (is (= :error (first result)))
       (is (= :network-error (:type (second result)))))))
+
+(deftest test-exception->error-classification
+  (testing "IOException -> network-error（可重试）"
+    (let [e (errors/exception->error (java.io.IOException. "conn reset"))]
+      (is (= :network-error (:type e)))
+      (is (true? (:retryable? e)))
+      (is (= "conn reset" (:message e)))))
+  (testing "TimeoutException -> timeout-error（可重试）"
+    (let [e (errors/exception->error (java.util.concurrent.TimeoutException. "took too long"))]
+      (is (= :timeout-error (:type e)))
+      (is (true? (:retryable? e)))))
+  (testing "其他异常 -> provider-error"
+    (let [e (errors/exception->error (RuntimeException. "boom"))]
+      (is (= :provider-error (:type e)))))
+  (testing "无 message 用类名兜底"
+    (let [e (errors/exception->error (RuntimeException.))]
+      (is (string? (:message e))))))
+
+(deftest test-http-response->error
+  (testing "状态码映射到错误类型与可重试性"
+    (are [status etype retry?]
+        (let [e (errors/http-response->error {:status status :body "x"} :openai)]
+          (and (= etype (:type e)) (= retry? (:retryable? e)) (= :openai (:provider e))))
+      401 :auth-error       false
+      403 :auth-error       false
+      429 :rate-limit-error true
+      500 :provider-error   true
+      503 :provider-error   true
+      400 :validation-error false))
+  (testing "从 body 提取错误消息"
+    (is (= "no access" (:message (errors/http-response->error
+                                   {:status 401 :body {:error "no access"}} :openai))))))
+
+(deftest test-format-error
+  (testing "格式化含类型/状态/provider"
+    (is (= "[TIMEOUT-ERROR] 请求超时 (HTTP 504) [openai]"
+           (errors/format-error (errors/error :timeout-error "请求超时"
+                                              {:status 504 :provider :openai}))))))
