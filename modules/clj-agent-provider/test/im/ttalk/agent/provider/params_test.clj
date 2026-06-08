@@ -56,6 +56,46 @@
               [])]
       (is (= "x" (:system p))))))
 
+(deftest anthropic-service-tier-test
+  (testing "service-tier 仅显式提供时发送"
+    (let [p (anthropic-build-params
+              {:model "claude-opus-4-8" :service-tier "auto"}
+              [{:role "user" :content "hi"}] [])]
+      (is (= "auto" (:service_tier p))))
+    (let [p (anthropic-build-params
+              {:model "claude-opus-4-8"}
+              [{:role "user" :content "hi"}] [])]
+      (is (not (contains? p :service_tier))))))
+
+(deftest anthropic-skills-container-test
+  (testing "container（Skills）仅显式提供时发送"
+    (let [p (anthropic-build-params
+              {:model "claude-opus-4-8"
+               :container {:skills [{:type "anthropic" :skill_id "xlsx"}]}}
+              [{:role "user" :content "hi"}] [])]
+      (is (= {:skills [{:type "anthropic" :skill_id "xlsx"}]} (:container p))))
+    (let [p (anthropic-build-params
+              {:model "claude-opus-4-8"} [{:role "user" :content "hi"}] [])]
+      (is (not (contains? p :container))))))
+
+(def anthropic-build-headers #'anthropic/build-headers)
+
+(deftest anthropic-beta-header-test
+  (testing "beta 字符串 -> anthropic-beta 头"
+    (let [h (anthropic-build-headers
+              {:auth-scheme :x-api-key :anthropic-version "2023-06-01"
+               :beta "skills-2025-10-02"} "k")]
+      (is (= "skills-2025-10-02" (get h "anthropic-beta")))
+      (is (= "k" (get h "x-api-key")))))
+  (testing "beta 向量 -> 逗号拼接、去重"
+    (let [h (anthropic-build-headers
+              {:auth-scheme :x-api-key
+               :beta ["a" "b" "a" ""]} "k")]
+      (is (= "a,b" (get h "anthropic-beta")))))
+  (testing "无 beta 不发送该头"
+    (let [h (anthropic-build-headers {:auth-scheme :x-api-key} "k")]
+      (is (not (contains? h "anthropic-beta"))))))
+
 ;; ============================================================
 ;; OpenAI 兼容 build-params
 ;; ============================================================
@@ -103,3 +143,46 @@
     (let [p (compat/build-params {:model "gpt-4" :system-prompt "sys"}
                                  [{:role "user" :content "hi"}] [])]
       (is (= {:role "system" :content "sys"} (first (:messages p)))))))
+
+(deftest openai-compat-tool-and-reasoning-test
+  (testing "parallel-tool-calls 布尔值精确透传（含 false）"
+    (let [p (compat/build-params
+              {:model "gpt-4" :parallel-tool-calls false}
+              [{:role "user" :content "hi"}] [])]
+      (is (= false (:parallel_tool_calls p))))
+    (let [p (compat/build-params
+              {:model "gpt-4" :parallel-tool-calls true}
+              [{:role "user" :content "hi"}] [])]
+      (is (= true (:parallel_tool_calls p))))
+    (let [p (compat/build-params {:model "gpt-4"} [{:role "user" :content "hi"}] [])]
+      (is (not (contains? p :parallel_tool_calls)))))
+  (testing "reasoning-effort / verbosity 仅显式提供时发送"
+    (let [p (compat/build-params
+              {:model "gpt-5" :reasoning-effort "high" :verbosity "low"}
+              [{:role "user" :content "hi"}] [])]
+      (is (= "high" (:reasoning_effort p)))
+      (is (= "low" (:verbosity p))))
+    (let [p (compat/build-params {:model "gpt-5"} [{:role "user" :content "hi"}] [])]
+      (is (not (contains? p :reasoning_effort)))
+      (is (not (contains? p :verbosity)))))
+  (testing "结构化输出 json_schema/strict 透传到 response_format"
+    (let [rf {:type "json_schema"
+              :json_schema {:name "Person" :strict true
+                            :schema {:type "object"
+                                     :properties {:name {:type "string"}}
+                                     :required ["name"]}}}
+          p (compat/build-params
+              {:model "gpt-4" :response-format rf}
+              [{:role "user" :content "hi"}] [])]
+      (is (= rf (:response_format p)))))
+  (testing "多模态输出 modalities / audio 透传"
+    (let [p (compat/build-params
+              {:model "gpt-4o-audio-preview"
+               :modalities ["text" "audio"]
+               :audio {:voice "alloy" :format "wav"}}
+              [{:role "user" :content "hi"}] [])]
+      (is (= ["text" "audio"] (:modalities p)))
+      (is (= {:voice "alloy" :format "wav"} (:audio p))))
+    (let [p (compat/build-params {:model "gpt-4"} [{:role "user" :content "hi"}] [])]
+      (is (not (contains? p :modalities)))
+      (is (not (contains? p :audio))))))

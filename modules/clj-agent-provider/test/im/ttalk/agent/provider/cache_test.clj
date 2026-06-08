@@ -81,3 +81,34 @@
     (is (<= (cache/breakpoint-count
               (cache/apply-anthropic-cache base-params :system-and-tools))
             cache/max-breakpoints))))
+
+(def tool-loop-params
+  "含多轮工具结果的请求参数（模拟工具循环历史）"
+  {:model "claude-opus-4-8"
+   :max_tokens 1024
+   :system "系统提示"
+   :messages [{:role "user" :content "查天气"}
+              {:role "assistant" :content [{:type "tool_use" :id "t1" :name "weather" :input {}}]}
+              {:role "user" :content [{:type "tool_result" :tool_use_id "t1" :content "晴 25°C"}]}
+              {:role "assistant" :content [{:type "tool_use" :id "t2" :name "weather" :input {}}]}
+              {:role "user" :content [{:type "tool_result" :tool_use_id "t2" :content "多云 22°C"}]}]})
+
+(deftest strategy-tool-results-test
+  (testing ":tool-results 在最后一个 tool_result 块上打断点"
+    (let [r (cache/apply-anthropic-cache tool-loop-params :tool-results)
+          msgs (:messages r)
+          last-tr-block (-> msgs (nth 4) :content first)
+          earlier-tr-block (-> msgs (nth 2) :content first)]
+      (is (= {:type "ephemeral"} (:cache_control last-tr-block)))
+      ;; 仅最后一个 tool_result 被标记，之前的不动
+      (is (nil? (:cache_control earlier-tr-block)))
+      (is (= 1 (cache/breakpoint-count r)))))
+  (testing "无 tool_result 时原样返回"
+    (is (= base-params (cache/apply-anthropic-cache base-params :tool-results)))))
+
+(deftest strategy-system-and-conversation-test
+  (testing ":system-and-conversation 两个断点（system + 最后消息末块）"
+    (let [r (cache/apply-anthropic-cache base-params :system-and-conversation)]
+      (is (= {:type "ephemeral"} (:cache_control (last (:system r)))))
+      (is (= {:type "ephemeral"} (:cache_control (last (:content (last (:messages r)))))))
+      (is (= 2 (cache/breakpoint-count r))))))
