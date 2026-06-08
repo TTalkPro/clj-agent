@@ -33,16 +33,21 @@
    {:type \"function\"
     :function {:name \"...\" :description \"...\" :parameters {...}}}
 
+   说明：
+   - 兼容两种参数键名：OpenAI 风格 :parameters 与 Anthropic/deftool 风格
+     :input_schema（deftool 宏生成的 schema 用后者）—— 二者均归一化到
+     OpenAI function 的 :parameters，避免 OpenAI 路径下工具参数被静默丢成空对象。
+
    示例：
    (tool->schema {:name :calculator
                   :description \"执行数学计算\"
                   :parameters {:type \"object\"
                                :properties {:expr {:type \"string\"}}}})"
-  [{:keys [name description parameters]}]
+  [{:keys [name description parameters input_schema]}]
   {:type "function"
    :function {:name (if (keyword? name) (clojure.core/name name) name)
               :description description
-              :parameters (or parameters {:type "object" :properties {}})}})
+              :parameters (or parameters input_schema {:type "object" :properties {}})}})
 
 (defn schema->tool
   "将 OpenAI function schema 转换为工具定义

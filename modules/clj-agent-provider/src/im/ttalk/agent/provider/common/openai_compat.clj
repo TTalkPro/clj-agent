@@ -48,8 +48,11 @@
      - 采样/提示词控制：:max-tokens :temperature :top-p :stop
        :frequency-penalty :presence-penalty :seed :n :tool-choice :user
        :logprobs :top-logprobs :thinking（GLM 等支持思考开关的模型）
+     - 工具调用：:tool-choice :parallel-tool-calls（并行工具调用开关）
+     - 推理控制：:reasoning-effort（o 系列 / GPT-5）:verbosity（GPT-5 输出冗长度）
+     - 多模态输出：:modalities（如 [text audio] 文本+语音）:audio（{:voice .. :format ..}）
      - 系统提示：:system-prompt
-     - 结构化输出：:response-format
+     - 结构化输出：:response-format（json_object 或 json_schema+strict 模式）
      - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）
    - messages:     消息列表
    - tool-schemas: 工具 schema 列表
@@ -63,7 +66,8 @@
      响应 usage 的 prompt_tokens_details.cached_tokens（OpenAI）/ prompt_cache_hit_tokens（DeepSeek）。"
   [{:keys [model max-tokens system-prompt temperature top-p stop response-format
            frequency-penalty presence-penalty seed n tool-choice user
-           logprobs top-logprobs thinking
+           logprobs top-logprobs thinking parallel-tool-calls reasoning-effort verbosity
+           modalities audio
            do-sample tool-stream request-id user-id stream-options extra-body]}
    messages tool-schemas]
   (let [msgs (build-messages system-prompt messages)]
@@ -74,8 +78,19 @@
       (some? top-p)             (assoc :top_p top-p)
       (seq tool-schemas)        (assoc :tools tool-schemas)
       tool-choice               (assoc :tool_choice tool-choice)
+      ;; 并行工具调用开关（OpenAI：默认 true；置 false 强制一次一个工具）
+      (some? parallel-tool-calls) (assoc :parallel_tool_calls parallel-tool-calls)
       (seq stop)                (assoc :stop stop)
+      ;; 结构化输出：response-format 透传（{:type "json_object"} 或
+      ;; {:type "json_schema" :json_schema {:name .. :strict true :schema {...}}}）
       response-format           (assoc :response_format response-format)
+      ;; 推理档位（o 系列 / GPT-5：low|medium|high；仅显式提供时发送）
+      reasoning-effort          (assoc :reasoning_effort reasoning-effort)
+      ;; 输出冗长度（GPT-5：low|medium|high）
+      verbosity                 (assoc :verbosity verbosity)
+      ;; 多模态输出（gpt-4o-audio 等）：modalities ["text" "audio"]、audio {:voice .. :format ..}
+      (seq modalities)          (assoc :modalities modalities)
+      audio                     (assoc :audio audio)
       (some? frequency-penalty) (assoc :frequency_penalty frequency-penalty)
       (some? presence-penalty)  (assoc :presence_penalty presence-penalty)
       (some? seed)              (assoc :seed seed)
