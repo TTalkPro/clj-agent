@@ -131,21 +131,35 @@
                                "Content-Type" "application/json"}
                      :body (json/generate-string body)
                      :timeout timeout})]
-    (if (:error response)
-      {:error {:message (str "HTTP error: " (:error response))
-               :type "http_error"}}
-      (let [status (:status response)
-            body-str (:body response)]
-        (if (>= status 400)
-          (try
-            (json/parse-string body-str true)
-            (catch Exception _
-              {:error {:message body-str :type "api_error" :status status}}))
-          (try
-            (json/parse-string body-str true)
-            (catch Exception e
-              {:error {:message (str "JSON parse error: " (.getMessage e))
-                       :type "parse_error"}})))))))
+    ;; 连接级错误（DNS/超时/重置）：网络层失败一律可重试。
+    (when-let [err (:error response)]
+      (throw (ex-info "DashScope API call failed (network error)"
+                      {:error err
+                       :provider :bailian
+                       :retryable? true})))
+    (let [status (:status response)
+          body-str (:body response)]
+      ;; HTTP 4xx/5xx：DashScope 错误体形如 {:code "InvalidApiKey" :message ... :request_id ...}，
+      ;; 没有 :error 键，绝不能当正常响应返回（否则鉴权/参数错误会静默变成空响应）。
+      ;; 统一抛 ex-info，对齐 anthropic/openai 的失败契约。
+      (when (>= status 400)
+        (let [parsed (try (json/parse-string body-str true) (catch Exception _ nil))]
+          (throw (ex-info "DashScope API call failed"
+                          {:status status
+                           :body (or parsed body-str)
+                           :code (:code parsed)
+                           :request-id (:request_id parsed)
+                           :provider :bailian
+                           ;; 429 与 5xx 视为瞬时可重试
+                           :retryable? (or (= status 429) (>= status 500))}))))
+      (try
+        (json/parse-string body-str true)
+        (catch Exception e
+          (throw (ex-info "DashScope response JSON parse error"
+                          {:body body-str
+                           :provider :bailian
+                           :retryable? false}
+                          e)))))))
 
 ;;; ============================================================
 ;;; 同步 API 调用
