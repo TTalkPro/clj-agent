@@ -175,10 +175,18 @@
    - x: 任意对象
 
    返回：
-   boolean"
+   boolean
+
+   注意：不能用 (satisfies? ILLMProvider x)。本协议为可选方法提供了
+   `extend-type Object` 默认实现，导致 satisfies? 对任意非 nil 对象都返回 true
+   （普通 map、字符串也会被误判为 provider）。改为精确判定：
+   - 内联 defrecord 实现 → 是协议生成接口的实例；
+   - extend/extend-protocol 注册的类型 → 出现在 :impls（排除 Object 兜底）。"
   [x]
   (and (some? x)
-       (satisfies? ILLMProvider x)))
+       (or (instance? (:on-interface ILLMProvider) x)
+           (some (fn [c] (and (not= Object c) (instance? c x)))
+                 (keys (:impls ILLMProvider))))))
 
 (defn call-with-tools
   "调用 LLM 并返回统一响应格式
