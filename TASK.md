@@ -52,8 +52,27 @@
 
 ### ⏳ 待办（架构级，建议各自专项推进，勿在常规改动中草率重构）
 
-- [ ] **BUG2 http-kit 伪流式**：`provider/http/client.clj`。`:as :stream` 全量缓冲，首 token 延迟失效、长生成超时掐断。**需替换 HTTP 客户端方案**（java.net.http / clj-http streaming），影响所有 provider 流式路径，须对真实端点验证。
-- [ ] **D5 错误模型统一**：把 ex-info / `{:status :error}` / `[:ok v]` / `{:success bool}` 四套收敛为一套；bailian 流式裸抛 UnsupportedOperationException 纳入归一化通道。跨多文件、改契约。
-- [ ] **D6 core 收回厂商 wire 知识**：`core/model/response.clj:55-159` 等硬编码各家 usage/finish-reason/thinking 形态。协议补 `extract-usage`/`extract-finish-reason`，wire 知识下沉 provider。
-- [ ] **D7（剩余）重复抽象合并**：4 份响应归一化（model.clj / service.clj / response_parser.clj / stream/openai.clj）合并为一处；core 内 `model/types.clj` 与 `model/message.clj` 双消息体系统一；删协议中无人消费的死方法（build-result-messages 等）。
+- [~] **BUG2 http-kit 伪流式 —— 传输层已落地并验证**（方案见 `design/streaming-async-design.md`）：
+  - [x] 实搜确认 http-kit 客户端流式是**官方已知限制**（issue #591，beta2 尝试后撤回），最新版仍做不了。
+  - [x] 新建 `provider/http/stream_client.clj`：**java.net.http `fromLineSubscriber`** 真流式——零依赖、虚拟线程 executor、`on-token/on-complete/on-error` + `cancel`、非 2xx 走 D5 canonical error。
+  - [x] **两条流式路径全部迁移**：anthropic（anthropic/minimax/zhipu）+ openai_compat（openai/deepseek/zhipu/gemini/mistral/ollama/openai-compat）；deepseek 测试改 stub 新传输。
+  - [x] **真实端点验证（MiniMax-M2.7 两个端点）**：Anthropic 端点 reasoning 分离、OpenAI 端点 token 逐个到达 + extract-text 完整。`examples/minimax_stream_test.clj`。
+  - [x] **live 测试逮到并修 2 个真 bug**：`http-response->error` 嵌套 map message → ClassCastException；stream_client 缺默认 Content-Type。均加回归测试。全套单测 **192/762/0**。
+  - [~] 待续：kernel/SimpleAgent `chat-stream` 接入、Undertow WebSocket 适配器示例、移除 http-kit 流式死代码（现已无 provider 调用）。
+- [~] **D5 错误模型统一**（核心已完成 2026-06-10，方案见 `design/error-model-unification.md`）：
+  - [x] 步骤1 `exception->error` 升级为幂等枢纽（透传 canonical ex-data + 识别 UnsupportedOperationException）
+  - [x] 步骤2 openai_compat / anthropic HTTP 失败改抛 canonical error（`http-response->error` + `throw!`）
+  - [x] 步骤3 bailian 同步失败 + 流式不支持均抛 canonical error（不再裸抛 UnsupportedOperationException）
+  - [x] 步骤6 README 错误模型说明更新
+  - [x] **修复真实 bug**：provider 401 此前经 `exception->error` 被笼统归为 `:provider-error`（∈可重试集）→ 被误标 `retryable? true`；现端到端保留 `:auth-error`/`:retryable? false`/`:status 401`。回归测试 client_test/model_test/providers_test。
+  - [~] 步骤4（kernel 工具错误渲染）、5（converter/factory payload）暂缓——边界 polish，收益有限，留待 D7 顺带（理由见设计文档 §7）
+- [~] **D6 core 收回厂商 wire 知识**（已定调，方案见 `design/response-path-consolidation.md`）：
+  - [x] 清掉 `call-with-tools` 后，usage/finish-reason/reasoning 归一化只剩 `model/response.clj` 单一权威来源（service/response_parser 都委托它）。
+  - [~] 保留 permissive 中立层（认识各家字段别名）——彻底协议化（加 `extract-usage`/`extract-finish-reason`）是破坏性变更，收益/破坏不成比例，留 v0.2。converter/json_schema 的 provider 分发同理暂缓。
+- [x] **D7 重复抽象——死代码清理已完成**（方案见 `design/response-path-consolidation.md`）：
+  - [x] 删协议死方法 `build-result-messages`/`build-assistant-message`（协议 + Object 默认 + 4 provider record + 全部测试 reify）——`:build-result-msgs` 构造即死，历史由 `response->neutral` 中立消息构建。
+  - [x] 删 `call-with-tools`（core 第 4 份冗余归一化，仅测试用）。
+  - [x] 删死响应字段 `response-assistant-msg`/`:assistant-msg`（恒 nil，无读取方）+ openai_compat 独立死函数 `build-assistant-message`。
+  - [x] 响应归一化从「4 份」收敛为 2 份活路径（同步 service + 流式 stream，输入不同，合理分工）。
+  - [~] **剩余：双消息体系统一**（`model/types.clj` vs `model/message.clj`）——改动整条消息数据流、高风险、无正确性 bug、转换边界正常工作，建议 v0.2 破坏性版本专项。
 - [ ] **测试盲区（增量）**：流式整链路（call-api-stream / process-sse-stream / 断流 / 非 2xx）、并发、timeout/approval filter、provider record 端到端 mock、工厂 env 配置。

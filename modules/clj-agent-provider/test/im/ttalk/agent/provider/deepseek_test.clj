@@ -4,10 +4,10 @@
             [clojure.string :as str]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.provider.http.client :as http]
+            [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.stream.openai :as oai-stream]
             [im.ttalk.agent.provider.common.openai-compat :as compat]
-            [im.ttalk.agent.provider.deepseek :as deepseek])
-  (:import [java.io ByteArrayInputStream]))
+            [im.ttalk.agent.provider.deepseek :as deepseek]))
 
 ;; ============================================================
 ;; mark-prefix
@@ -59,15 +59,9 @@
 ;; SSE 端到端：流式续写 + reasoning 分流 + 末块 usage/finish_reason
 ;; ============================================================
 
-(defn- sse-stream
-  "把 SSE 行拼成 InputStream（模拟 DeepSeek 流式响应体）"
-  [& lines]
-  (ByteArrayInputStream. (.getBytes (str (str/join "\n" lines) "\n") "UTF-8")))
-
 (deftest prefix-completion-sse-test
   (testing "SSE 流式：token 分流、末块 usage（含 cache hit/miss）与真实 finish_reason 被捕获"
-    (let [body (sse-stream
-                 "data: {\"id\":\"c2\",\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"先想\"}}]}"
+    (let [lines ["data: {\"id\":\"c2\",\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"先想\"}}]}"
                  ""
                  "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"一想\"}}]}"
                  ""
@@ -79,12 +73,23 @@
                  ""
                  "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":6,\"total_tokens\":16,\"prompt_cache_hit_tokens\":8,\"prompt_cache_miss_tokens\":2}}"
                  ""
-                 "data: [DONE]")
+                 "data: [DONE]"]
           ans (StringBuilder.)
           think (StringBuilder.)]
-      (with-redefs [http/post-stream (fn [url & _]
-                                       (is (= "https://api.deepseek.com/beta/chat/completions" url))
-                                       {:status 200 :success? true :body body})]
+      ;; stub 新的真流式传输：回放 SSE 行，驱动与生产同一个 parse-fn/process-fn
+      (with-redefs [stream-client/post-stream-async
+                    (fn [url {:keys [parse-fn process-fn initial-state on-token on-complete]}]
+                      (is (= "https://api.deepseek.com/beta/chat/completions" url))
+                      (let [final (reduce (fn [st line]
+                                            (if-let [ev (parse-fn line)]
+                                              (let [[nst tok] (process-fn ev st)]
+                                                (when (and tok on-token) (on-token tok))
+                                                nst)
+                                              st))
+                                          initial-state lines)]
+                        (on-complete final))
+                      {:future (java.util.concurrent.CompletableFuture/completedFuture nil)
+                       :cancel (fn [])})]
         (let [r (deepseek/call-prefix-completion-stream
                   {:model "deepseek-reasoner" :api-key "k"}
                   [{:role "assistant" :content "春天的风"}]

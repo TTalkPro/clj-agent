@@ -118,5 +118,11 @@
     (let [p (llm/create-provider :bailian {:api-key "k"})]
       (is (= :bailian (model/provider-name p)))
       (is (false? (model/supports-stream? p)))
-      (is (thrown? UnsupportedOperationException
-                   (model/call-llm-stream p {:model "qwen-plus"} [] [] (fn [_])))))))
+      ;; D5：流式改抛 canonical error（ExceptionInfo，data 为 canonical error map，不可重试），
+      ;; 不再裸抛 UnsupportedOperationException
+      (let [ex (try (model/call-llm-stream p {:model "qwen-plus"} [] [] (fn [_]))
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+        (is (some? ex))
+        (is (= :validation-error (:type (ex-data ex))))
+        (is (false? (:retryable? (ex-data ex))))))))

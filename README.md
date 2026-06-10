@@ -34,7 +34,8 @@ Clojure AI Agent Framework - Kernel 中央编排器
 - **Filter 中间件**：洋葱式 around 链（对标 Spring AI Advisor），:chat / :tool 两类，可短路/重试/计时
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
 - **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、百炼 及 OpenAI 兼容协议
-- **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error}`（可配 `:on-error`）
+- **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error :error <规范错误 map>}`（可配 `:on-error`）
+- **统一错误模型**：失败统一用规范错误 map `{:type :message :retryable? :status :provider}`（见 `im.ttalk.agent.model.error`）。各边界封装一致：provider I/O 失败抛 `ex-info`（data 即规范错误）、配置/解析返回 `[:ok]/[:error]`、SimpleAgent 返回 `{:status :error}`、工具错误渲染成字符串喂回 LLM——彼此可单向转换，`:retryable?`/`:status` 全程不丢（如 401 始终不可重试）
 - **ChatMemory**：按 conversation-id 持久化对话历史（in-memory / windowed / SQLite，SQLite store 实现 `Closeable`）
 
 ## 架构概览
