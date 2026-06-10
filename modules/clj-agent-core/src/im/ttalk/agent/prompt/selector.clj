@@ -17,6 +17,7 @@
    ;; 选择示例
    (select-examples selector {:input \"World\"})"
   (:require [im.ttalk.agent.prompt.protocol :as proto]
+            [clojure.set]
             [clojure.string :as str]))
 
 ;; ============================================================

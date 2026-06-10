@@ -11,7 +11,11 @@
    (def template (prompt-template \"你好，{name}！\"))
 
    ;; 格式化提示词
-   (format-prompt template {:name \"张三\"})")
+   (format-prompt template {:name \"张三\"})"
+  ;; validate-variables / format-safe 用到这两个 ns；此前未 require，仅因其他
+  ;; ns（如 tool.clj）先 require 了 clojure.set 才偶然能跑，单独 AOT 会编译失败。
+  (:require [clojure.set]
+            [clojure.string]))
 
 ;; ============================================================
 ;; 提示词模板协议
