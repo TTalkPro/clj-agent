@@ -420,19 +420,19 @@
 ;; 重试和容错
 ;; ============================================================
 
-(defn with-retry
-  "带重试的请求包装
+(defn ^:deprecated with-retry
+  "【已废弃】带重试的请求包装。请改用 im.ttalk.agent.provider.http.retry/maybe-with-retry
+   或 retry/with-retry —— 那里有错误分类（只重试 5xx/429/网络）、指数退避 + 抖动、
+   Retry-After 支持。
+
+   ⚠️ 本函数的默认 :retry-on `(fn [r] (not (:success? r)))` 会对**所有**非 2xx
+   （含 400/401/404 等不可重试错误）盲目重试，且为固定间隔、无退避无抖动。仅保留以
+   兼容历史调用，新代码勿用。
 
    选项:
    - :max-retries 最大重试次数（默认 3）
    - :retry-delay 重试间隔毫秒数（默认 1000）
-   - :retry-on    重试条件函数 (fn [response] bool)
-
-   示例:
-   (with-retry
-     #(get \"https://api.example.com/data\")
-     :max-retries 3
-     :retry-delay 2000)"
+   - :retry-on    重试条件函数 (fn [response] bool)"
   [request-fn & {:keys [max-retries retry-delay retry-on]
                  :or {max-retries 3
                       retry-delay 1000

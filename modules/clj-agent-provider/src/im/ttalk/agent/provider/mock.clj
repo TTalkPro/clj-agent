@@ -38,9 +38,12 @@
 
   (call-llm [this config messages tools]
     (let [user-message (last messages)
-          mock-response (or (:mock-response config)
-                            (:mock-response @(:config this))
-                            (default-mock-response (:content user-message)))
+          raw (or (:mock-response config)
+                  (:mock-response @(:config this))
+                  (default-mock-response (:content user-message)))
+          ;; 函数型 mock-response：调用之（可抛异常做错误注入，或按入参动态生成）。
+          ;; 否则会把函数对象当文本返回，create-error-mock 永不抛错。
+          mock-response (if (fn? raw) (raw user-message) raw)
           result {:text mock-response
                   :mock true
                   :timestamp (System/currentTimeMillis)}]
@@ -106,9 +109,10 @@
    - provider: MockLLMProvider 实例
 
    返回：
-   调用记录列表 [{:type :call :config ... :messages ... :result ...}]"
+   调用记录列表 [{:type :call :config ... :messages ... :result ...}]
+   （record-history? 为 false 时无历史，返回 []）"
   [provider]
-  @(:call-history provider))
+  (if-let [h (:call-history provider)] @h []))
 
 (defn clear-call-history
   "清空 Mock Provider 的调用历史
@@ -119,7 +123,8 @@
    返回：
    空列表 []"
   [provider]
-  (reset! (:call-history provider) []))
+  (when-let [h (:call-history provider)] (reset! h []))
+  [])
 
 (defn set-mock-response
   "设置 Mock Provider 的默认响应
