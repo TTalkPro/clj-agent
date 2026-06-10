@@ -219,7 +219,10 @@
         terminal (fn [req]
                    (let [exec (try (tool/invoke tool-var (:args req) (:context req))
                                    (catch Exception e
-                                     {:success false :error (.getMessage e)}))
+                                     ;; getMessage 可能为 nil（如 NPE）→ 回退类名，避免 "错误: " 空串
+                                     {:success false
+                                      :error (or (not-empty (.getMessage e))
+                                                 (.getName (class e)))}))
                          value (if (:success exec)
                                  (:result exec)
                                  (str "错误: " (:error exec)))]

@@ -421,4 +421,7 @@
          new-context (assoc :context new-context)))
      (catch Exception e
        {:success false
-        :error (.getMessage e)}))))
+        ;; NPE 等异常 getMessage 为 nil，直接用会喂给 LLM 空错误 "错误: "；
+        ;; 回退异常类名，保证错误可读。
+        :error (or (not-empty (.getMessage e))
+                   (.getName (class e)))}))))
