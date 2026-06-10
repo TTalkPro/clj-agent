@@ -15,7 +15,8 @@
 
    环境变量:
      ZHIPU_API_KEY - 智谱 AI API Key（必需）"
-  (:require [im.ttalk.agent.tool :refer [deftool]]
+  (:require [clojure.edn]
+            [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.client :as ka]
             [im.ttalk.agent.client :as pa]
@@ -36,11 +37,25 @@
   []
   (str (java.time.LocalDateTime/now)))
 
+;; 安全算术求值：仅允许 + - * / mod quot 及数字，绝不使用 eval/read-string，
+;; 避免把 LLM 输出当代码执行（RCE，可借此读取进程内 API key）。
+(def ^:private allowed-ops
+  {'+ + '- - '* * '/ / 'mod mod 'quot quot 'rem rem})
+
+(defn- safe-eval-arith [form]
+  (cond
+    (number? form) form
+    (and (seq? form) (symbol? (first form)))
+    (if-let [op (allowed-ops (first form))]
+      (apply op (map safe-eval-arith (rest form)))
+      (throw (ex-info (str "不支持的运算符: " (first form)) {:form form})))
+    :else (throw (ex-info (str "非法表达式: " (pr-str form)) {:form form}))))
+
 (deftool calculate
-  "计算数学表达式"
-  [[expression :string "数学表达式，如 2+3*4"]]
+  "计算数学表达式（前缀表达式，如 (+ 2 (* 3 4))）"
+  [[expression :string "数学表达式"]]
   (try
-    (str "结果: " (eval (read-string expression)))
+    (str "结果: " (safe-eval-arith (clojure.edn/read-string expression)))
     (catch Exception e
       (str "计算错误: " (.getMessage e)))))
 
