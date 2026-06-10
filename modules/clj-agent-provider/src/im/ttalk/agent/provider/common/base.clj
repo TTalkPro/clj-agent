@@ -258,15 +258,17 @@
   "创建 Provider 并应用额外选项
 
    参数：
-   - config: Provider 配置 atom
-   - opts:   额外选项
+   - config: 默认配置 atom（共享的 provider 默认值，只读快照）
+   - opts:   额外选项（每实例独立，如 :api-key / :base-url）
 
    返回：
-   OpenAICompatProvider 实例"
+   OpenAICompatProvider 实例
+
+   注意：每个实例持有从默认值快照 + opts 派生的**独立** config atom，
+   绝不就地 mutate 共享的全局默认 atom——否则多实例（多租户 / 多 key /
+   主备 key）会互相覆盖、并发创建有竞态。"
   [config opts]
-  (when opts
-    (update-config! config opts))
-  (->OpenAICompatProvider config))
+  (->OpenAICompatProvider (atom (merge @config opts))))
 
 ;;; ============================================================
 ;;; 便捷宏：定义 Provider
@@ -354,8 +356,9 @@
                   (throw (ex-info ~(str name-str " provider requires :model option")
                                   {:required :model})))])
           (let [~prov (create-provider-with-opts ~config-sym ~opts)]
+            ;; 校验实例自身的 config（含本次 opts 的 :api-key），不是共享默认 atom
             ~@(when require-api-key?
-                [`(when (clojure.string/blank? (get-api-key ~config-sym))
+                [`(when (clojure.string/blank? (get-api-key (:config ~prov)))
                     (throw (ex-info ~(str name-str " provider requires :api-key or " env-key)
                                     {:required :api-key})))])
             ~prov))))))

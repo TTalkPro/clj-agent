@@ -31,6 +31,17 @@
       #(minimax/create-provider {:api-key "k"})    :minimax
       #(ollama/create-provider {:model "llama2"})  :ollama)))
 
+(deftest multi-instance-config-isolation
+  (testing "同类 provider 多实例持有独立 config，不互相覆盖 key/base-url（回归 D1）"
+    (let [p1 (openai/create-provider {:api-key "KEY-A" :base-url "https://a.example"})
+          p2 (openai/create-provider {:api-key "KEY-B" :base-url "https://b.example"})]
+      ;; 修复前：两实例共享全局 default-config atom，identical? 为 true 且 KEY-A 被覆盖
+      (is (not (identical? (:config p1) (:config p2))))
+      (is (= "KEY-A" (:api-key @(:config p1))))
+      (is (= "KEY-B" (:api-key @(:config p2))))
+      (is (= "https://a.example" (:base-url @(:config p1))))
+      (is (= "https://b.example" (:base-url @(:config p2)))))))
+
 ;;; ============================================================
 ;;; 宏选项：:require-api-key?
 ;;; ============================================================
