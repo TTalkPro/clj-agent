@@ -55,7 +55,7 @@
 - [~] **BUG2 http-kit 伪流式 —— 传输层已落地并验证**（方案见 `design/streaming-async-design.md`）：
   - [x] 实搜确认 http-kit 客户端流式是**官方已知限制**（issue #591，beta2 尝试后撤回），最新版仍做不了。
   - [x] 新建 `provider/http/stream_client.clj`：**java.net.http `fromLineSubscriber`** 真流式——零依赖、虚拟线程 executor、`on-token/on-complete/on-error` + `cancel`、非 2xx 走 D5 canonical error。
-  - [x] **两条流式路径全部迁移**：anthropic（anthropic/minimax/zhipu）+ openai_compat（openai/deepseek/zhipu/gemini/mistral/ollama/openai-compat）；deepseek 测试改 stub 新传输。
+  - [x] **三条流式路径全部上真流式**：anthropic（anthropic/minimax/zhipu）+ openai_compat（openai/deepseek/zhipu/gemini/mistral/ollama/openai-compat）+ **DashScope 原生 SSE**（X-DashScope-SSE + incremental_output，专属 `stream/dashscope.clj` 解析器，`supports-stream? true`）；deepseek 测试改 stub 新传输。**全部内置 provider 现均支持流式**。
   - [x] **真实端点验证（MiniMax-M2.7 两个端点）**：Anthropic 端点 reasoning 分离、OpenAI 端点 token 逐个到达 + extract-text 完整。`examples/minimax_stream_test.clj`。
   - [x] **live 测试逮到并修 2 个真 bug**：`http-response->error` 嵌套 map message → ClassCastException；stream_client 缺默认 Content-Type。均加回归测试。全套单测 **192/762/0**。
   - [x] **移除 http-kit 流式死代码 + 废弃 with-retry**：`http/client.clj` 删 `stream-request`/`request-stream`/`post-stream`/`process-sse-stream`/`post-stream-async`/`stream-sse`/`parse-sse-line`/`with-retry`（605→263 行），ns 文档改为"仅非流式"；删对应死测试。该模块现只剩非流式请求。

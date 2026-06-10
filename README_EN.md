@@ -12,7 +12,7 @@ English | [中文](README.md)
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM); the tool-calling loop is provided by SimpleAgent
 - **Filter Middleware**: onion-style around chain (mirrors Spring AI Advisor), :chat / :tool phases, can short-circuit/retry/time
 - **Service Abstraction**: LLM services via `{:chat-fn :build-result-msgs}` map, zero coupling
-- **Multi-Provider Support**: Anthropic, OpenAI, DeepSeek, Zhipu, Ollama, Gemini, Mistral, MiniMax, Bailian, and OpenAI-compatible protocols
+- **Multi-Provider Support**: Anthropic, OpenAI, DeepSeek, Zhipu, Ollama, Gemini, Mistral, MiniMax, DashScope (Alibaba), and OpenAI-compatible protocols
 - **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval; LLM/tool errors normalized to `{:status :error}` (configurable `:on-error`)
 - **ChatMemory**: per-conversation-id history persistence (in-memory / windowed / SQLite; the SQLite store is `Closeable`)
 
@@ -301,14 +301,16 @@ Context manages shared state within a conversation:
 | `:mistral` | Mistral | `MISTRAL_API_KEY` |
 | `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` |
 | `:minimax` | MiniMax (Anthropic-compatible endpoint) | `MINIMAX_API_KEY` |
-| `:bailian` | Alibaba Bailian / DashScope (sync only) | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` |
+| `:dashscope` | Alibaba DashScope (native SSE streaming) | `DASHSCOPE_API_KEY` |
 | `:openai-compat` | OpenAI-compatible protocol | Custom |
 
 > Advanced per-provider capabilities (structured output, parallel tool calls,
 > `reasoning_effort`, Anthropic prompt caching / web_search / citations / skills,
 > DeepSeek reasoning & prefix completion, etc.) are documented in the
 > [`clj-agent-provider` README](modules/clj-agent-provider/README.md). All providers
-> support both **sync** and **streaming (SSE)** (Bailian is sync-only).
+> support both **sync** and **streaming (SSE)** — including DashScope's native SSE
+> (`X-DashScope-SSE` + `incremental_output`). If a provider doesn't support streaming,
+> the service auto-falls back to sync and emits the full text as a single token.
 
 ### Creating Providers
 

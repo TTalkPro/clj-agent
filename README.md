@@ -33,7 +33,7 @@ Clojure AI Agent Framework - Kernel 中央编排器
 - **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）；工具调用循环由 SimpleAgent 提供
 - **Filter 中间件**：洋葱式 around 链（对标 Spring AI Advisor），:chat / :tool 两类，可短路/重试/计时
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
-- **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、百炼 及 OpenAI 兼容协议
+- **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）及 OpenAI 兼容协议
 - **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error :error <规范错误 map>}`（可配 `:on-error`）
 - **统一错误模型**：失败统一用规范错误 map `{:type :message :retryable? :status :provider}`（见 `im.ttalk.agent.model.error`）。各边界封装一致：provider I/O 失败抛 `ex-info`（data 即规范错误）、配置/解析返回 `[:ok]/[:error]`、SimpleAgent 返回 `{:status :error}`、工具错误渲染成字符串喂回 LLM——彼此可单向转换，`:retryable?`/`:status` 全程不丢（如 401 始终不可重试）
 - **ChatMemory**：按 conversation-id 持久化对话历史（in-memory / windowed / SQLite，SQLite store 实现 `Closeable`）
@@ -64,7 +64,7 @@ graph TB
         GM[Gemini]
         MS[Mistral]
         MM[MiniMax]
-        BL[百炼]
+        BL[DashScope]
     end
 
     SA --> K
@@ -379,17 +379,19 @@ Context 管理对话中的共享状态：
 | `:mistral` | Mistral | `MISTRAL_API_KEY` | mistral-large-latest |
 | `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | deepseek-chat, deepseek-reasoner |
 | `:minimax` | MiniMax（Anthropic 兼容端点） | `MINIMAX_API_KEY` | MiniMax-M2 |
-| `:bailian` | 阿里云百炼 / DashScope（仅同步） | `BAILIAN_API_KEY` / `DASHSCOPE_API_KEY` | qwen-plus, qwen-max |
+| `:dashscope` | 阿里云 DashScope（原生 SSE 流式） | `DASHSCOPE_API_KEY` | qwen-plus, qwen-max |
 | `:openai-compat` | OpenAI 兼容协议 | 自定义 | 取决于后端 |
 
 > **各家进阶能力**（结构化输出、并行工具调用、`reasoning_effort`、Anthropic prompt
 > caching / web_search / citations / skills、DeepSeek 推理与前缀续写等）详见
 > [`clj-agent-provider` README](modules/clj-agent-provider/README.md)。
 >
-> **关于流式**：provider 层提供 `call-llm-stream`（SSE，百炼暂不支持，调用即抛
-> `UnsupportedOperationException`）。注意：流式目前**仅在 provider 层可用**，尚未接入
-> Kernel / SimpleAgent / Filter / Memory 主链路——需要流式时直接调用 provider 的
-> `call-llm-stream`，此时不经过工具循环与历史持久化。
+> **关于流式**：真增量 SSE 传输基于 JDK `java.net.http`（见 `design/streaming-async-design.md`），
+> 已接入主链路——`client/chat-stream` 在 ReAct 循环里逐 token 流出、`on-complete` 落库，
+> 与同步对话历史不分叉，并支持取消令牌（断连即停）。**所有内置 provider 均支持流式**
+> （含 DashScope 原生 SSE：`X-DashScope-SSE` + `incremental_output`）；个别 provider 若不支持，
+> service 会自动回退同步并把全文作为单个 token emit。
+> Web 框架（http-kit / Undertow / Jetty / Aleph）的 WebSocket/SSE 集成示例见 `examples/streaming/`。
 
 ### 创建 Provider
 
