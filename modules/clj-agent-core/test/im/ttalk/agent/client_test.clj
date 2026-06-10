@@ -13,6 +13,7 @@
             [im.ttalk.agent.memory.sqlite :as sqlite]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.model :as provider])
   (:import [java.io File]))
 
@@ -111,6 +112,46 @@
       (is (= :completed (:status r)))
       (is (= "回复内容" (:text r)))
       (is (= ["回复内容"] @tokens)))))               ;; 单个 token（整段）
+
+(defn- cancellable-provider
+  "流式 mock：call-llm-stream 登记一个 cancel-fn（解除阻塞），emit 一个 token 后
+   **阻塞**直到被取消——模拟真 provider 的在途流。"
+  []
+  (reify provider/ILLMProvider
+    (provider-name [_] :cancel-mock)
+    (call-llm [_ _ _ _] {:text "a" :tool-calls nil})
+    (call-llm-stream [_ _ _ _ on-token]
+      (let [unblock (promise)]
+        (streaming/register-cancel! (fn [] (deliver unblock :cancel)))   ;; 应用 request-cancel! 时触发
+        (when on-token (on-token {:token "a"}))
+        (deref unblock 3000 :timeout)                                    ;; 阻塞直到取消（兜底 3s）
+        {:text "a" :tool-calls nil}))
+    (extract-tool-calls [_ r] (:tool-calls r))
+    (extract-text [_ r] (:text r))
+    (build-tool-result [_ tid c] {:role "tool" :tool_call_id tid :content c})
+    (supports-function-calling? [_] true)
+    (supports-stream? [_] true)
+    (tool->schema [_ t] t)))
+
+(deftest chat-stream-cancel-test
+  (testing "request-cancel! 中止流式：登记的 cancel 被调用，循环返回 :cancelled，无更多 token"
+    (let [tokens (atom [])
+          token  (streaming/make-cancel-token)
+          a (agent/create-agent {:provider (cancellable-provider) :model "test"})
+          result (promise)]
+      (future (deliver result
+                       (agent/chat-stream a "hi"
+                         (fn [t] (when (:token t) (swap! tokens conj (:token t))))
+                         {:cancel-token token})))
+      ;; 等第一个 token 流出（provider 此时阻塞在 unblock 上）
+      (loop [i 0] (when (and (empty? @tokens) (< i 300)) (Thread/sleep 10) (recur (inc i))))
+      (is (= ["a"] @tokens))
+      ;; 请求取消 → 触发登记的 cancel-fn → provider 解除阻塞返回 → 循环检测到取消
+      (streaming/request-cancel! token)
+      (let [r (deref result 5000 :timeout)]
+        (is (= :cancelled (:status r)))
+        (is (= ["a"] @tokens))               ;; 取消后不再有 token
+        (is (true? (streaming/cancelled? token)))))))
 
 (deftest chat-stream-with-tools-test
   (testing "工具回合不流正文，最终文本回合逐 token；历史含完整 tool 链"
