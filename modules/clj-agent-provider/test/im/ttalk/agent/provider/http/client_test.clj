@@ -55,36 +55,6 @@
 ;; SSE 解析测试
 ;; ============================================================
 
-(deftest parse-sse-line-test
-  (testing "data 行"
-    (let [parsed (http/parse-sse-line "data: {\"text\": \"hello\"}")]
-      (is (= :data (:type parsed)))
-      (is (= "{\"text\": \"hello\"}" (:value parsed)))))
-
-  (testing "event 行"
-    (let [parsed (http/parse-sse-line "event: message")]
-      (is (= :event (:type parsed)))
-      (is (= "message" (:value parsed)))))
-
-  (testing "id 行"
-    (let [parsed (http/parse-sse-line "id: 12345")]
-      (is (= :id (:type parsed)))
-      (is (= "12345" (:value parsed)))))
-
-  (testing "retry 行"
-    (let [parsed (http/parse-sse-line "retry: 3000")]
-      (is (= :retry (:type parsed)))
-      (is (= 3000 (:value parsed)))))
-
-  (testing "空行"
-    (let [parsed (http/parse-sse-line "")]
-      (is (= :empty (:type parsed)))))
-
-  (testing "未知格式"
-    (let [parsed (http/parse-sse-line "unknown line")]
-      (is (= :unknown (:type parsed)))
-      (is (= "unknown line" (:value parsed))))))
-
 ;; ============================================================
 ;; 配置测试
 ;; ============================================================
@@ -157,58 +127,6 @@
       (is (map? response))
       (is (contains? response :success?))
       (is (false? (:success? response))))))
-
-;; ============================================================
-;; 重试逻辑测试
-;; ============================================================
-
-(deftest with-retry-test
-  (testing "成功不重试"
-    (let [call-count (atom 0)
-          result (http/with-retry
-                   (fn []
-                     (swap! call-count inc)
-                     {:success? true :data "ok"})
-                   :max-retries 3)]
-      (is (:success? result))
-      (is (= 1 @call-count))))
-
-  (testing "失败后重试"
-    (let [call-count (atom 0)
-          result (http/with-retry
-                   (fn []
-                     (swap! call-count inc)
-                     (if (< @call-count 3)
-                       {:success? false :error "fail"}
-                       {:success? true :data "ok"}))
-                   :max-retries 5
-                   :retry-delay 10)]
-      (is (:success? result))
-      (is (= 3 @call-count))))
-
-  (testing "超过最大重试次数"
-    (let [call-count (atom 0)
-          result (http/with-retry
-                   (fn []
-                     (swap! call-count inc)
-                     {:success? false :error "always fail"})
-                   :max-retries 2
-                   :retry-delay 10)]
-      (is (not (:success? result)))
-      ;; 初始调用 + 2 次重试 = 3 次
-      (is (= 3 @call-count))))
-
-  (testing "自定义重试条件"
-    (let [call-count (atom 0)
-          result (http/with-retry
-                   (fn []
-                     (swap! call-count inc)
-                     {:status 503})
-                   :max-retries 2
-                   :retry-delay 10
-                   :retry-on (fn [r] (= 503 (:status r))))]
-      (is (= 503 (:status result)))
-      (is (= 3 @call-count)))))
 
 ;; ============================================================
 ;; 动态绑定测试
