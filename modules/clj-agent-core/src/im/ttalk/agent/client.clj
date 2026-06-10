@@ -33,7 +33,16 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.react :as agent-loop]
             [im.ttalk.agent.common :as common]
+            [im.ttalk.agent.streaming :as streaming]
             [taoensso.timbre :as log]))
+
+;; 便捷再导出：取消令牌（亦可直接 require im.ttalk.agent.streaming）
+(def make-cancel-token
+  "创建取消令牌，传给 chat-stream 的 opts :cancel-token。见 im.ttalk.agent.streaming。"
+  streaming/make-cancel-token)
+(def request-cancel!
+  "请求取消 chat-stream（取消上游 + 停止循环）。见 im.ttalk.agent.streaming。"
+  streaming/request-cancel!)
 
 ;;; ============================================================
 ;;; 创建
@@ -140,6 +149,13 @@
          :pending-tool (:pending-tool result)
          :tool-calls-made (:tool-calls-made result)})
 
+    ;; 流式被取消（应用层 request-cancel!）：干净终止，非错误。token 已流给用户。
+    :cancelled
+    (do (clojure.core/reset! (:state-atom agent) {:status :idle :paused-state nil})
+        {:status :cancelled
+         :text (get-in result [:response :text])
+         :tool-calls-made (:tool-calls-made result)})
+
     ;; LLM/工具循环异常：归一化为错误结果，不向调用方抛裸异常
     :error
     (do (clojure.core/reset! (:state-atom agent) {:status :error :paused-state nil})
@@ -200,6 +216,10 @@
    对话历史在每个回合流结束时落库，与 chat **不分叉**。provider 不支持流式时由 service 回退同步
    并把全文作为单个 token emit。
 
+   取消：opts 传 `:cancel-token`（`im.ttalk.agent.streaming/make-cancel-token`）即可在另一线程
+   `request-cancel!` 中止——取消上游 HTTP（停止烧 token）并让循环停在当前回合，返回
+   `{:status :cancelled}`。
+
    注意：单个 agent 实例不可并发（见 ns 线程安全说明）。"
   ([agent message on-token] (chat-stream agent message on-token nil))
   ([agent message on-token opts]
@@ -211,7 +231,8 @@
                  :on-token on-token
                  :max-iterations (or (:max-iterations opts)
                                      (:max-iterations (:settings agent)) 10)}
-          (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
+          (:tool-choice opts)  (assoc :tool-choice (:tool-choice opts))
+          (:cancel-token opts) (assoc :cancel-token (:cancel-token opts))
           (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))))))
 
 (defn paused?

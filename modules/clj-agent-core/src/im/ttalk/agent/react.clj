@@ -14,7 +14,8 @@
             [im.ttalk.agent.tool :as tool]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.memory :as memory]))
+            [im.ttalk.agent.memory :as memory]
+            [im.ttalk.agent.streaming :as streaming]))
 
 (def ^:private default-max-iterations
   "工具调用循环默认最大次数"
@@ -51,7 +52,9 @@
     (cond-> {:tools tool-schemas :tool-choice tool-choice}
       sp-str (assoc :system-prompt sp-str)
       ;; 流式：on-token 透传，run-tool-loop 据此走 invoke-chat-stream
-      (:on-token opts) (assoc :on-token (:on-token opts)))))
+      (:on-token opts) (assoc :on-token (:on-token opts))
+      ;; 取消令牌：循环据它在回合间停止，并把在途 cancel 登记给它
+      (:cancel-token opts) (assoc :cancel-token (:cancel-token opts)))))
 
 (defn execute-batch
   "按 gate 决策执行一批工具调用，产出中立 tool 结果消息 + 记录 + 更新后的 ToolContext。
@@ -116,7 +119,11 @@
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {:tool-calls :remaining :records} :pending-tool {...} :tool-context c}"
   [kernel delta remaining records tctx gate chat-opts]
-  (loop [delta delta, remaining remaining, records records, tctx tctx]
+  (let [token (:cancel-token chat-opts)]
+   (loop [delta delta, remaining remaining, records records, tctx tctx]
+    ;; 回合间取消检查：上一回合后若被请求取消，则不再发起下一个 LLM 调用
+    (if (streaming/cancelled? token)
+      {:status :cancelled :tool-context tctx :tool-calls-made records}
     ;; 注意：不在 loop 顶部检查上限。否则会在「最后一批工具已执行（副作用已发生）、
     ;; 但其 tool-result 尚未经 invoke-chat→memory-filter 落库」之际抛异常，导致结果丢失、
     ;; 历史留下悬空 tool_use（下一轮 heal 误标"已取消"，与实际相反）。
@@ -124,13 +131,20 @@
     ;; 仍要调工具、却已无预算处理其结果时，才在 execute-batch 之前抛出（绝不执行无法落库的批次）。
     (let [;; 每个 LLM 回合：有 on-token 走流式（invoke-chat-stream），否则同步。
           ;; 工具回合通常无 :token（只产 tool_calls），最终文本回合才逐 token 流给用户。
+          ;; 流式时把 *register-cancel* 绑到 token，provider 据此登记在途 cancel-fn。
           {:keys [response context]}
           (if (:on-token chat-opts)
-            (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx))
+            (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
+              (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx)))
             (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
           tctx context
           calls (response/response-tool-calls response)]
       (cond
+        ;; 本回合进行中被取消：返回 :cancelled（token 已流给用户）
+        (streaming/cancelled? token)
+        {:status :cancelled :response response
+         :tool-context tctx :tool-calls-made records}
+
         (empty? calls)
         {:status :completed :response response
          :tool-context tctx :tool-calls-made records}
@@ -156,7 +170,7 @@
         :else
         (let [{:keys [messages records context]}
               (execute-batch kernel calls gate tctx records)]
-          (recur messages (dec remaining) records context))))))
+          (recur messages (dec remaining) records context))))))))
 
 (defn invoke
   "工具调用循环主入口（统一循环）。
