@@ -71,7 +71,10 @@
           (let [{:keys [value context]}
                 (try (kernel/invoke-tool kernel fn-key (:input tc) context)
                      (catch Exception e
-                       {:value (str "错误: " (.getMessage e)) :context context}))]
+                       ;; getMessage 可能为 nil（如 NPE）→ 回退类名，避免 "错误: " 空串
+                       {:value (str "错误: " (or (not-empty (.getMessage e))
+                                                 (.getName (class e))))
+                        :context context}))]
             {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
              :records  (conj records {:name fn-key :args (:input tc) :result value})
              :context  context}))))
@@ -112,12 +115,11 @@
    {:status :paused    :loop-state {:tool-calls :remaining :records} :pending-tool {...} :tool-context c}"
   [kernel delta remaining records tctx gate chat-opts]
   (loop [delta delta, remaining remaining, records records, tctx tctx]
-    (when (zero? remaining)
-      ;; payload 用已执行的工具记录数（之前误报恒为 0 的 remaining）
-      (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
-                      {:reason :max-iterations-exceeded
-                       :tool-call-count (count records)
-                       :tool-calls-made records})))
+    ;; 注意：不在 loop 顶部检查上限。否则会在「最后一批工具已执行（副作用已发生）、
+    ;; 但其 tool-result 尚未经 invoke-chat→memory-filter 落库」之际抛异常，导致结果丢失、
+    ;; 历史留下悬空 tool_use（下一轮 heal 误标"已取消"，与实际相反）。
+    ;; 改为：先让 invoke-chat 落库上一批结果并给 LLM 产出最终文本的机会；只有当 LLM
+    ;; 仍要调工具、却已无预算处理其结果时，才在 execute-batch 之前抛出（绝不执行无法落库的批次）。
     (let [{:keys [response context]} (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx))
           tctx context
           calls (response/response-tool-calls response)]
@@ -136,6 +138,13 @@
                           :tool-call paused-call}
            :tool-calls-made records
            :tool-context tctx})
+
+        ;; 还要调工具但预算耗尽（含 max-iterations<=0 的退化/负数配置）：不执行，直接抛
+        (<= remaining 0)
+        (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
+                        {:reason :max-iterations-exceeded
+                         :tool-call-count (count records)
+                         :tool-calls-made records}))
 
         :else
         (let [{:keys [messages records context]}
