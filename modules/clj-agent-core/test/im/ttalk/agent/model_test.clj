@@ -423,7 +423,27 @@
       (is (= :provider-error (:type e)))))
   (testing "无 message 用类名兜底"
     (let [e (errors/exception->error (RuntimeException.))]
-      (is (string? (:message e))))))
+      (is (string? (:message e)))))
+  (testing "ex-info 携带 canonical error 时幂等透传（保留 :type/:status/:retryable?）（D5 枢纽）"
+    ;; 模拟 provider 用 errors/throw! 抛出的 401：不可重试，绝不能被重新归为 :provider-error
+    (let [orig (errors/error :auth-error "Unauthorized" {:status 401 :provider :openai})
+          e (errors/exception->error (ex-info "Unauthorized" orig))]
+      (is (= :auth-error (:type e)))
+      (is (false? (:retryable? e)))      ;; 修复前会变成 :provider-error → retryable? true
+      (is (= 401 (:status e)))
+      (is (= :openai (:provider e)))))
+  (testing "透传时叠加外层 context"
+    (let [orig (errors/error :rate-limit-error "slow" {:status 429})
+          e (errors/exception->error (ex-info "slow" orig) {:op "call-llm"})]
+      (is (= :rate-limit-error (:type e)))
+      (is (= {:op "call-llm"} (:context e)))))
+  (testing "普通 ex-info（data 非 canonical）仍按 class 分类"
+    (let [e (errors/exception->error (ex-info "x" {:foo 1}))]
+      (is (= :provider-error (:type e)))))
+  (testing "UnsupportedOperationException -> validation-error，不可重试"
+    (let [e (errors/exception->error (UnsupportedOperationException. "stream not supported"))]
+      (is (= :validation-error (:type e)))
+      (is (false? (:retryable? e))))))
 
 (deftest test-http-response->error
   (testing "状态码映射到错误类型与可重试性"

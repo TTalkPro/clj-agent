@@ -144,6 +144,15 @@
          base-opts (cond-> {:cause e}
                      context (assoc :context context))]
      (cond
+       ;; ★ 幂等透传：ex-info 且 data 本身已是 canonical error（如 provider 用
+       ;; errors/throw! 抛出）—— 直接取出，保留其已算好的 :type/:status/:retryable?，
+       ;; 不再笼统归为 :provider-error（否则会把不可重试的 401 误标成可重试）。
+       ;; 仅在外层显式传 context 时叠加，避免覆盖已有 :context。
+       (and (instance? clojure.lang.ExceptionInfo e)
+            (error? (ex-data e)))
+       (cond-> (ex-data e)
+         context (assoc :context context))
+
        ;; IO 异常 -> 网络错误
        (instance? IOException e)
        (error :network-error msg base-opts)
@@ -152,6 +161,10 @@
        (or (instance? java.util.concurrent.TimeoutException e)
            (str/includes? (str (class e)) "Timeout"))
        (error :timeout-error msg base-opts)
+
+       ;; 不支持的能力（如 provider 流式未实现）-> 参数/能力类，明确不可重试
+       (instance? UnsupportedOperationException e)
+       (error :validation-error msg (assoc base-opts :retryable? false))
 
        ;; 其他异常 -> Provider 错误
        :else
