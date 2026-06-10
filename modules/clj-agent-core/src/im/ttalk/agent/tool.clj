@@ -204,6 +204,11 @@
         schema (build-tool-schema (keyword fn-name) description parsed-params)
         ;; 提取参数名作为解构键
         param-names (mapv (comp symbol clojure.core/name :name) parsed-params)
+        ;; 构建 :or 默认值 map：声明了 :default 的参数（:required false）在 LLM 省略时
+        ;; 取声明的默认值，而非 nil。默认值为字面量（数字/字符串等），在 defn 上下文求值。
+        or-map (into {} (for [{:keys [name default required]} parsed-params
+                              :when (not required)]
+                          [(symbol (clojure.core/name name)) default]))
         ;; 是否需要 context
         needs-context? (:context opts)
         ;; 生成参数符号
@@ -224,7 +229,7 @@
             :tool/context   true
             :tool/tags      ~tags-set
             :tool/function  true}
-           [{:keys [~@param-names] :as ~arg-sym} ~ctx-sym]
+           [{:keys [~@param-names] :or ~or-map :as ~arg-sym} ~ctx-sym]
            ~@body)
         `(defn ~fn-name
            ~description
@@ -248,7 +253,7 @@
             :tool/context   false
             :tool/tags      ~tags-set
             :tool/function  true}
-           [{:keys [~@param-names] :as ~arg-sym}]
+           [{:keys [~@param-names] :or ~or-map :as ~arg-sym}]
            ~@body)
         `(defn ~fn-name
            ~description
