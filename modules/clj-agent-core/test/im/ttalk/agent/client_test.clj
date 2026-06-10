@@ -65,6 +65,68 @@
     (agent/chat a "你好")
     (is (= (agent/get-messages a) (agent/get-history a)))))
 
+;;; ============================================================
+;;; chat-stream（流式对话）
+;;; ============================================================
+
+(defn- streaming-provider
+  "真流式 mock provider：每次 call-llm-stream 按 responses 顺序取一项，
+   逐个 emit token，返回 {:text :tool-calls}。response = {:tokens [..] :tool-calls ..}。"
+  [responses]
+  (let [calls (atom 0)]
+    (reify provider/ILLMProvider
+      (provider-name [_] :stream-mock)
+      (call-llm [_ _ _ _]
+        (let [{:keys [tokens tool-calls]} (nth @responses (min @calls (dec (count @responses))))]
+          {:text (when (seq tokens) (apply str tokens)) :tool-calls tool-calls}))
+      (call-llm-stream [_ _ _ _ on-token]
+        (let [n (swap! calls inc)
+              {:keys [tokens tool-calls]} (nth @responses (dec n))]
+          (doseq [t tokens] (when on-token (on-token {:token t})))
+          {:text (when (seq tokens) (apply str tokens)) :tool-calls tool-calls}))
+      (extract-tool-calls [_ r] (:tool-calls r))
+      (extract-text [_ r] (:text r))
+      (build-tool-result [_ tid c] {:role "tool" :tool_call_id tid :content c})
+      (supports-function-calling? [_] true)
+      (supports-stream? [_] true)
+      (tool->schema [_ t] t))))
+
+(deftest chat-stream-test
+  (testing "流式：token 逐个回调，最终结果正确，历史落库（与 chat 不分叉）"
+    (let [tokens (atom [])
+          p (streaming-provider (atom [{:tokens ["你好" "，" "世界"] :tool-calls nil}]))
+          a (agent/create-agent {:provider p :model "test"})
+          r (agent/chat-stream a "hi" (fn [t] (when (:token t) (swap! tokens conj (:token t)))))]
+      (is (= :completed (:status r)))
+      (is (= "你好，世界" (:text r)))
+      (is (= ["你好" "，" "世界"] @tokens))         ;; 逐 token
+      (is (= 2 (count (agent/get-history a)))))))   ;; user + assistant
+
+(deftest chat-stream-fallback-test
+  (testing "provider 不支持流式 → service 回退同步，全文作为单个 token emit"
+    (let [tokens (atom [])
+          p (ts/create-mock-provider [{:text "回复内容" :tool-calls nil}])  ;; supports-stream? false
+          a (agent/create-agent {:provider p :model "test"})
+          r (agent/chat-stream a "hi" (fn [t] (when (:token t) (swap! tokens conj (:token t)))))]
+      (is (= :completed (:status r)))
+      (is (= "回复内容" (:text r)))
+      (is (= ["回复内容"] @tokens)))))               ;; 单个 token（整段）
+
+(deftest chat-stream-with-tools-test
+  (testing "工具回合不流正文，最终文本回合逐 token；历史含完整 tool 链"
+    (let [tokens (atom [])
+          p (streaming-provider
+              (atom [{:tokens [] :tool-calls [{:id "c1" :name :mock-get-weather :input {:city "北京"}}]}
+                     {:tokens ["北京" "晴" "25°C"] :tool-calls nil}]))
+          a (agent/create-agent {:provider p :model "test" :tools ts/mock-tools})
+          r (agent/chat-stream a "北京天气?" (fn [t] (when (:token t) (swap! tokens conj (:token t)))))]
+      (is (= :completed (:status r)))
+      (is (= "北京晴25°C" (:text r)))
+      (is (= ["北京" "晴" "25°C"] @tokens))          ;; 仅最终文本回合产 token
+      (is (= 1 (count (:tool-calls-made r))))
+      ;; 历史：user, assistant(tool_calls), tool-result, assistant(text)
+      (is (= 4 (count (agent/get-history a)))))))
+
 (deftest prebuilt-kernel-reuses-its-store-test
   (testing "传入预构建 :kernel 时，agent 复用 kernel memory-filter 的 store，多轮历史不丢（回归 BUG5）"
     (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
