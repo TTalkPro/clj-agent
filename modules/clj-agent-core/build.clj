@@ -8,6 +8,7 @@
 (def basis (b/create-basis {:project "deps.edn"}))
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
 (def src-dirs ["src"])
+(def scm-url "https://github.com/TTalkPro/clj-agent")
 
 (defn clean [_]
   (b/delete {:path "target"}))
@@ -18,12 +19,12 @@
                 :version version
                 :basis basis
                 :src-dirs src-dirs
-                :scm {:url "https://github.com/yourusername/clojure-in-actions"
-                       :connection "scm:git:git://github.com/yourusername/clojure-in-actions.git"
-                       :developerConnection "scm:git:ssh://git@github.com/yourusername/clojure-in-actions.git"
+                :scm {:url scm-url
+                       :connection "scm:git:git://github.com/TTalkPro/clj-agent.git"
+                       :developerConnection "scm:git:ssh://git@github.com/TTalkPro/clj-agent.git"
                        :tag (str "v" version)}
                 :pom-data [[:description "clj-agent Core - Semantic Kernel 风格 AI Agent 核心模块"]
-                           [:url "https://github.com/yourusername/clojure-in-actions"]
+                           [:url scm-url]
                            [:licenses
                             [:license
                              [:name "MIT"]

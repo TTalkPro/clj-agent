@@ -2,9 +2,6 @@
           "modules/clj-agent-provider/src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
-        ;; LLM 依赖
-        net.clojars.wkok/openai-clojure {:mvn/version "0.21.0"}
-
         ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
 

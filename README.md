@@ -492,8 +492,7 @@ cd modules/clj-agent-core && clojure -M:test
 - org.clojure/clojure 1.11.4
 - cheshire/cheshire 5.12.0
 - com.taoensso/timbre 6.3.0
-- http-kit/http-kit 2.8.0
-- net.clojars.wkok/openai-clojure 0.21.0
+- http-kit/http-kit 2.8.0（provider HTTP 客户端）
 
 持久化 ChatMemory（SQLite 后端，按需引入 `im.ttalk.agent.memory.sqlite`）：
 

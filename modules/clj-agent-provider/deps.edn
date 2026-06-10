@@ -5,9 +5,7 @@
         ;; 内部依赖 - Core（protocol/契约：im.ttalk.agent.model.*）
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
 
-        ;; LLM API
-        net.clojars.wkok/openai-clojure {:mvn/version "0.21.0"}
-        clj-http/clj-http {:mvn/version "3.12.3"}
+        ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
 
         ;; HTTP 客户端（http/client.clj、provider/bailian.clj）

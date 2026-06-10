@@ -5,9 +5,16 @@
 (def lib 'im.ttalk/clj-agent-provider)
 (def version (format "0.1.%s" (b/git-count-revs nil)))
 (def class-dir "target/classes")
-(def basis (b/create-basis {:project "deps.edn"}))
+;; 发布关键：core 在 deps.edn 中是 {:local/root ...}，write-pom 无法把本地路径写成
+;; 合法 Maven 坐标 —— 生成的 pom 会缺失 core 依赖，消费方解析即断。这里在构建期把
+;; core 覆盖为同版本号的 :mvn/version，使 pom 写出正确的 <dependency>。
+;; （两个模块用同一 0.1.<git-count> 版本方案，逐提交对齐。）
+(def core-coord {'im.ttalk/clj-agent-core {:mvn/version version}})
+(def basis (b/create-basis {:project "deps.edn"
+                            :override-deps core-coord}))
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
 (def src-dirs ["src"])
+(def scm-url "https://github.com/TTalkPro/clj-agent")
 
 (defn clean [_]
   (b/delete {:path "target"}))
@@ -18,12 +25,12 @@
                 :version version
                 :basis basis
                 :src-dirs src-dirs
-                :scm {:url "https://github.com/yourusername/clojure-in-actions"
-                       :connection "scm:git:git://github.com/yourusername/clojure-in-actions.git"
-                       :developerConnection "scm:git:ssh://git@github.com/yourusername/clojure-in-actions.git"
+                :scm {:url scm-url
+                       :connection "scm:git:git://github.com/TTalkPro/clj-agent.git"
+                       :developerConnection "scm:git:ssh://git@github.com/TTalkPro/clj-agent.git"
                        :tag (str "v" version)}
                 :pom-data [[:description "clj-agent LLM - LLM Provider Abstraction Module"]
-                           [:url "https://github.com/yourusername/clojure-in-actions"]
+                           [:url scm-url]
                            [:licenses
                             [:license
                              [:name "MIT"]
