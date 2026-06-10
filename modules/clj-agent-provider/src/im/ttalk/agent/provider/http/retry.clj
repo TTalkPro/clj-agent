@@ -196,7 +196,7 @@
    - 仅对同步、整体可重试的请求使用（如非流式 LLM 调用、或流式建链阶段）。
    - max-retries 为 0 时等价于直接调用 request-fn。"
   [request-fn opts]
-  (let [{:keys [max-retries respect-retry-after? retry-on rand-fn on-retry]
+  (let [{:keys [max-retries respect-retry-after? retry-on rand-fn on-retry max-delay]
          :or {retry-on transient-response? rand-fn rand}
          :as merged} (merge default-retry-opts opts)]
     (loop [attempt 0]
@@ -206,6 +206,9 @@
           resp
           (let [retry-after (when respect-retry-after?
                               (parse-retry-after (:headers resp)))
+                ;; Retry-After 必须受 max-delay 上限约束：否则服务端返回 Retry-After: 3600
+                ;; 会让同步线程直接 sleep 1 小时，:max-delay 形同虚设。
+                retry-after (when retry-after (min retry-after (double max-delay)))
                 delay-ms (or retry-after
                              (compute-backoff attempt merged rand-fn))]
             (when on-retry

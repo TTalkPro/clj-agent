@@ -54,6 +54,7 @@
   (:refer-clojure :exclude [get])
   (:require [org.httpkit.client :as http]
             [cheshire.core :as json]
+            [taoensso.timbre :as log]
             [clojure.string :as str])
   (:import [java.net URLEncoder]))
 
@@ -139,7 +140,11 @@
      :body (if (= as :json)
              (if (string? body)
                (try (json/parse-string body true)
-                    (catch Exception _ body))
+                    ;; 解析失败回退原始字符串（保留 body 供上层排查），但记 debug 不再完全无声
+                    (catch Exception e
+                      (log/debug "HTTP 响应体 JSON 解析失败，回退原始字符串"
+                                 {:status status :error (.getMessage e)})
+                      body))
                body)
              body)
      :success? (<= 200 status 299)}))

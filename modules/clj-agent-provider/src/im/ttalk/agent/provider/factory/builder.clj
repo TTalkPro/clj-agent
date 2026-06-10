@@ -11,30 +11,31 @@
 ;;; 初始化 Provider 注册（延迟，避免循环依赖）
 ;;; ============================================================
 
+(def ^:private builtin-providers
+  "内置 provider -> [ns 符号, create 函数符号]"
+  {:anthropic ['im.ttalk.agent.provider.anthropic 'im.ttalk.agent.provider.anthropic/create-provider]
+   :openai    ['im.ttalk.agent.provider.openai 'im.ttalk.agent.provider.openai/create-provider]
+   :zhipu     ['im.ttalk.agent.provider.zhipu 'im.ttalk.agent.provider.zhipu/create-provider]
+   :mock      ['im.ttalk.agent.provider.mock 'im.ttalk.agent.provider.mock/create-mock-provider]
+   :ollama    ['im.ttalk.agent.provider.ollama 'im.ttalk.agent.provider.ollama/create-provider]
+   :gemini    ['im.ttalk.agent.provider.gemini 'im.ttalk.agent.provider.gemini/create-provider]
+   :mistral   ['im.ttalk.agent.provider.mistral 'im.ttalk.agent.provider.mistral/create-provider]
+   :deepseek  ['im.ttalk.agent.provider.deepseek 'im.ttalk.agent.provider.deepseek/create-provider]
+   :minimax   ['im.ttalk.agent.provider.minimax 'im.ttalk.agent.provider.minimax/create-provider]
+   :bailian   ['im.ttalk.agent.provider.bailian 'im.ttalk.agent.provider.bailian/create-provider]
+   :openai-compat ['im.ttalk.agent.provider.openai-compat-provider 'im.ttalk.agent.provider.openai-compat-provider/create-provider]})
+
 (defn- ensure-providers-registered!
-  "确保内置 Provider 已注册"
+  "确保内置 Provider 已注册。
+
+   逐个补齐缺失的内置 provider，而非「注册表非空就整体跳过」——后者会导致用户
+   先 register-provider! 自定义 provider 后，内置 provider 永不注册（create-provider :openai 抛 Unknown）。
+   已存在的同名（含用户覆盖）保持不动。"
   []
-  (when (empty? (registry/get-providers))
-    (require '[im.ttalk.agent.provider.anthropic]
-             '[im.ttalk.agent.provider.openai]
-             '[im.ttalk.agent.provider.zhipu]
-             '[im.ttalk.agent.provider.mock]
-             '[im.ttalk.agent.provider.ollama]
-             '[im.ttalk.agent.provider.gemini]
-             '[im.ttalk.agent.provider.mistral]
-             '[im.ttalk.agent.provider.deepseek]
-             '[im.ttalk.agent.provider.minimax]
-             '[im.ttalk.agent.provider.bailian])
-    (registry/register-provider! :anthropic (resolve 'im.ttalk.agent.provider.anthropic/create-provider))
-    (registry/register-provider! :openai    (resolve 'im.ttalk.agent.provider.openai/create-provider))
-    (registry/register-provider! :zhipu     (resolve 'im.ttalk.agent.provider.zhipu/create-provider))
-    (registry/register-provider! :mock      (resolve 'im.ttalk.agent.provider.mock/create-mock-provider))
-    (registry/register-provider! :ollama    (resolve 'im.ttalk.agent.provider.ollama/create-provider))
-    (registry/register-provider! :gemini    (resolve 'im.ttalk.agent.provider.gemini/create-provider))
-    (registry/register-provider! :mistral   (resolve 'im.ttalk.agent.provider.mistral/create-provider))
-    (registry/register-provider! :deepseek  (resolve 'im.ttalk.agent.provider.deepseek/create-provider))
-    (registry/register-provider! :minimax   (resolve 'im.ttalk.agent.provider.minimax/create-provider))
-    (registry/register-provider! :bailian   (resolve 'im.ttalk.agent.provider.bailian/create-provider))))
+  (doseq [[ptype [ns-sym fn-sym]] builtin-providers
+          :when (nil? (registry/get-factory ptype))]
+    (require ns-sym)
+    (registry/register-provider! ptype (resolve fn-sym))))
 
 ;;; ============================================================
 ;;; 基本创建

@@ -169,14 +169,17 @@
              :timeout  60000
              :model    "gpt-4"}
    :anthropic {:api-key  ""
-               :base-url "https://api.anthropic.com/v1"
+               ;; anthropic provider 会拼 base-url + "/v1/messages"，base-url 不能含 /v1
+               ;; （否则得到 .../v1/v1/messages → 404）
+               :base-url "https://api.anthropic.com"
                :timeout  60000
                :model    "claude-3-5-sonnet-20241022"}
    :zhipu   {:api-key  ""
              :base-url "https://open.bigmodel.cn/api/paas/v4"
              :timeout  120000
              :model    "glm-4.7"}
-   :ollama  {:base-url "http://localhost:11434"
+   :ollama  {;; OpenAI 兼容端点须含 /v1（再拼 /chat/completions），与 defprovider 默认一致
+             :base-url "http://localhost:11434/v1"
              :timeout  120000
              :model    "llama2"}
    :gemini  {:api-key  ""
@@ -185,7 +188,8 @@
              :timeout  120000
              :model    "gemini-2.0-flash-exp"}
    :mistral {:api-key  ""
-             :base-url "https://api.mistral.ai"
+             ;; OpenAI 兼容端点须含 /v1（再拼 /chat/completions），与 defprovider 默认一致
+             :base-url "https://api.mistral.ai/v1"
              :timeout  120000
              :model    "mistral-large-latest"}
    :deepseek {:api-key  ""

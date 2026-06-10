@@ -25,6 +25,7 @@
    (stream/normalize-response final-state)"
   (:require [cheshire.core :as json]
             [clojure.string :as str]
+            [taoensso.timbre :as log]
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]))
 
@@ -66,7 +67,12 @@
       (when-not (= data-str "[DONE]")
         (try
           (json/parse-string data-str true)
-          (catch Exception _ nil))))))
+          ;; 不静默吞错：半截 JSON / 断流时记 warn，避免最终响应"看似正常但缺内容"难以排障。
+          (catch Exception e
+            (log/warn "Anthropic SSE 行 JSON 解析失败，已跳过该行"
+                      {:data-preview (subs data-str 0 (min 200 (count data-str)))
+                       :error (.getMessage e)})
+            nil))))))
 
 ;;; ============================================================
 ;;; 流式处理

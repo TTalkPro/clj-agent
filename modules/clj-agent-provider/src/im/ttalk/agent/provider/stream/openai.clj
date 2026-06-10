@@ -16,6 +16,7 @@
    ;; 构建最终响应（支持统一格式）
    (stream/build-response final-state :id \"xxx\" :model \"gpt-4\")"
   (:require [cheshire.core :as json]
+            [taoensso.timbre :as log]
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]))
 
@@ -57,7 +58,13 @@
       (when-not (= data-str "[DONE]")
         (try
           (json/parse-string data-str true)
-          (catch Exception _ nil))))))
+          ;; 不要静默吞掉：流中途截断 / 半截 JSON 时会无声丢内容（最终响应"看似正常但缺内容"）。
+          ;; 记 warn 便于排障；返回 nil 让上层跳过该行。
+          (catch Exception e
+            (log/warn "OpenAI SSE 行 JSON 解析失败，已跳过该行"
+                      {:data-preview (subs data-str 0 (min 200 (count data-str)))
+                       :error (.getMessage e)})
+            nil))))))
 
 ;;; ============================================================
 ;;; 流式处理
@@ -94,7 +101,9 @@
                 (assoc state :tool-calls-acc
                        (reduce
                          (fn [acc tc]
-                           (let [idx (:index tc)
+                           ;; 累积 key 优先用 :index；部分网关 / 旧版 Qwen / GLM 增量不带 index，
+                           ;; 退回 :id，再退回当前序号——避免多工具碎片全部并到 nil 一个 key 下串味。
+                           (let [idx (or (:index tc) (:id tc) (count acc))
                                  existing (get acc idx {:id nil
                                                         :function {:name "" :arguments ""}})]
                              (assoc acc idx
