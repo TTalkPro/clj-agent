@@ -7,6 +7,11 @@
    pause/resume 为可选能力：**配置 :on-pause 即启用**——遇到 :sensitive 工具
    会暂停并触发回调，之后用 resume 批准/拒绝。不配 :on-pause 则为简单同步模式。
 
+   线程安全：**单个 agent 实例不可被多线程并发 chat/resume**。它持有可变控制状态
+   （:state-atom）与按 conversation-id 的历史，内部是 check-then-act + reset! 序列，
+   并发调用会相互覆盖、历史交叉。每个 agent 应绑定单一对话线程；并发请按会话各建
+   一个 agent（共享底层持久 store + 各自 :conversation-id 即可隔离）。
+
    使用示例：
 
    ;; 简单同步

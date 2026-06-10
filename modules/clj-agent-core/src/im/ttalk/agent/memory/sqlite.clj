@@ -32,25 +32,31 @@
 ;; - 修复 :memory: 库——datasource 模式下每次操作是独立内存库，建表后数据即丢失；
 ;;   常开连接让进程内库在 store 生命周期内持续可用。
 ;; - 文件型库避免每次 mem-get/mem-add 都开/关连接的开销。
-;; SQLite 自身串行化写入；store 用完应 close（实现 java.io.Closeable，支持 with-open）。
+;;
+;; 线程安全：java.sql.Connection 不保证线程安全，且 with-transaction 会切换其
+;; autocommit 全局状态——多线程对同一 store 并发操作会语句交叉 / 报错。故所有操作
+;; 用 (locking conn ...) 串行化（同一 store 内互斥；SQLite 写入本就串行，开销可忽略）。
 (defrecord SqliteStore [conn]
   memory/ChatMemory
   (mem-get [_ conv-id]
-    (->> (jdbc/execute! conn
-           ["SELECT content FROM chat_messages WHERE conversation_id = ? ORDER BY id"
-            conv-id])
-         (mapv (fn [row] (edn/read-string (:chat_messages/content row))))))
+    (locking conn
+      (->> (jdbc/execute! conn
+             ["SELECT content FROM chat_messages WHERE conversation_id = ? ORDER BY id"
+              conv-id])
+           (mapv (fn [row] (edn/read-string (:chat_messages/content row)))))))
   (mem-add [_ conv-id new-msgs]
     (when (seq new-msgs)
-      (jdbc/with-transaction [tx conn]
-        (doseq [m new-msgs]
-          (jdbc/execute! tx
-            ["INSERT INTO chat_messages (conversation_id, content) VALUES (?, ?)"
-             conv-id (pr-str (msg/normalize m))]))))
+      (locking conn
+        (jdbc/with-transaction [tx conn]
+          (doseq [m new-msgs]
+            (jdbc/execute! tx
+              ["INSERT INTO chat_messages (conversation_id, content) VALUES (?, ?)"
+               conv-id (pr-str (msg/normalize m))])))))
     nil)
   (mem-clear [_ conv-id]
-    (jdbc/execute! conn
-      ["DELETE FROM chat_messages WHERE conversation_id = ?" conv-id])
+    (locking conn
+      (jdbc/execute! conn
+        ["DELETE FROM chat_messages WHERE conversation_id = ?" conv-id]))
     nil)
 
   java.io.Closeable
