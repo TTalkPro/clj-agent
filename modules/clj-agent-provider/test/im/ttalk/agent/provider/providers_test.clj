@@ -114,15 +114,7 @@
                    (llm/create-provider :openai-compat {:api-key "k"}))))))
 
 (deftest dashscope-registered-and-creatable
-  (testing "dashscope 可经 factory 创建，且声明不支持流式"
+  (testing "dashscope 可经 factory 创建，声明原生支持流式"
     (let [p (llm/create-provider :dashscope {:api-key "k"})]
       (is (= :dashscope (model/provider-name p)))
-      (is (false? (model/supports-stream? p)))
-      ;; D5：流式改抛 canonical error（ExceptionInfo，data 为 canonical error map，不可重试），
-      ;; 不再裸抛 UnsupportedOperationException
-      (let [ex (try (model/call-llm-stream p {:model "qwen-plus"} [] [] (fn [_]))
-                    nil
-                    (catch clojure.lang.ExceptionInfo e e))]
-        (is (some? ex))
-        (is (= :validation-error (:type (ex-data ex))))
-        (is (false? (:retryable? (ex-data ex))))))))
+      (is (true? (model/supports-stream? p))))))   ;; 原生 SSE（X-DashScope-SSE）
