@@ -43,8 +43,7 @@
 ;;; ============================================================
 
 (defn- mock-service [responses-fn]
-  {:chat-fn (fn [_msgs _opts] (responses-fn))
-   :build-result-msgs (fn [_ _] [])})
+  {:chat-fn (fn [_msgs _opts] (responses-fn))})
 
 (defn- build [tools svc store]
   (let [filters (when store [(ma/memory-filter store)])]
@@ -166,8 +165,7 @@
   (let [received-opts (atom nil)
         svc {:chat-fn (fn [_msgs opts]
                         (reset! received-opts opts)
-                        (response/make-response :text "ok" :tool-calls nil))
-             :build-result-msgs (fn [_ _] [])}
+                        (response/make-response :text "ok" :tool-calls nil))}
         store (memory/in-memory-store)
         kernel (build [] svc store)]
     (testing "system-prompts 通过 :system-prompt 传给 chat-fn"

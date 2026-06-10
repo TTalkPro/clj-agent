@@ -153,8 +153,7 @@
 ;; ============================================================
 
 (deftest invoke-chat-test
-  (let [svc {:chat-fn (fn [_ _] (response/make-response :text "hello response" :tool-calls nil))
-             :build-result-msgs (fn [_ _] [])}
+  (let [svc {:chat-fn (fn [_ _] (response/make-response :text "hello response" :tool-calls nil))}
         kernel (core/build-kernel {:service svc})]
     (testing "invoke-chat 返回 {:response :context}"
       (let [result (core/invoke-chat kernel [{:role :user :content "hi"}] {})]
@@ -171,8 +170,7 @@
                         (chain (update req :messages #(into [{:role :system :content "injected"}] %))))}
         received (atom nil)
         svc {:chat-fn (fn [msgs _] (reset! received msgs)
-                        (response/make-response :text "response" :tool-calls nil))
-             :build-result-msgs (fn [_ _] [])}
+                        (response/make-response :text "response" :tool-calls nil))}
         kernel (core/build-kernel
                  {:service svc
                   :filters [inject]})]

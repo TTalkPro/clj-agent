@@ -34,18 +34,7 @@
   (supports-function-calling? [_] true)
   (supports-stream? [_] false)
 
-  (tool->schema [_ tool] tool)
-
-  (build-assistant-message [_ response]
-    {:role "assistant" :content (:text response)})
-
-  (build-result-messages [_ assistant-msg tool-results]
-    (into [assistant-msg]
-          (mapv (fn [{:keys [tool-id result error]}]
-                  {:role "tool"
-                   :tool_call_id tool-id
-                   :content (or result (str "Error: " error))})
-                tool-results))))
+  (tool->schema [_ tool] tool))
 
 (defn- make-test-provider [& responses]
   (->TestProvider (atom (vec responses))))
@@ -86,33 +75,6 @@
       (is (= tcs (provider/extract-tool-calls p {:tool-calls tcs})))
       (is (nil? (provider/extract-tool-calls p {:tool-calls nil}))))))
 
-(deftest test-build-assistant-message
-  (testing "build-assistant-message creates correct message"
-    (let [p (make-test-provider)]
-      (is (= {:role "assistant" :content "Hello"}
-             (provider/build-assistant-message p {:text "Hello"}))))))
-
-(deftest test-build-result-messages
-  (testing "build-result-messages creates correct message list"
-    (let [p (make-test-provider)
-          assistant-msg {:role "assistant" :content "I'll call the tool"}
-          tool-results [{:tool-id "tc1" :result "42" :error nil}
-                        {:tool-id "tc2" :result nil :error "not found"}]]
-      (is (= [{:role "assistant" :content "I'll call the tool"}
-              {:role "tool" :tool_call_id "tc1" :content "42"}
-              {:role "tool" :tool_call_id "tc2" :content "Error: not found"}]
-             (provider/build-result-messages p assistant-msg tool-results))))))
-
-(deftest test-call-with-tools
-  (testing "call-with-tools returns unified response"
-    (let [resp {:text "Hello" :tool-calls [{:id "t1" :name :foo :input {}}]}
-          p (make-test-provider resp)
-          result (provider/call-with-tools p {} [] [])]
-      (is (response/response? result))
-      (is (= "Hello" (:text result)))
-      (is (= [{:id "t1" :name :foo :input {}}]
-             (:tool-calls result))))))
-
 (deftest test-call-simple
   (testing "call-simple returns text string"
     (let [response {:text "Simple response" :tool-calls nil}
@@ -126,8 +88,7 @@
 (deftest test-default-implementations
   (testing "extend-type Object defaults work for unextended objects"
     ;; The Object extension provides defaults for supports-function-calling?,
-    ;; supports-stream?, tool->schema, build-assistant-message, build-result-messages,
-    ;; and call-llm-stream. These are tested on a plain Object.
+    ;; supports-stream?, tool->schema, and call-llm-stream. These are tested on a plain Object.
     (let [obj (Object.)]
       (testing "default supports-function-calling? is false"
         (is (false? (provider/supports-function-calling? obj))))
@@ -158,49 +119,24 @@
                 {:role "tool" :tool_call_id tool-id :content content})
               (supports-function-calling? [_] false)
               (supports-stream? [_] false)
-              (tool->schema [_ tool] tool)
-              (build-assistant-message [this response]
-                {:role "assistant" :content (provider/extract-text this response)})
-              (build-result-messages [_ assistant-msg tool-results]
-                (into [assistant-msg]
-                      (mapv (fn [{:keys [tool-id result error]}]
-                              {:role "tool"
-                               :tool_call_id tool-id
-                               :content (or result (str "Error: " error))})
-                            tool-results))))
+              (tool->schema [_ tool] tool))
           tokens (atom [])
           response (provider/call-llm-stream p {} [] nil
                      (fn [t] (swap! tokens conj t)))]
       (is (= {:text "streamed text"} response))
       (is (= 1 (count @tokens)))
-      (is (= "streamed text" (:token (first @tokens))))))
-
-  (testing "build-assistant-message with extract-text"
-    (let [p (make-test-provider)]
-      (is (= {:role "assistant" :content "hello"}
-             (provider/build-assistant-message p {:text "hello"})))))
-
-  (testing "build-result-messages OpenAI style"
-    (let [p (make-test-provider)
-          result (provider/build-result-messages
-                   p
-                   {:role "assistant" :content "calling tool"}
-                   [{:tool-id "t1" :result "done" :error nil}])]
-      (is (= [{:role "assistant" :content "calling tool"}
-              {:role "tool" :tool_call_id "t1" :content "done"}]
-             result)))))
+      (is (= "streamed text" (:token (first @tokens)))))))
 
 ;;; ============================================================
 ;;; Service Tests
 ;;; ============================================================
 
 (deftest test-create-service
-  (testing "create-service returns a map with :chat-fn and :build-result-msgs"
+  (testing "create-service returns a map with :chat-fn"
     (let [p (make-test-provider {:text "hi" :tool-calls nil})
           svc (service/create-service p {:model "test" :max-tokens 100})]
       (is (map? svc))
-      (is (fn? (:chat-fn svc)))
-      (is (fn? (:build-result-msgs svc))))))
+      (is (fn? (:chat-fn svc))))))
 
 (deftest test-service-chat-fn-text-response
   (testing "chat-fn correctly normalizes text-only response"
@@ -209,7 +145,6 @@
           result ((:chat-fn svc) [{:role "user" :content "hi"}] {})]
       (is (= "Hello world" (:text result)))
       (is (nil? (:tool-calls result)))
-      (is (= {:role "assistant" :content "Hello world"} (:assistant-msg result)))
       (is (some? (:raw-response result))))))
 
 (deftest test-service-chat-fn-tool-calls-response
@@ -232,15 +167,7 @@
               (extract-tool-calls [_ response] (:tool-calls response))
               (extract-text [_ response] (:text response))
               (build-tool-result [_ tool-id content]
-                {:role "tool" :tool_call_id tool-id :content content})
-              (build-assistant-message [_ response]
-                {:role "assistant" :content (:text response)})
-              (build-result-messages [_ assistant-msg tool-results]
-                (into [assistant-msg]
-                      (mapv (fn [{:keys [tool-id result error]}]
-                              {:role "tool" :tool_call_id tool-id
-                               :content (or result (str "Error: " error))})
-                            tool-results))))
+                {:role "tool" :tool_call_id tool-id :content content}))
           svc (service/create-service p {:model "test" :max-tokens 100})
           tools [{:name "calc" :description "Calculator"}]]
       ((:chat-fn svc) [] {:tools tools :tool-choice :auto})
@@ -259,10 +186,7 @@
               (extract-tool-calls [_ response] (:tool-calls response))
               (extract-text [_ response] (:text response))
               (build-tool-result [_ tool-id content]
-                {:role "tool" :tool_call_id tool-id :content content})
-              (build-assistant-message [_ response]
-                {:role "assistant" :content (:text response)})
-              (build-result-messages [_ assistant-msg _] [assistant-msg]))
+                {:role "tool" :tool_call_id tool-id :content content}))
           svc (service/create-service p {:model "test" :max-tokens 100})]
       ((:chat-fn svc) [] {:tool-choice :auto})
       (is (nil? (get-in @call-args [:config :tools])))
@@ -279,26 +203,11 @@
               (extract-tool-calls [_ response] (:tool-calls response))
               (extract-text [_ response] (:text response))
               (build-tool-result [_ tool-id content]
-                {:role "tool" :tool_call_id tool-id :content content})
-              (build-assistant-message [_ response]
-                {:role "assistant" :content (:text response)})
-              (build-result-messages [_ assistant-msg tool-results]
-                [assistant-msg]))
+                {:role "tool" :tool_call_id tool-id :content content}))
           svc (service/create-service p {:model "test" :max-tokens 100})]
       ((:chat-fn svc) [] {:tools [{:name "x"}] :tool-choice :none})
       (is (nil? (get-in @call-args [:config :tools])))
       (is (nil? (get-in @call-args [:config :tool-choice]))))))
-
-(deftest test-service-build-result-msgs
-  (testing "build-result-msgs delegates to provider"
-    (let [p (make-test-provider)
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          assistant-msg {:role "assistant" :content "calling tools"}
-          tool-results [{:tool-id "t1" :result "42" :error nil}]
-          result ((:build-result-msgs svc) assistant-msg tool-results)]
-      (is (= [{:role "assistant" :content "calling tools"}
-              {:role "tool" :tool_call_id "t1" :content "42"}]
-             result)))))
 
 ;;; ============================================================
 ;;; Types Tests
@@ -458,7 +367,15 @@
       400 :validation-error false))
   (testing "从 body 提取错误消息"
     (is (= "no access" (:message (errors/http-response->error
-                                   {:status 401 :body {:error "no access"}} :openai))))))
+                                   {:status 401 :body {:error "no access"}} :openai)))))
+  (testing "OpenAI 风格嵌套错误体 {:error {:message ..}} —— :message 必为字符串（回归：曾返回 map 致 throw! ClassCastException）"
+    (let [e (errors/http-response->error
+              {:status 400 :body {:error {:message "missing param messages" :type "invalid_request"}}}
+              :minimax)]
+      (is (string? (:message e)))
+      (is (= "missing param messages" (:message e)))
+      ;; 能被 throw! 正常抛出（不再 ClassCastException）
+      (is (thrown? clojure.lang.ExceptionInfo (errors/throw! e))))))
 
 (deftest test-format-error
   (testing "格式化含类型/状态/provider"

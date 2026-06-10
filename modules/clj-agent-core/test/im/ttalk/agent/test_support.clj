@@ -22,22 +22,6 @@
     (:text response))
   (build-tool-result [_ tool-id content]
     {:role "tool" :tool_call_id tool-id :content content})
-  (build-assistant-message [_ response]
-    (cond-> {:role "assistant" :content (or (:text response) "")}
-      (:tool-calls response)
-      (assoc :tool_calls (mapv (fn [tc]
-                                 {:id (:id tc)
-                                  :type "function"
-                                  :function {:name (name (:name tc))
-                                             :arguments (pr-str (:input tc))}})
-                               (:tool-calls response)))))
-  (build-result-messages [_ assistant-msg tool-results]
-    (into [assistant-msg]
-          (mapv (fn [{:keys [tool-id result]}]
-                  {:role "tool"
-                   :tool_call_id tool-id
-                   :content (if (string? result) result (pr-str result))})
-                tool-results)))
   (supports-function-calling? [_] true)
   (supports-stream? [_] false)
   (call-llm-stream [this config messages tools on-token]

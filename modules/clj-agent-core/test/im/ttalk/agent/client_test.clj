@@ -12,6 +12,7 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.memory.sqlite :as sqlite]
             [im.ttalk.agent.model.message :as msg]
+            [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.model :as provider])
   (:import [java.io File]))
 
@@ -96,8 +97,6 @@
     (extract-tool-calls [_ r] (:tool-calls r))
     (extract-text [_ r] (:text r))
     (build-tool-result [_ tid c] {:role "tool" :tool_call_id tid :content c})
-    (build-assistant-message [_ r] {:role "assistant" :content (:text r)})
-    (build-result-messages [_ am trs] (into [am] trs))
     (supports-function-calling? [_] true)
     (supports-stream? [_] false)
     (call-llm-stream [this c m t _] (provider/call-llm this c m t))
@@ -110,8 +109,6 @@
     (extract-tool-calls [_ r] (:tool-calls r))
     (extract-text [_ r] (:text r))
     (build-tool-result [_ tid c] {:role "tool" :tool_call_id tid :content c})
-    (build-assistant-message [_ r] {:role "assistant" :content (:text r)})
-    (build-result-messages [_ am trs] (into [am] trs))
     (supports-function-calling? [_] true)
     (supports-stream? [_] false)
     (call-llm-stream [this c m t _] (provider/call-llm this c m t))
@@ -136,7 +133,18 @@
           r (agent/chat a "hi")]
       (is (= :error (:status r)))
       (is (= :provider-error (get-in r [:error :type])))
-      (is (= :provider-error (:type @seen))))))
+      (is (= :provider-error (:type @seen)))))
+  (testing "provider 抛 canonical 401（D5）-> 端到端保留 :auth-error / 不可重试 / status"
+    ;; 模拟 D5 后 provider 用 errors/throw! 抛 401：经 exception->error 幂等透传，
+    ;; 不再被笼统归为 :provider-error（retryable? true）
+    (let [err401 (errors/error :auth-error "Unauthorized" {:status 401 :provider :openai})
+          a (agent/create-agent {:provider (throwing-provider (ex-info "Unauthorized" err401))
+                                 :model "test"})
+          r (agent/chat a "hi")]
+      (is (= :error (:status r)))
+      (is (= :auth-error (get-in r [:error :type])))
+      (is (false? (get-in r [:error :retryable?])))
+      (is (= 401 (get-in r [:error :status]))))))
 
 (deftest system-prompt-test
   (testing "system-prompt 经 settings 传到 chat-fn config"
