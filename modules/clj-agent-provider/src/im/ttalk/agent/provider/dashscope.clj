@@ -24,7 +24,10 @@
             [cheshire.core :as json]
             [org.httpkit.client :as http]
             [im.ttalk.agent.model :as proto]
-            [im.ttalk.agent.model.error :as errors]))
+            [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.streaming :as streaming]
+            [im.ttalk.agent.provider.http.stream-client :as stream-client]
+            [im.ttalk.agent.provider.stream.dashscope :as dstream]))
 
 ;;; ============================================================
 ;;; 配置
@@ -215,6 +218,54 @@
    nil))
 
 ;;; ============================================================
+;;; 流式 API 调用（原生 SSE：X-DashScope-SSE + incremental_output）
+;;; ============================================================
+
+(defn- build-stream-request
+  "流式请求体：在同步请求体基础上开启 incremental_output（每 chunk 只回新增 token）。"
+  [llm-config messages tools]
+  (-> (build-request llm-config messages tools)
+      (assoc-in [:parameters :incremental_output] true)))
+
+(defn call-dashscope-stream
+  "调用 DashScope API（原生流式 SSE）。on-token 随每个增量实时触发，返回最终响应
+   （与同步 call-dashscope 同形的 OpenAI 兼容 map）。
+
+   走 java.net.http 真增量传输（stream-client）；登记在途 cancel 供 chat-stream 取消。"
+  [config messages tools on-token opts]
+  (let [api-key (get-api-key opts)
+        url     (or (:base-url opts) default-base-url)
+        body    (build-stream-request config messages tools)
+        timeout (or (:timeout opts) 300000)
+        result  (promise)
+        err     (promise)
+        {:keys [future cancel]}
+        (stream-client/post-stream-async
+          url
+          {:headers {"Authorization"   (str "Bearer " api-key)
+                     "Content-Type"    "application/json"
+                     "X-DashScope-SSE" "enable"}
+           :body body :timeout timeout
+           :parse-fn   dstream/parse-sse-line
+           :process-fn dstream/process-event
+           :initial-state (dstream/make-initial-state)
+           :on-token on-token
+           :on-complete (fn [state] (deliver result (dstream/build-response state)))
+           :on-error (fn [e] (deliver err e))
+           :provider :dashscope})
+        cancelled? (atom false)
+        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
+    (try @future
+         (catch Throwable _ nil))
+    (cond
+      @cancelled?        (dstream/build-response (dstream/make-initial-state))
+      (realized? err)    (errors/throw! @err)
+      (realized? result) @result
+      :else (errors/throw! (errors/error :provider-error
+                                         "流式响应未产出结果"
+                                         {:provider :dashscope})))))
+
+;;; ============================================================
 ;;; Provider Record
 ;;; ============================================================
 
@@ -226,14 +277,9 @@
   (call-llm [_ llm-config messages tools]
     (call-dashscope llm-config messages tools opts))
 
-  (call-llm-stream [_ _llm-config _messages _tools _on-token]
-    ;; DashScope 原生流式（SSE / X-DashScope-SSE）尚未实现。显式抛出，
-    ;; 避免静默回退到同步、on-token 永不触发导致上层 UI 误判（supports-stream? 已返回 false）。
-    ;; D5：抛 canonical error（:validation-error，明确不可重试），纳入统一错误通道；
-    ;; 不再裸抛 UnsupportedOperationException（无 :retryable? 会被误归为可重试）。
-    (errors/throw! (errors/error :validation-error
-                                 "dashscope provider 暂不支持流式调用（supports-stream? => false），请用 call-llm 同步调用"
-                                 {:provider :dashscope :retryable? false :feature :stream})))
+  (call-llm-stream [_ llm-config messages tools on-token]
+    ;; DashScope 原生流式（X-DashScope-SSE: enable + incremental_output）
+    (call-dashscope-stream llm-config messages tools on-token opts))
 
   (extract-tool-calls [_ response]
     (let [message (get-in response [:choices 0 :message])
@@ -258,7 +304,7 @@
 
   (supports-function-calling? [_] true)
 
-  (supports-stream? [_] false)  ;; 暂不支持流式
+  (supports-stream? [_] true)  ;; 原生 SSE（X-DashScope-SSE + incremental_output）
 
   (tool->schema [_ tool]
     (tool->dashscope-schema tool)))
