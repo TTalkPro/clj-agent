@@ -279,3 +279,41 @@
                 (keep :chat (:filters kernel))
                 terminal)]
     (chain request)))
+
+(defn invoke-chat-stream
+  "invoke-chat 的流式版本：terminal 调 service 的 :stream-fn，token 经 on-token 实时回调。
+
+    与 invoke-chat 共用同一条 chat filter 洋葱链（memory 等照常生效）；on-token 经 request
+    透传到 terminal。:stream-fn 在流结束时返回最终归一化响应，故 memory-filter 落库的是
+    **完整** assistant 消息——与同步路径历史不分叉。
+
+    参数:
+    - opts: 同 invoke-chat，外加 :on-token (fn [token-data] ...)
+
+    返回: {:response {:text ... :tool-calls [...]} :context ctx}"
+  [kernel messages opts]
+  (let [service (:service kernel)
+        _ (when-not service
+            (throw (ex-info "Kernel 未配置 LLM 服务（请在 build-kernel 中提供 :service）"
+                            {:kernel-keys (keys kernel)})))
+        stream-fn (:stream-fn service)
+        _ (when-not stream-fn
+            (throw (ex-info "Service 缺少 :stream-fn（不支持流式）" {:service-keys (keys service)})))
+        context (or (:context opts) (ctx/create))
+        request {:messages      messages
+                 :tools         (:tools opts)
+                 :tool-choice   (:tool-choice opts)
+                 :system-prompt (:system-prompt opts)
+                 :on-token      (:on-token opts)
+                 :context       context}
+        terminal (fn [req]
+                   (let [chat-opts (cond-> {}
+                                     (some? (:tools req))         (assoc :tools (:tools req))
+                                     (some? (:tool-choice req))   (assoc :tool-choice (:tool-choice req))
+                                     (some? (:system-prompt req)) (assoc :system-prompt (:system-prompt req)))]
+                     {:response (stream-fn (:messages req) chat-opts (:on-token req))
+                      :context  (:context req)}))
+        chain (filters/build-chain
+                (keep :chat (:filters kernel))
+                terminal)]
+    (chain request)))

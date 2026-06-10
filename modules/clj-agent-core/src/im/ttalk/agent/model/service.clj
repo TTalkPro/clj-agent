@@ -98,7 +98,13 @@
    - config:   模型配置 {:model \"...\" :max-tokens n :system-prompt \"...\"}
 
    返回：
-   {:chat-fn (fn [messages opts] -> normalized-response)}
+   {:chat-fn   (fn [messages opts] -> normalized-response)
+    :stream-fn (fn [messages opts on-token] -> normalized-response)}
+
+   - :chat-fn   同步调用。
+   - :stream-fn 流式调用：on-token 接收 {:token / :reasoning-token / :accumulated ...}，
+     返回最终归一化响应（与 chat-fn 同形）。provider 不支持流式时回退同步，并把全文作为
+     单个 token emit（保证 chat-stream 对任何 provider 都可用）。
 
    说明：历史的 :build-result-msgs 已移除——对话历史由 advisor/memory 的
    response->neutral 用中立消息统一构建，service 无需再提供该函数。"
@@ -108,4 +114,17 @@
      (let [call-config (build-call-config config opts)
            tools       (:tools call-config)
            response    (provider/call-llm provider call-config messages tools)]
-       (normalize-response provider response)))})
+       (normalize-response provider response)))
+   :stream-fn
+   (fn [messages opts on-token]
+     (let [call-config (build-call-config config opts)
+           tools       (:tools call-config)]
+       (if (provider/supports-stream? provider)
+         (normalize-response provider
+                             (provider/call-llm-stream provider call-config messages tools on-token))
+         ;; 不支持流式：同步调用，把全文作为单个 token emit，保证调用方契约一致
+         (let [resp (normalize-response provider
+                                        (provider/call-llm provider call-config messages tools))]
+           (when-let [t (response/response-text resp)]
+             (when on-token (on-token {:token t :accumulated t})))
+           resp))))})

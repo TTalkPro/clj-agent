@@ -49,7 +49,9 @@
         tool-schemas (filter-tools-by-tags kernel opts)
         tool-choice (or (:tool-choice opts) :auto)]
     (cond-> {:tools tool-schemas :tool-choice tool-choice}
-      sp-str (assoc :system-prompt sp-str))))
+      sp-str (assoc :system-prompt sp-str)
+      ;; 流式：on-token 透传，run-tool-loop 据此走 invoke-chat-stream
+      (:on-token opts) (assoc :on-token (:on-token opts)))))
 
 (defn execute-batch
   "按 gate 决策执行一批工具调用，产出中立 tool 结果消息 + 记录 + 更新后的 ToolContext。
@@ -120,7 +122,12 @@
     ;; 历史留下悬空 tool_use（下一轮 heal 误标"已取消"，与实际相反）。
     ;; 改为：先让 invoke-chat 落库上一批结果并给 LLM 产出最终文本的机会；只有当 LLM
     ;; 仍要调工具、却已无预算处理其结果时，才在 execute-batch 之前抛出（绝不执行无法落库的批次）。
-    (let [{:keys [response context]} (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx))
+    (let [;; 每个 LLM 回合：有 on-token 走流式（invoke-chat-stream），否则同步。
+          ;; 工具回合通常无 :token（只产 tool_calls），最终文本回合才逐 token 流给用户。
+          {:keys [response context]}
+          (if (:on-token chat-opts)
+            (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx))
+            (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
           tctx context
           calls (response/response-tool-calls response)]
       (cond
