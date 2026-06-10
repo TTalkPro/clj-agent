@@ -34,8 +34,11 @@
 
    返回: 替换后的文本"
   [text var-name value]
-  (let [pattern (re-pattern (str "\\{" (name var-name) "\\}"))]
-    (str/replace text pattern (str value))))
+  ;; Pattern/quote：变量名含正则元字符（如 :a.b、:x+）时按字面量匹配；
+  ;; Matcher/quoteReplacement：变量值含 $ 或 \ 时不被当作替换组引用而抛 "No group" / 误替换。
+  ;; 变量值常是用户输入 / 检索结果，含 $ 概率很高。
+  (let [pattern (re-pattern (java.util.regex.Pattern/quote (str "{" (name var-name) "}")))]
+    (str/replace text pattern (java.util.regex.Matcher/quoteReplacement (str value)))))
 
 (defn- replace-all-variables
   "替换所有变量
