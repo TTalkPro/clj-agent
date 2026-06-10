@@ -35,6 +35,9 @@
     应作为 filters vector 的第一个元素注册，确保其他 filter 看到完整对话历史。"
   [store]
   {:name :memory
+   ;; 暴露绑定的 store，便于 create-agent 在传入预构建 kernel 时复用同一实例
+   ;; （react heal/clear 与 kernel 落库必须用同一 store，见 client/create-agent）
+   :store store
    :chat (fn [req chain]
            (if-let [cid (get-in req [:context :conversation-id])]
              (do

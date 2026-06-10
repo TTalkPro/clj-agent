@@ -27,11 +27,17 @@
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.react :as agent-loop]
-            [im.ttalk.agent.common :as common]))
+            [im.ttalk.agent.common :as common]
+            [taoensso.timbre :as log]))
 
 ;;; ============================================================
 ;;; 创建
 ;;; ============================================================
+
+(defn- kernel-memory-store
+  "从已构建 kernel 的 memory-filter 提取其绑定的 store（无 memory-filter 则 nil）。"
+  [kernel]
+  (some #(when (= :memory (:name %)) (:store %)) (:filters kernel)))
 
 (defn create-agent
   "创建 Agent
@@ -55,9 +61,22 @@
 
    返回 Agent map"
   [opts]
-  (let [;; store 由 agent 持有（kernel 不再持有 memory）；并以 memory-filter 形态挂进 kernel
-        store (or (:memory opts) (memory/in-memory-store))
-        k (common/ensure-kernel (assoc opts :memory store))]
+  (let [;; store 由 agent 持有（kernel 不再持有 memory）；并以 memory-filter 形态挂进 kernel。
+        ;; 关键：react 的 heal/clear 与 kernel memory-filter 的落库**必须是同一 store 实例**。
+        ;; 若传入预构建 :kernel，绝不能另造一个 store——那会与 kernel 落库处脱节，
+        ;; 导致第二轮起 LLM 看不到历史 / heal/clear 操作错误 store。改为复用 kernel 自带的 store。
+        prebuilt (:kernel opts)
+        kstore (when prebuilt (kernel-memory-store prebuilt))
+        store (cond
+                kstore kstore
+                :else  (or (:memory opts) (memory/in-memory-store)))
+        _ (when prebuilt
+            (cond
+              (and kstore (:memory opts) (not (identical? kstore (:memory opts))))
+              (log/warn "create-agent 同时收到 :kernel 与不同的 :memory；以 kernel 自带 memory-filter 的 store 为准（实际落库处）")
+              (nil? kstore)
+              (log/warn "create-agent 收到的预构建 :kernel 未挂载 memory-filter；多轮对话历史不会被 kernel 持久化，有状态对话将退化")))
+        k (or prebuilt (common/build-kernel (assoc opts :memory store)))]
     {:kernel          k
      :memory          store
      :conversation-id (or (:conversation-id opts)
