@@ -8,6 +8,7 @@
             [im.ttalk.agent.test-support :as ts]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.advisor.memory :as ma]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.memory.sqlite :as sqlite]
             [im.ttalk.agent.model.message :as msg]
@@ -62,6 +63,29 @@
         a (agent/create-agent {:provider p :model "test"})]
     (agent/chat a "你好")
     (is (= (agent/get-messages a) (agent/get-history a)))))
+
+(deftest prebuilt-kernel-reuses-its-store-test
+  (testing "传入预构建 :kernel 时，agent 复用 kernel memory-filter 的 store，多轮历史不丢（回归 BUG5）"
+    (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
+                                      {:text "回复2" :tool-calls nil}])
+          kernel-store (memory/in-memory-store)
+          svc (service/create-service p {:model "test" :max-tokens 100})
+          ;; 预构建 kernel：memory-filter 绑定 kernel-store
+          k (kernel/build-kernel {:service svc
+                                  :filters [(ma/memory-filter kernel-store)]})
+          ;; 故意再传一个不同的 :memory，验证以 kernel 自带 store 为准
+          other-store (memory/in-memory-store)
+          a (agent/create-agent {:kernel k :memory other-store})]
+      ;; agent 的 store 必须是 kernel 的 store，而非另传的 other-store
+      (is (identical? kernel-store (:memory a)))
+      (is (not (identical? other-store (:memory a))))
+      ;; 多轮对话：历史正确累积在同一 store（脱节时第二轮会丢历史）
+      (agent/chat a "消息1")
+      (is (= 2 (count (agent/get-history a))))
+      (agent/chat a "消息2")
+      (is (= 4 (count (agent/get-history a))))
+      ;; other-store 从未被写入
+      (is (empty? (memory/mem-get other-store (:conversation-id a)))))))
 
 (defn- spy-provider [log]
   (reify provider/ILLMProvider

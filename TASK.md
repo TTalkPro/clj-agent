@@ -15,20 +15,22 @@
 - [x] **D2 tool-choice 归一化错位**：core 只下发中立关键字（仅有 tools 时）；openai_compat / anthropic 各加 `->wire-tool-choice` 在边界翻译。回归测试 `test-service-chat-fn-tool-choice-without-tools` + 更新旧断言。
 - [x] **D3 `extend-type Object` 致 `provider?` 恒真**：`core/model.clj` provider? 改用协议接口 `(:on-interface)` + 非 Object `:impls` 精确判定，保留 Object 默认实现。已验证对 map/string 返回 false。
 
-## P1 — 中危正确性 / 文档不符
+## P1 — 中危正确性 / 文档不符 ✅ 全部完成（2026-06-10）
 
-- [ ] **BUG5 预构建 :kernel 时 store 脱节**：`core/client.clj:57-66` + `core/common.clj:48-51`。create-agent 另造 store 但不挂进已有 kernel，react 要求同一实例。
-- [ ] **BUG react max-iterations 时机**：`core/react.clj:114-120`。检查在工具已执行、结果未落库前抛异常，结果丢失、历史悬空被误标"已取消"。resume 同理。改 `(<= remaining 0)` 并调整落库顺序。
-- [ ] **BUG builder 注册守卫**：`provider/factory/builder.clj:17`。注册表非空即跳过内置注册，先注册自定义 provider 再用内置会 Unknown。改为逐个缺失才注册 / delay。
-- [ ] **BUG factory 默认 URL 拼接**：`provider/factory/config.clj:171-190`。anthropic 拼出 `/v1/v1/messages`，mistral/ollama 缺 `/v1`。
-- [ ] **BUG OpenAI 流式 tool_calls 假定 :index**：`provider/stream/openai.clj:97`。index 缺失回退 :id / 顺序号。
-- [ ] **BUG SSE/JSON 解析静默吞错**：`provider/stream/openai.clj:58`、`stream/anthropic.clj:67`、`core/converter/json.clj`。至少计数/打日志。
-- [ ] **BUG Retry-After 不受 max-delay 约束**：`provider/http/retry.clj:207`。取 `(min retry-after max-delay)`。
-- [ ] **BUG prompt/template `$`/`\` 崩溃**：`core/prompt/template.clj:36`。替换串用 `Matcher/quoteReplacement`。
-- [ ] **BUG find-balanced-json 不识别字符串字面量**：`core/converter/json.clj:33`。
-- [ ] **BUG 异常只取 .getMessage**：`core/tool.clj:417`、`kernel.clj:221`、`react.clj:72`。nil message 时产出空错误；保留类型/ex-data。
-- [ ] **BUG prompt/protocol.clj 未 require clojure.set/clojure.string**：`core/prompt/protocol.clj`、`selector.clj`。靠加载顺序掩盖，AOT 会编译失败。
-- [ ] **D4 文档承诺不符**：README Filter API（`:phase/:order/:before/:after`）与实现不符示例必崩；`:openai-compat` provider 不存在；流式未接入 kernel/agent。修正 README + 决定是否补 `:openai-compat`。
+> 测试：189 → 194 tests / 744 assertions / 0 failures。新增回归测试覆盖 max-iterations、预构建 kernel、tool-choice wire、template、find-balanced-json、openai-compat。
+
+- [x] **BUG5 预构建 :kernel 时 store 脱节**：`core/advisor/memory.clj` 暴露 `:store`；`core/client.clj` create-agent 在传入预构建 kernel 时复用其 memory-filter 的 store（不同/缺失时 warn）。回归测试 `prebuilt-kernel-reuses-its-store-test`。
+- [x] **BUG react max-iterations 时机**：`core/react.clj` 移除 loop 顶部检查，改为「先 invoke-chat 落库上一批结果，仅当 LLM 仍要调工具却无预算时在 execute-batch 前抛出」。同时修复负数 max-iterations 无限循环。回归测试 `max-iterations-exceeded-throws-test` / `negative-max-iterations-does-not-loop-test`。
+- [x] **BUG builder 注册守卫**：`provider/factory/builder.clj` 改为逐个补齐缺失的内置 provider（数据驱动 `builtin-providers`），用户先注册自定义 provider 不再屏蔽内置。
+- [x] **BUG factory 默认 URL 拼接**：`provider/factory/config.clj` anthropic 去掉多余 `/v1`，mistral/ollama 补 `/v1`，与各自 defprovider 默认对齐。
+- [x] **BUG OpenAI 流式 tool_calls 假定 :index**：`provider/stream/openai.clj` key 回退 `(or :index :id (count acc))`。
+- [x] **BUG SSE/JSON 解析静默吞错**：`provider/stream/openai.clj` / `stream/anthropic.clj` / `http/client.clj` 三处 catch 改为 `log/warn|debug` 记录（含 data 预览），不再完全无声。
+- [x] **BUG Retry-After 不受 max-delay 约束**：`provider/http/retry.clj` 取 `(min retry-after max-delay)`。
+- [x] **BUG prompt/template `$`/`\` 崩溃**：`core/prompt/template.clj` 变量名用 `Pattern/quote`、替换串用 `Matcher/quoteReplacement`。回归测试见 prompt api_test。
+- [x] **BUG find-balanced-json 不识别字符串字面量**：`core/converter/json.clj` 扫描跳过字符串字面量与转义。回归测试 `structured-parse-brace-in-string-test`。
+- [x] **BUG 异常只取 .getMessage**：`core/tool.clj` / `kernel.clj` / `react.clj` 三处回退 `(.getName (class e))`，nil message 不再产出空错误。
+- [x] **BUG prompt/protocol.clj 未 require**：`core/prompt/protocol.clj` 补 `clojure.set`/`clojure.string`；`selector.clj` 补 `clojure.set`。
+- [x] **D4 文档承诺不符**：README Filter 段改写为真实 `:chat/:tool` API；**实现了 `:openai-compat` provider**（`openai_compat_provider.clj`，base-url 必填，注册进 factory）；README 流式说明改为「仅 provider 层可用，未接入 kernel/agent」。回归测试 `openai-compat-registered-and-creatable`。
 
 ## P2 — 设计 / 工程债 / 测试盲区（需较大重构，逐步推进）
 

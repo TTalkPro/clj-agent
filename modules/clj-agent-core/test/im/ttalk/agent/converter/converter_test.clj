@@ -33,6 +33,14 @@
           r (proto/parse p "完全没有 json")]
       (is (not (proto/success? r))))))
 
+(deftest structured-parse-brace-in-string-test
+  (testing "JSON 字符串字面量内含 } 时不被提前截断（回归 find-balanced-json）"
+    (let [p (cj/create-structured-parser person-schema)
+          r (proto/parse p "前缀 {\"name\": \"用 } 收尾\", \"age\": 7} 后缀")]
+      (is (proto/success? r))
+      (is (= "用 } 收尾" (:name (proto/get-data r))))
+      (is (= 7 (:age (proto/get-data r)))))))
+
 (deftest validate-missing-required-test
   (testing "缺必填字段报错"
     (let [p (cj/create-structured-parser person-schema)

@@ -100,6 +100,48 @@
         (is (= 3 (context/get-var (:tool-context result) :counter)))
         (is (= 3 (count (:tool-calls-made result))))))))
 
+(deftest max-iterations-exceeded-throws-test
+  (testing "LLM 持续调工具超过 max-iterations 时抛 ex-info（:max-iterations-exceeded）"
+    (let [tc-id (atom 0)
+          svc (mock-service
+                ;; 永远返回工具调用（每次唯一 id），逼近上限
+                (fn [] (response/make-response :text nil
+                         :tool-calls [{:id (str "tc" (swap! tc-id inc))
+                                       :name "inc-counter" :input {}}])))
+          store (memory/in-memory-store)
+          kernel (build [#'inc-counter] svc store)
+          ex (try
+               (agent-loop/invoke kernel store
+                 [{:role :user :content "loop"}]
+                 {:context (context/with-conversation-id (context/create {:counter 0}) "conv-max")
+                  :max-iterations 3})
+               nil
+               (catch clojure.lang.ExceptionInfo e e))]
+      (is (some? ex))
+      (is (= :max-iterations-exceeded (:reason (ex-data ex))))
+      (testing "已执行的工具结果全部落库（回归：旧实现会在执行后、落库前抛异常丢结果）"
+        (let [stored (memory/mem-get store "conv-max")
+              dangling (#'agent-loop/dangling-tool-call-ids stored)]
+          ;; max-iterations=3 → 恰好执行 3 批工具，3 条 tool-result 全部持久化
+          ;; （旧实现只会留下 2 条，第 3 批结果随异常丢失）
+          (is (= 3 (count (filter #(= :tool (:role %)) stored))))
+          ;; 仅最后一个「未执行」的 tool_use 悬空（heal 标记"已取消"才是正确的）；
+          ;; 已执行的批次都已正确配对，不被误判
+          (is (= 1 (count dangling))))))))
+
+(deftest negative-max-iterations-does-not-loop-test
+  (testing "max-iterations 为负数时不会无限循环，立即抛上限错误"
+    (let [svc (mock-service
+                (fn [] (response/make-response :text nil
+                         :tool-calls [{:id "tc" :name "inc-counter" :input {}}])))
+          store (memory/in-memory-store)
+          kernel (build [#'inc-counter] svc store)]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (agent-loop/invoke kernel store
+                     [{:role :user :content "x"}]
+                     {:context (context/with-conversation-id (context/create {:counter 0}) "conv-neg")
+                      :max-iterations -1}))))))
+
 (deftest invoke-stores-history-in-memory-test
   (let [call-count (atom 0)
         svc (mock-service

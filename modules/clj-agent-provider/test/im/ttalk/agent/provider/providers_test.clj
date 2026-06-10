@@ -87,11 +87,20 @@
 ;;; ============================================================
 
 (deftest factory-registers-all-builtins
-  (testing "supported-providers 含全部内置 provider（含 deepseek / minimax / bailian）"
+  (testing "supported-providers 含全部内置 provider（含 deepseek / minimax / bailian / openai-compat）"
     (llm/create-provider :mock)   ;; 触发延迟注册
     (let [supported (set (llm/supported-providers))]
       (are [k] (contains? supported k)
-        :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :bailian :mock))))
+        :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :bailian :openai-compat :mock))))
+
+(deftest openai-compat-registered-and-creatable
+  (testing "openai-compat 经 factory 创建：base-url 必填，provider-name 为 :openai-compat"
+    (let [p (llm/create-provider :openai-compat {:base-url "http://localhost:8000/v1" :api-key "k"})]
+      (is (= :openai-compat (model/provider-name p)))
+      (is (model/supports-stream? p)))
+    (testing "缺 :base-url 抛错"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (llm/create-provider :openai-compat {:api-key "k"}))))))
 
 (deftest bailian-registered-and-creatable
   (testing "bailian 可经 factory 创建，且声明不支持流式"

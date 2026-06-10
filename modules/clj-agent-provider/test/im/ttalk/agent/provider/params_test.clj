@@ -125,6 +125,13 @@
       (is (= "u1" (:user p)))
       (is (= ["x"] (:stop p)))
       (is (= {:type "json_object"} (:response_format p)))))
+  (testing "中立 tool-choice 关键字翻译为 OpenAI wire 形态（回归 D2：曾透传 Anthropic {:type ..}）"
+    (is (= "auto"     (:tool_choice (compat/build-params {:model "m" :tool-choice :auto} [] [{:x 1}]))))
+    (is (= "required" (:tool_choice (compat/build-params {:model "m" :tool-choice :required} [] [{:x 1}]))))
+    (is (= "none"     (:tool_choice (compat/build-params {:model "m" :tool-choice :none} [] [{:x 1}]))))
+    ;; 指定具体工具 / 已是字符串 → 原样透传
+    (is (= {:type "function" :function {:name "f"}}
+           (:tool_choice (compat/build-params {:model "m" :tool-choice {:type "function" :function {:name "f"}}} [] [{:x 1}])))))
   (testing "GLM thinking 开关透传（仅显式提供时发送）"
     (let [p (compat/build-params
               {:model "glm-4.7" :thinking {:type "enabled" :clear_thinking true}}

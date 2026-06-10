@@ -25,7 +25,12 @@
 
   (testing "变量提取"
     (let [vars (prompt/extract-variables "Hello {name}, your age is {age}")]
-      (is (= #{:name :age} (set vars))))))
+      (is (= #{:name :age} (set vars)))))
+
+  (testing "变量值含 $ 与 \\（正则替换特殊字符）不崩溃（回归：曾抛 No group）"
+    (let [t (prompt/template "价格 {price}，路径 {path}")
+          result (prompt/render t {:price "$100" :path "C:\\tmp\\x"})]
+      (is (= "价格 $100，路径 C:\\tmp\\x" result)))))
 
 ;; ============================================================
 ;; 变量验证测试

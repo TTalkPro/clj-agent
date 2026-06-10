@@ -316,26 +316,34 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 ### Filter 中间件（洋葱式 around，对标 Spring AI Advisor）
 
 根抽象是 `around(req, chain)`：chain 是下游，由 filter 决定调不调、调几次、前后干什么
-（可短路 / 重试 / 计时）。`before`/`after` 是只改写请求/响应的语法糖。
+（可短路 / 重试 / 计时）。一个 filter 通过 `:chat` / `:tool` 两个键分别挂到 chat 链与 tool
+链上，两者可并存。**执行顺序即 `:filters` 向量中的注册顺序**（无 `:order`/`:phase`）；
+靠前的 filter 在最外层（最先看到 req、最后看到 resp）。
 
 ```clojure
-;; 自定义 filter —— around（拿到 chain）
-(filters/create-filter :my-filter :tool :order 10
-  :around (fn [req chain]
-                 (println "工具调用前:" (get-in req [:function :name]))
-                 (chain req)))         ;; 不调 chain 即短路
+;; 自定义 filter —— create-filter 接受 name 后跟 :chat / :tool 关键字参数
+(def my-filter
+  (filters/create-filter :my-filter
+    :tool (fn [req chain]                      ;; around-tool
+            (println "工具调用前:" (get-in req [:function :name]))
+            (chain req))))                     ;; 不调 chain 即短路
 
-;; 或只改写（糖）
-(filters/create-filter :inject :chat :order 0
-  :before (fn [req] (update req :messages conj sys-msg)))
+;; 同一 filter 可同时挂 chat 与 tool
+(def both
+  (filters/create-filter :both
+    :chat (fn [req chain] (chain (update req :messages conj sys-msg)))
+    :tool (fn [req chain] (chain req))))
 
-;; 内置 tool filter
-filters/logging-filter        ;; 调用前后日志
+;; 也可直接写 map：{:name :x :chat (fn [req chain] ...) :tool (fn [req chain] ...)}
+
+;; 内置 filter
+filters/logging-filter        ;; 调用前后日志（:tool）
 (filters/timeout-filter 5000) ;; 超时控制（ms，around）
 (filters/approval-filter)     ;; 敏感工具审批（拒绝则短路）
 
-;; phase：:chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
-;; order：越小越靠外层（最先 before、最后 after）
+;; 注册：filters 向量顺序即洋葱层序（越靠前越外层）
+(kernel/build-kernel {:service svc :tools tools :filters [my-filter both]})
+;; 链类型：:chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
 ```
 
 ### Context（共享状态）
@@ -375,8 +383,12 @@ Context 管理对话中的共享状态：
 
 > **各家进阶能力**（结构化输出、并行工具调用、`reasoning_effort`、Anthropic prompt
 > caching / web_search / citations / skills、DeepSeek 推理与前缀续写等）详见
-> [`clj-agent-provider` README](modules/clj-agent-provider/README.md)。所有 provider
-> 同时支持**同步**与**流式（SSE）**调用（百炼暂仅同步）。
+> [`clj-agent-provider` README](modules/clj-agent-provider/README.md)。
+>
+> **关于流式**：provider 层提供 `call-llm-stream`（SSE，百炼暂不支持，调用即抛
+> `UnsupportedOperationException`）。注意：流式目前**仅在 provider 层可用**，尚未接入
+> Kernel / SimpleAgent / Filter / Memory 主链路——需要流式时直接调用 provider 的
+> `call-llm-stream`，此时不经过工具循环与历史持久化。
 
 ### 创建 Provider
 
