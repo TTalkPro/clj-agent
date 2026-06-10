@@ -192,7 +192,6 @@
    - response-text        获取文本内容
    - response-tool-calls  获取工具调用列表
    - has-tool-calls?      是否包含工具调用
-   - response-assistant-msg 获取 assistant 消息（用于对话历史）
 
    扩展方法：
    - response-usage         Token 使用情况
@@ -214,11 +213,6 @@
     "是否包含工具调用
 
      返回：boolean")
-
-  (response-assistant-msg [this]
-    "获取 assistant 消息（用于对话历史）
-
-     返回：消息 map {:role \"assistant\" :content ...}")
 
   ;; 扩展方法
   (response-usage [this]
@@ -256,14 +250,13 @@
 ;;; ============================================================
 
 (defrecord LLMResponse
-  [text reasoning tool-calls assistant-msg usage finish-reason
+  [text reasoning tool-calls usage finish-reason
    id model provider raw-response]
 
   ILLMResponse
   (response-text [_] text)
   (response-tool-calls [_] tool-calls)
   (has-tool-calls? [_] (boolean (seq tool-calls)))
-  (response-assistant-msg [_] assistant-msg)
   (response-usage [_] usage)
   (response-finish-reason [_] finish-reason)
   (response-raw [_] raw-response)
@@ -291,7 +284,6 @@
    参数（关键字参数）：
    - :text           文本内容
    - :tool-calls     工具调用列表
-   - :assistant-msg  assistant 消息（用于对话历史）
    - :usage          Token 使用情况（自动归一化）
    - :finish-reason  完成原因（自动归一化）
    - :id             响应 ID
@@ -306,16 +298,14 @@
    (make-response
      :text \"你好\"
      :tool-calls nil
-     :assistant-msg {:role \"assistant\" :content \"你好\"}
      :usage {:prompt_tokens 100 :completion_tokens 50}
      :finish-reason \"stop\")"
-  [& {:keys [text reasoning tool-calls assistant-msg usage finish-reason
+  [& {:keys [text reasoning tool-calls usage finish-reason
              id model provider raw-response]}]
   (->LLMResponse
     text
     reasoning
     tool-calls
-    assistant-msg
     (normalize-usage usage)
     (normalize-finish-reason finish-reason)
     id

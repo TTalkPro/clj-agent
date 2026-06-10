@@ -14,8 +14,7 @@
               {:model \"gpt-4\" :max-tokens 4096}))
 
    ;; service 是一个 map：
-   ;; {:chat-fn           (fn [messages opts] -> ILLMResponse)
-   ;;  :build-result-msgs (fn [assistant-msg tool-results] -> [msg ...])}"
+   ;; {:chat-fn (fn [messages opts] -> ILLMResponse)}"
   (:require [im.ttalk.agent.model :as provider]
             [im.ttalk.agent.model.response :as response]))
 
@@ -74,18 +73,18 @@
   [provider raw-response]
   (let [text (provider/extract-text provider raw-response)
         tool-calls (provider/extract-tool-calls provider raw-response)
-        ;; 获取 provider 特定的字段
+        ;; 中立层用「容许两种常见位置」的方式取 usage/finish-reason：
+        ;; 顶层（Anthropic 风格）或 choices[0]（OpenAI 风格）。reasoning 同理走 core 提取。
         usage (or (:usage raw-response)
                   (get-in raw-response [:choices 0 :usage]))
         finish-reason (or (:stop_reason raw-response)
-                          (get-in raw-response [:choices 0 :finish_reason]))
-        assistant-msg (provider/build-assistant-message provider raw-response)]
+                          (get-in raw-response [:choices 0 :finish_reason]))]
     (response/make-response
       :id (:id raw-response)
       :model (:model raw-response)
       :text (when (seq text) text)
+      :reasoning (response/extract-reasoning raw-response)
       :tool-calls (when (seq tool-calls) tool-calls)
-      :assistant-msg assistant-msg
       :usage usage
       :finish-reason finish-reason
       :provider (provider/provider-name provider)
@@ -99,15 +98,14 @@
    - config:   模型配置 {:model \"...\" :max-tokens n :system-prompt \"...\"}
 
    返回：
-   {:chat-fn           (fn [messages opts] -> normalized-response)
-    :build-result-msgs (fn [assistant-msg tool-results] -> [msg ...])}"
+   {:chat-fn (fn [messages opts] -> normalized-response)}
+
+   说明：历史的 :build-result-msgs 已移除——对话历史由 advisor/memory 的
+   response->neutral 用中立消息统一构建，service 无需再提供该函数。"
   [provider config]
   {:chat-fn
    (fn [messages opts]
      (let [call-config (build-call-config config opts)
            tools       (:tools call-config)
            response    (provider/call-llm provider call-config messages tools)]
-       (normalize-response provider response)))
-   :build-result-msgs
-   (fn [assistant-msg tool-results]
-     (provider/build-result-messages provider assistant-msg tool-results))})
+       (normalize-response provider response)))})
