@@ -37,19 +37,31 @@
   [text start-char end-char]
   (when-let [start-idx (clojure.string/index-of text (str start-char))]
     (loop [idx (inc start-idx)
-           depth 1]
+           depth 1
+           in-str? false   ;; 是否处于 JSON 字符串字面量内
+           escape? false]  ;; 上一个字符是否为转义反斜杠
       (if (>= idx (count text))
         nil
         (let [ch (nth text idx)]
           (cond
+            ;; 字符串内：只关注转义与闭合引号，括号一律忽略
+            ;; （否则 {"msg": "用 } 结束"} 会在字符串内的 } 处提前截断）
+            in-str?
+            (cond
+              escape?      (recur (inc idx) depth true false)
+              (= ch \\)    (recur (inc idx) depth true true)
+              (= ch \")    (recur (inc idx) depth false false)
+              :else        (recur (inc idx) depth true false))
+            (= ch \")
+            (recur (inc idx) depth true false)
             (= ch end-char)
             (if (= depth 1)
               (subs text start-idx (inc idx))
-              (recur (inc idx) (dec depth)))
+              (recur (inc idx) (dec depth) false false))
             (= ch start-char)
-            (recur (inc idx) (inc depth))
+            (recur (inc idx) (inc depth) false false)
             :else
-            (recur (inc idx) depth)))))))
+            (recur (inc idx) depth false false)))))))
 
 (defn- extract-json-string
   "从文本中提取 JSON 字符串
