@@ -205,7 +205,10 @@
 
    返回: 新的 PromptTemplate"
   [templates & {:as opts}]
-  (apply tpl/combine-templates templates opts))
+  ;; combine-templates 用 kwargs（& {:keys [separator]}）。直接 (apply f templates opts)
+  ;; 会把 opts 这个 map 当作单个 seq 元素展开，kwargs 解构不到 :separator（静默丢失，回退默认）。
+  ;; 先把 opts 摊平成 (:separator "x") 再 apply。
+  (apply tpl/combine-templates templates (apply concat opts)))
 
 (defn append
   "向聊天模板追加消息

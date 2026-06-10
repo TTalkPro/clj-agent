@@ -271,11 +271,14 @@
             scored (mapv (fn [ex]
                            (let [ex-text (str (get ex input-key ""))
                                  ex-embedding (embedding-fn ex-text)
-                                 ;; 余弦相似度
+                                 ;; 余弦相似度（零向量时分母为 0 会得 NaN，NaN 排序不可预测，
+                                 ;; 故 denom 为 0 时记 0 分）
                                  score (if (and input-embedding ex-embedding)
-                                         (/ (reduce + (map * input-embedding ex-embedding))
-                                            (* (Math/sqrt (reduce + (map #(* % %) input-embedding)))
-                                               (Math/sqrt (reduce + (map #(* % %) ex-embedding)))))
+                                         (let [denom (* (Math/sqrt (reduce + (map #(* % %) input-embedding)))
+                                                        (Math/sqrt (reduce + (map #(* % %) ex-embedding))))]
+                                           (if (zero? denom)
+                                             0
+                                             (/ (reduce + (map * input-embedding ex-embedding)) denom)))
                                          0)]
                              {:example ex :score score}))
                          examples)]

@@ -54,7 +54,8 @@
      \"获取当前时间\"
      []
      (str (java.time.LocalDateTime/now)))"
-  (:require [clojure.set]))
+  (:require [clojure.set]
+            [clojure.string]))
 
 ;;; ============================================================
 ;;; 类型映射：Clojure 关键字 → JSON Schema 类型
@@ -404,24 +405,29 @@
   ([v args]
    (invoke v args nil))
   ([v args context]
-   (try
-     (let [f (var-get v)
-           needs-ctx? (context-tool? v)
-           raw-result (if needs-ctx?
-                        (f (or args {}) context)
-                        (f (or args {})))
-           ;; context-aware tool 可能返回 {:result ... :context ...}
-           [result new-context] (if (and needs-ctx?
-                                         (map? raw-result)
-                                         (contains? raw-result :result))
-                                  [(:result raw-result) (:context raw-result)]
-                                  [raw-result context])]
-       (cond-> {:success true
-                :result (if (string? result) result (pr-str result))}
-         new-context (assoc :context new-context)))
-     (catch Exception e
-       {:success false
-        ;; NPE 等异常 getMessage 为 nil，直接用会喂给 LLM 空错误 "错误: "；
-        ;; 回退异常类名，保证错误可读。
-        :error (or (not-empty (.getMessage e))
-                   (.getName (class e)))}))))
+   ;; 先按 schema 校验必填参数：LLM 漏传时给出明确错误，而非进入函数体以 NPE 炸出
+   ;; （:default 参数不在 required 中，不受影响）。
+   (let [{:keys [valid errors]} (validate-args v (or args {}))]
+     (if-not valid
+       {:success false :error (clojure.string/join "; " errors)}
+       (try
+         (let [f (var-get v)
+               needs-ctx? (context-tool? v)
+               raw-result (if needs-ctx?
+                            (f (or args {}) context)
+                            (f (or args {})))
+               ;; context-aware tool 可能返回 {:result ... :context ...}
+               [result new-context] (if (and needs-ctx?
+                                             (map? raw-result)
+                                             (contains? raw-result :result))
+                                      [(:result raw-result) (:context raw-result)]
+                                      [raw-result context])]
+           (cond-> {:success true
+                    :result (if (string? result) result (pr-str result))}
+             new-context (assoc :context new-context)))
+         (catch Exception e
+           {:success false
+            ;; NPE 等异常 getMessage 为 nil，直接用会喂给 LLM 空错误 "错误: "；
+            ;; 回退异常类名，保证错误可读。
+            :error (or (not-empty (.getMessage e))
+                       (.getName (class e)))}))))))

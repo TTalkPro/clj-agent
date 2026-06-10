@@ -181,7 +181,10 @@
   [parser data]
   (if (satisfies? proto/IStructuredParser parser)
     (proto/validate parser data)
-    {:valid true}))
+    ;; 不支持验证时 fail-closed：返回「未通过」而非谎报 {:valid true}
+    ;; （否则把"无法验证"当成"验证通过"，掩盖问题）
+    {:valid false
+     :errors ["parser 不支持 schema 验证（未实现 IStructuredParser）"]}))
 
 (defn get-schema
   "获取解析器的 Schema

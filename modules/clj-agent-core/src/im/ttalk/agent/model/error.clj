@@ -67,7 +67,9 @@
                       (contains? opts :retryable?) (:retryable? opts)
                       (contains? retryable-types type) true
                       (contains? non-retryable-types type) false
-                      :else true)]
+                      ;; 未知错误类型保守视作不可重试：「不确定」当「可重试」会让上层
+                      ;; 对本质不可重试的错误反复打 API。需重试请显式传 :retryable? true。
+                      :else false)]
      (cond-> {:type type
               :message message
               :retryable? retryable?}
