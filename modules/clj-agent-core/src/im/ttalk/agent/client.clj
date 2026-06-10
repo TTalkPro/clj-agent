@@ -192,6 +192,28 @@
           (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
           (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))))))
 
+(defn chat-stream
+  "流式对话。`on-token` 接收 {:token / :reasoning-token / :accumulated ...}——
+   ReAct 循环里每个 LLM 回合都流式（工具回合通常只产 tool_calls 无 :token，最终文本回合逐 token）。
+
+   返回最终结果（与 chat 同形：{:status :completed :text ... :tool-calls-made [...]}）。
+   对话历史在每个回合流结束时落库，与 chat **不分叉**。provider 不支持流式时由 service 回退同步
+   并把全文作为单个 token emit。
+
+   注意：单个 agent 实例不可并发（见 ns 线程安全说明）。"
+  ([agent message on-token] (chat-stream agent message on-token nil))
+  ([agent message on-token opts]
+   (cancel-pending! agent)
+   (run-loop agent
+     #(agent-loop/invoke (:kernel agent) (store agent) [(msg/user message)]
+        (cond-> {:context (tctx agent)
+                 :tool-gate (gate-of agent)
+                 :on-token on-token
+                 :max-iterations (or (:max-iterations opts)
+                                     (:max-iterations (:settings agent)) 10)}
+          (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
+          (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))))))
+
 (defn paused?
   [agent]
   (= :paused (:status @(:state-atom agent))))
