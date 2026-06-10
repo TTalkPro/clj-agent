@@ -67,10 +67,12 @@
      messages
      [(schema/code-execution-tool)])"
   (:require [im.ttalk.agent.provider.http.client :as http]
+            [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]
+            [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.cache :as cache]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
             [im.ttalk.agent.provider.wire.anthropic :as wire]
@@ -372,6 +374,21 @@
     (cache/apply-anthropic-cache params cache-strategy cache-ttl)))
 
 ;;; ============================================================
+;;; 错误归一化
+;;; ============================================================
+
+(defn- response->error
+  "把失败的 HTTP 响应转为 canonical error（D5：ex-info data 即 canonical error map）。"
+  [response provider]
+  (let [status (or (:status response) 0)
+        base (if (and (zero? status) (:error response))
+               (errors/error :network-error
+                             (str "连接失败: " (:error response))
+                             {:provider provider})
+               (errors/http-response->error response provider))]
+    (assoc base :context (select-keys response [:body :headers :request-id :error]))))
+
+;;; ============================================================
 ;;; 同步 API 调用
 ;;; ============================================================
 
@@ -410,14 +427,7 @@
       (let [rl (parse-rate-limit (:headers response))]
         (cond-> (:body response)
           rl (assoc :rate-limit rl)))
-      (throw (ex-info "Anthropic-compatible API call failed"
-                      {:status (:status response)
-                       :body (:body response)
-                       :error (:error response)
-                       :headers (:headers response)
-                       :request-id (:request-id response)
-                       :provider (:provider-name config :anthropic)
-                       :retryable? (retry/transient-response? response)})))))
+      (errors/throw! (response->error response (:provider-name config :anthropic))))))
 
 ;;; ============================================================
 ;;; 异步 API 调用
@@ -468,29 +478,29 @@
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))
-        timeout (or (:timeout config) 120000)
-        ;; 仅对建链阶段做 opt-in 重试，流读取中途不重试
-        response (retry/maybe-with-retry
-                   config
-                   #(http/post-stream api-url
-                                      :headers headers
-                                      :body params
-                                      :timeout timeout))]
-    (when-not (:success? response)
-      (throw (ex-info "Anthropic-compatible streaming connection failed"
-                      {:status (:status response)
-                       :error (:error response)
-                       :request-id (:request-id response)
-                       :provider (:provider-name config :anthropic)
-                       :retryable? (retry/transient-response? response)})))
-    (let [reader (clojure.java.io/reader (:body response))
-          final-state (http/process-sse-stream
-                        reader
-                        stream/parse-sse-line
-                        stream/process-event
-                        (stream/make-initial-state)
-                        on-token)]
-      (stream/build-response final-state))))
+        ;; 真流式：长生成给足超时（java.net.http 的 timeout 是 total）
+        timeout (or (:timeout config) 300000)
+        result (promise)
+        err    (promise)
+        ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发（不再是 http-kit 伪流式）
+        {:keys [future]}
+        (stream-client/post-stream-async
+          api-url
+          {:headers headers :body params :timeout timeout
+           :parse-fn stream/parse-sse-line
+           :process-fn stream/process-event
+           :initial-state (stream/make-initial-state)
+           :on-token on-token
+           :on-complete (fn [state] (deliver result (stream/build-response state)))
+           :on-error (fn [e] (deliver err e))
+           :provider (:provider-name config :anthropic)})]
+    @future                              ;; 阻塞直到流结束（保持同步签名）
+    (cond
+      (realized? err)    (errors/throw! @err)
+      (realized? result) @result
+      :else (errors/throw! (errors/error :provider-error
+                                         "流式响应未产出结果"
+                                         {:provider (:provider-name config :anthropic)})))))
 
 (defn call-anthropic-stream-async
   "异步流式调用 Anthropic API（非阻塞）
@@ -506,7 +516,8 @@
    - on-error:    错误回调 (fn [error] ...)（可选）
 
    返回：
-   nil（所有结果通过回调返回）"
+   {:future CompletableFuture :cancel (fn [])} —— 真增量、非阻塞；
+   cancel 可在客户端断连/停止生成时取消上游（异步服务器整合关键，见 design/streaming-async-design.md）。"
   [config messages tools on-token on-complete & [on-error]]
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
@@ -514,17 +525,16 @@
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))]
-    (http/post-stream-async api-url
-                            :headers headers
-                            :body params
-                            :timeout 120000
-                            :parse-fn stream/parse-sse-line
-                            :process-fn stream/process-event
-                            :initial-state (stream/make-initial-state)
-                            :on-token on-token
-                            :on-complete (fn [final-state]
-                                           (on-complete (stream/build-response final-state)))
-                            :on-error on-error)))
+    (stream-client/post-stream-async
+      api-url
+      {:headers headers :body params :timeout (or (:timeout config) 300000)
+       :parse-fn stream/parse-sse-line
+       :process-fn stream/process-event
+       :initial-state (stream/make-initial-state)
+       :on-token on-token
+       :on-complete (fn [final-state] (on-complete (stream/build-response final-state)))
+       :on-error (or on-error (fn [_] nil))
+       :provider (:provider-name config :anthropic)})))
 
 ;;; ============================================================
 ;;; AnthropicProvider 实现
@@ -567,20 +577,7 @@
 
   ;; Schema 转换
   (tool->schema [_ tool]
-    (schema/tool->schema tool))
-
-  ;; 消息构建
-  (build-assistant-message [_ response]
-    {:role "assistant" :content (:content response)})
-
-  (build-result-messages [_ assistant-msg tool-results]
-    [assistant-msg
-     {:role "user"
-      :content (mapv (fn [{:keys [tool-id result error]}]
-                       {:type "tool_result"
-                        :tool_use_id tool-id
-                        :content (or result (str "Error: " error))})
-                     tool-results)}]))
+    (schema/tool->schema tool)))
 
 ;;; ============================================================
 ;;; 工厂函数

@@ -17,9 +17,11 @@
    ;; 流式调用
    (compat/call-api-stream api-url api-key config messages tools on-token)"
   (:require [im.ttalk.agent.provider.http.client :as http]
+            [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.schema.openai :as schema]
-            [im.ttalk.agent.provider.stream.openai :as stream]))
+            [im.ttalk.agent.provider.stream.openai :as stream]
+            [im.ttalk.agent.model.error :as errors]))
 
 ;;; ============================================================
 ;;; 参数构建
@@ -124,20 +126,6 @@
 ;;; 消息构建
 ;;; ============================================================
 
-(defn build-assistant-message
-  "构建 assistant 消息
-
-   参数：
-   - response: API 响应
-
-   返回：
-   assistant 消息 map"
-  [response]
-  (let [msg (get-in response [:choices 0 :message])]
-    {:role "assistant"
-     :content (:content msg)
-     :tool_calls (:tool_calls msg)}))
-
 (defn build-tool-result
   "构建工具结果消息
 
@@ -151,6 +139,24 @@
   {:role "tool"
    :tool_call_id tool-id
    :content (if (string? content) content (pr-str content))})
+
+;;; ============================================================
+;;; 错误归一化
+;;; ============================================================
+
+(defn- response->error
+  "把失败的 HTTP 响应转为 canonical error（D5：抛出的 ex-info data 即 canonical error map，
+   保留 body/headers/request-id 于 :context 供排查）。"
+  [response provider]
+  (let [status (or (:status response) 0)
+        base (if (and (zero? status) (:error response))
+               ;; 连接级失败（无 HTTP 状态码）：网络错误，可重试
+               (errors/error :network-error
+                             (str "连接失败: " (:error response))
+                             {:provider provider})
+               ;; HTTP 4xx/5xx：按状态码分类（401/403→auth 不可重试；429→限流；5xx→provider 可重试）
+               (errors/http-response->error response provider))]
+    (assoc base :context (select-keys response [:body :headers :request-id :error]))))
 
 ;;; ============================================================
 ;;; 同步调用
@@ -192,13 +198,7 @@
                                :timeout timeout))]
     (if (:success? response)
       (:body response)
-      (throw (ex-info "OpenAI-compatible API call failed"
-                      {:status (:status response)
-                       :body (:body response)
-                       :error (:error response)
-                       :headers (:headers response)
-                       :request-id (:request-id response)
-                       :retryable? (retry/transient-response? response)})))))
+      (errors/throw! (response->error response (:provider-name config))))))
 
 ;;; ============================================================
 ;;; 流式调用
@@ -228,36 +228,36 @@
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
-        timeout (or (:timeout opts) 120000)
+        ;; 真流式：长生成给足超时（java.net.http 的 timeout 是 total）
+        timeout (or (:timeout opts) 300000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
                        (:extra-headers config)
                        (:extra-headers opts))
-        ;; 创建流处理器
         {:keys [process-fn get-id get-model]} (stream/make-stream-processor)
-        ;; 发起流式请求（仅对建链阶段做 opt-in 重试，流读取中途不重试）
-        response (retry/maybe-with-retry
-                   config
-                   #(http/post-stream api-url
-                                      :headers headers
-                                      :body params
-                                      :timeout timeout))]
-    (when-not (:success? response)
-      (throw (ex-info "OpenAI-compatible streaming connection failed"
-                      {:status (:status response)
-                       :error (:error response)
-                       :request-id (:request-id response)
-                       :retryable? (retry/transient-response? response)})))
-    ;; 处理 SSE 流
-    (let [final-state (http/process-sse-stream
-                        (:body response)
-                        stream/parse-sse-line
-                        process-fn
-                        (stream/make-initial-state)
-                        on-token)]
-      ;; 构建最终响应
-      (stream/build-response final-state
-                             :id (get-id)
-                             :model (get-model)))))
+        result (promise)
+        err    (promise)
+        ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发（不再是 http-kit 伪流式）
+        {:keys [future]}
+        (stream-client/post-stream-async
+          api-url
+          {:headers headers :body params :timeout timeout
+           :parse-fn stream/parse-sse-line
+           :process-fn process-fn
+           :initial-state (stream/make-initial-state)
+           :on-token on-token
+           :on-complete (fn [state]
+                          (deliver result (stream/build-response state
+                                                                 :id (get-id)
+                                                                 :model (get-model))))
+           :on-error (fn [e] (deliver err e))
+           :provider (:provider-name config)})]
+    @future                              ;; 阻塞直到流结束（保持同步签名）
+    (cond
+      (realized? err)    (errors/throw! @err)
+      (realized? result) @result
+      :else (errors/throw! (errors/error :provider-error
+                                         "流式响应未产出结果"
+                                         {:provider (:provider-name config)})))))
 
 ;;; ============================================================
 ;;; 异步调用
@@ -324,30 +324,22 @@
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
-        timeout (or (:timeout opts) 120000)
+        timeout (or (:timeout opts) 300000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
+                       (:extra-headers config)
                        (:extra-headers opts))
-        ;; 用于收集 id 和 model
-        response-id (atom nil)
-        response-model (atom nil)
-        ;; 包装 process-fn
-        wrapped-process-fn (fn [chunk state]
-                             (when (:id chunk)
-                               (reset! response-id (:id chunk)))
-                             (when (:model chunk)
-                               (reset! response-model (:model chunk)))
-                             (stream/process-chunk chunk state))]
-    (http/post-stream-async api-url
-                            :headers headers
-                            :body params
-                            :timeout timeout
-                            :parse-fn stream/parse-sse-line
-                            :process-fn wrapped-process-fn
-                            :initial-state (stream/make-initial-state)
-                            :on-token on-token
-                            :on-complete (fn [final-state]
-                                           (on-complete
-                                             (stream/build-response final-state
-                                                                    :id @response-id
-                                                                    :model @response-model)))
-                            :on-error on-error)))
+        {:keys [process-fn get-id get-model]} (stream/make-stream-processor)]
+    ;; 真增量、非阻塞；返回 {:future :cancel}，cancel 供客户端断连/停止时取消上游
+    (stream-client/post-stream-async
+      api-url
+      {:headers headers :body params :timeout timeout
+       :parse-fn stream/parse-sse-line
+       :process-fn process-fn
+       :initial-state (stream/make-initial-state)
+       :on-token on-token
+       :on-complete (fn [final-state]
+                      (on-complete (stream/build-response final-state
+                                                          :id (get-id)
+                                                          :model (get-model))))
+       :on-error (or on-error (fn [_] nil))
+       :provider (:provider-name config)})))

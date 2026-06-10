@@ -226,18 +226,7 @@
   (supports-stream? [_] true)
 
   (tool->schema [_ tool]
-    (schema/tool->schema tool))
-
-  (build-assistant-message [_ response]
-    (get-in response [:choices 0 :message]))
-
-  (build-result-messages [_ assistant-msg tool-results]
-    (into [assistant-msg]
-          (mapv (fn [{:keys [tool-id result error]}]
-                  {:role "tool"
-                   :tool_call_id tool-id
-                   :content (or result (str "Error: " error))})
-                tool-results))))
+    (schema/tool->schema tool)))
 
 ;;; ============================================================
 ;;; 工厂函数

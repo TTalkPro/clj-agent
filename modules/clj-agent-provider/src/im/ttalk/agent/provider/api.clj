@@ -201,7 +201,6 @@
    参数（关键字）：
    - :text         文本内容
    - :tool-calls   工具调用列表
-   - :assistant-msg assistant 消息（用于对话历史）
    - :usage        token 使用情况（自动归一化）
    - :finish-reason 完成原因（自动归一化）
    - :model        模型名称

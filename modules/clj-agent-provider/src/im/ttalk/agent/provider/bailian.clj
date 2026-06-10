@@ -23,7 +23,8 @@
   (:require [clojure.string :as str]
             [cheshire.core :as json]
             [org.httpkit.client :as http]
-            [im.ttalk.agent.model :as proto]))
+            [im.ttalk.agent.model :as proto]
+            [im.ttalk.agent.model.error :as errors]))
 
 ;;; ============================================================
 ;;; 配置
@@ -131,35 +132,31 @@
                                "Content-Type" "application/json"}
                      :body (json/generate-string body)
                      :timeout timeout})]
-    ;; 连接级错误（DNS/超时/重置）：网络层失败一律可重试。
+    ;; D5：失败一律抛 canonical error（ex-info data 即 errors/error map）。
+    ;; 连接级错误（DNS/超时/重置）：网络层失败，可重试。
     (when-let [err (:error response)]
-      (throw (ex-info "DashScope API call failed (network error)"
-                      {:error err
-                       :provider :bailian
-                       :retryable? true})))
+      (errors/throw! (errors/error :network-error
+                                   (str "连接失败: " err)
+                                   {:provider :bailian})))
     (let [status (:status response)
           body-str (:body response)]
       ;; HTTP 4xx/5xx：DashScope 错误体形如 {:code "InvalidApiKey" :message ... :request_id ...}，
       ;; 没有 :error 键，绝不能当正常响应返回（否则鉴权/参数错误会静默变成空响应）。
-      ;; 统一抛 ex-info，对齐 anthropic/openai 的失败契约。
       (when (>= status 400)
         (let [parsed (try (json/parse-string body-str true) (catch Exception _ nil))]
-          (throw (ex-info "DashScope API call failed"
-                          {:status status
-                           :body (or parsed body-str)
-                           :code (:code parsed)
-                           :request-id (:request_id parsed)
-                           :provider :bailian
-                           ;; 429 与 5xx 视为瞬时可重试
-                           :retryable? (or (= status 429) (>= status 500))}))))
+          ;; 用 canonical 的 http-response->error 分类（401/403→auth 不可重试；429→限流；5xx→可重试），
+          ;; DashScope 的 :code/:message/:request_id 并入 :context 供排查。
+          (errors/throw!
+            (-> (errors/http-response->error {:status status :body (or parsed body-str)} :bailian)
+                (assoc :context {:code (:code parsed)
+                                 :request-id (:request_id parsed)
+                                 :body (or parsed body-str)})))))
       (try
         (json/parse-string body-str true)
         (catch Exception e
-          (throw (ex-info "DashScope response JSON parse error"
-                          {:body body-str
-                           :provider :bailian
-                           :retryable? false}
-                          e)))))))
+          (errors/throw! (errors/error :parse-error
+                                       (str "DashScope 响应 JSON 解析失败: " (.getMessage e))
+                                       {:provider :bailian :cause e})))))))
 
 ;;; ============================================================
 ;;; 同步 API 调用
@@ -233,8 +230,11 @@
   (call-llm-stream [_ _llm-config _messages _tools _on-token]
     ;; DashScope 原生流式（SSE / X-DashScope-SSE）尚未实现。显式抛出，
     ;; 避免静默回退到同步、on-token 永不触发导致上层 UI 误判（supports-stream? 已返回 false）。
-    (throw (UnsupportedOperationException.
-             "bailian provider 暂不支持流式调用（supports-stream? => false），请用 call-llm 同步调用")))
+    ;; D5：抛 canonical error（:validation-error，明确不可重试），纳入统一错误通道；
+    ;; 不再裸抛 UnsupportedOperationException（无 :retryable? 会被误归为可重试）。
+    (errors/throw! (errors/error :validation-error
+                                 "bailian provider 暂不支持流式调用（supports-stream? => false），请用 call-llm 同步调用"
+                                 {:provider :bailian :retryable? false :feature :stream})))
 
   (extract-tool-calls [_ response]
     (let [message (get-in response [:choices 0 :message])
@@ -262,18 +262,7 @@
   (supports-stream? [_] false)  ;; 暂不支持流式
 
   (tool->schema [_ tool]
-    (tool->dashscope-schema tool))
-
-  (build-assistant-message [_ response]
-    (get-in response [:choices 0 :message]))
-
-  (build-result-messages [_ assistant-msg tool-results]
-    (into [assistant-msg]
-          (mapv (fn [{:keys [tool-id result error]}]
-                  {:role "tool"
-                   :tool_call_id tool-id
-                   :content (or result (str "Error: " error))})
-                tool-results))))
+    (tool->dashscope-schema tool)))
 
 ;;; ============================================================
 ;;; 工厂函数

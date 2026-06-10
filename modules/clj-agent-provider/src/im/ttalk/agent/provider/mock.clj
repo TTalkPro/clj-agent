@@ -85,18 +85,7 @@
     {:type "function"
      :function {:name (name (:name tool))
                 :description (:description tool)
-                :parameters (:parameters tool)}})
-
-  (build-assistant-message [_ response]
-    {:role "assistant" :content (:text response)})
-
-  (build-result-messages [_ assistant-msg tool-results]
-    (into [assistant-msg]
-          (mapv (fn [{:keys [tool-id result error]}]
-                  {:role "tool"
-                   :tool_call_id tool-id
-                   :content (or result (str "Error: " error))})
-                tool-results))))
+                :parameters (:parameters tool)}}))
 
 ;;; ============================================================
 ;;; Mock 特有方法
