@@ -161,7 +161,7 @@
    :mistral "MISTRAL"
    :deepseek "DEEPSEEK"
    :minimax "MINIMAX"
-   :bailian "BAILIAN"})
+   :dashscope "DASHSCOPE"})
 
 (def ^:private builtin-default-configs
   {:openai  {:api-key  ""
@@ -200,10 +200,10 @@
              :base-url "https://api.minimaxi.com"
              :timeout  120000
              :model    "MiniMax-M2.7"}
-   :bailian {:api-key  ""
-             :base-url "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-             :timeout  120000
-             :model    "qwen-plus"}})
+   :dashscope {:api-key  ""
+               :base-url "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+               :timeout  120000
+               :model    "qwen-plus"}})
 
 (defonce ^:private _init
   (do

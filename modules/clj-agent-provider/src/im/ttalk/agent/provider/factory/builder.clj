@@ -22,7 +22,7 @@
    :mistral   ['im.ttalk.agent.provider.mistral 'im.ttalk.agent.provider.mistral/create-provider]
    :deepseek  ['im.ttalk.agent.provider.deepseek 'im.ttalk.agent.provider.deepseek/create-provider]
    :minimax   ['im.ttalk.agent.provider.minimax 'im.ttalk.agent.provider.minimax/create-provider]
-   :bailian   ['im.ttalk.agent.provider.bailian 'im.ttalk.agent.provider.bailian/create-provider]
+   :dashscope ['im.ttalk.agent.provider.dashscope 'im.ttalk.agent.provider.dashscope/create-provider]
    :openai-compat ['im.ttalk.agent.provider.openai-compat-provider 'im.ttalk.agent.provider.openai-compat-provider/create-provider]})
 
 (defn- ensure-providers-registered!

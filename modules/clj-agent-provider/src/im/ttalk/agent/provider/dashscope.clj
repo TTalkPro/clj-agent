@@ -1,5 +1,5 @@
-(ns im.ttalk.agent.provider.bailian
-  "阿里云百炼 (DashScope) Provider 实现
+(ns im.ttalk.agent.provider.dashscope
+  "阿里云 DashScope Provider 实现
 
    实现 ILLMProvider 协议，使用原生 DashScope API。
 
@@ -14,12 +14,12 @@
 
    使用示例：
 
-   (require '[im.ttalk.agent.provider.bailian :as bailian])
+   (require '[im.ttalk.agent.provider.dashscope :as dashscope])
 
-   (def provider (bailian/create-provider))
+   (def provider (dashscope/create-provider))
 
    ;; 同步调用
-   (bailian/call-bailian config messages tools)"
+   (dashscope/call-dashscope config messages tools)"
   (:require [clojure.string :as str]
             [cheshire.core :as json]
             [org.httpkit.client :as http]
@@ -40,10 +40,9 @@
 (defn- get-api-key
   "获取 API Key
 
-   优先级：opts 中的 :api-key > BAILIAN_API_KEY > DASHSCOPE_API_KEY"
+   优先级：opts 中的 :api-key > DASHSCOPE_API_KEY"
   [opts]
   (or (:api-key opts)
-      (System/getenv "BAILIAN_API_KEY")
       (System/getenv "DASHSCOPE_API_KEY")))
 
 ;;; ============================================================
@@ -137,7 +136,7 @@
     (when-let [err (:error response)]
       (errors/throw! (errors/error :network-error
                                    (str "连接失败: " err)
-                                   {:provider :bailian})))
+                                   {:provider :dashscope})))
     (let [status (:status response)
           body-str (:body response)]
       ;; HTTP 4xx/5xx：DashScope 错误体形如 {:code "InvalidApiKey" :message ... :request_id ...}，
@@ -147,7 +146,7 @@
           ;; 用 canonical 的 http-response->error 分类（401/403→auth 不可重试；429→限流；5xx→可重试），
           ;; DashScope 的 :code/:message/:request_id 并入 :context 供排查。
           (errors/throw!
-            (-> (errors/http-response->error {:status status :body (or parsed body-str)} :bailian)
+            (-> (errors/http-response->error {:status status :body (or parsed body-str)} :dashscope)
                 (assoc :context {:code (:code parsed)
                                  :request-id (:request_id parsed)
                                  :body (or parsed body-str)})))))
@@ -156,14 +155,14 @@
         (catch Exception e
           (errors/throw! (errors/error :parse-error
                                        (str "DashScope 响应 JSON 解析失败: " (.getMessage e))
-                                       {:provider :bailian :cause e})))))))
+                                       {:provider :dashscope :cause e})))))))
 
 ;;; ============================================================
 ;;; 同步 API 调用
 ;;; ============================================================
 
-(defn call-bailian
-  "调用百炼 API（同步）
+(defn call-dashscope
+  "调用DashScope API（同步）
 
    参数：
    - config:   配置 map {:model \"qwen-plus\" :max-tokens 4096 ...}
@@ -174,12 +173,12 @@
    统一格式响应（OpenAI 兼容格式）
 
    示例：
-   (call-bailian
+   (call-dashscope
      {:model \"qwen-plus\" :max-tokens 4096}
      [{:role \"user\" :content \"你好\"}]
      [])"
   ([config messages tools]
-   (call-bailian config messages tools {}))
+   (call-dashscope config messages tools {}))
   ([config messages tools opts]
    (let [api-key (get-api-key opts)
          url (or (:base-url opts) default-base-url)
@@ -191,8 +190,8 @@
 ;;; 异步 API 调用
 ;;; ============================================================
 
-(defn call-bailian-async
-  "异步调用百炼 API
+(defn call-dashscope-async
+  "异步调用DashScope API
 
    参数：
    - config:   配置 map
@@ -204,11 +203,11 @@
    返回：
    nil（结果通过 callback 返回）"
   ([config messages tools callback]
-   (call-bailian-async config messages tools callback {}))
+   (call-dashscope-async config messages tools callback {}))
   ([config messages tools callback opts]
    (future
      (try
-       (let [result (call-bailian config messages tools opts)]
+       (let [result (call-dashscope config messages tools opts)]
          (callback result))
        (catch Exception e
          (callback {:error {:message (.getMessage e)
@@ -219,13 +218,13 @@
 ;;; Provider Record
 ;;; ============================================================
 
-(defrecord BailianProvider [opts]
+(defrecord DashScopeProvider [opts]
   proto/ILLMProvider
 
-  (provider-name [_] :bailian)
+  (provider-name [_] :dashscope)
 
   (call-llm [_ llm-config messages tools]
-    (call-bailian llm-config messages tools opts))
+    (call-dashscope llm-config messages tools opts))
 
   (call-llm-stream [_ _llm-config _messages _tools _on-token]
     ;; DashScope 原生流式（SSE / X-DashScope-SSE）尚未实现。显式抛出，
@@ -233,8 +232,8 @@
     ;; D5：抛 canonical error（:validation-error，明确不可重试），纳入统一错误通道；
     ;; 不再裸抛 UnsupportedOperationException（无 :retryable? 会被误归为可重试）。
     (errors/throw! (errors/error :validation-error
-                                 "bailian provider 暂不支持流式调用（supports-stream? => false），请用 call-llm 同步调用"
-                                 {:provider :bailian :retryable? false :feature :stream})))
+                                 "dashscope provider 暂不支持流式调用（supports-stream? => false），请用 call-llm 同步调用"
+                                 {:provider :dashscope :retryable? false :feature :stream})))
 
   (extract-tool-calls [_ response]
     (let [message (get-in response [:choices 0 :message])
@@ -269,22 +268,20 @@
 ;;; ============================================================
 
 (defn create-provider
-  "创建百炼 Provider 实例
+  "创建 DashScope Provider 实例
 
    参数：
    - opts: API 选项（可选）
      {:api-key  \"...\"  ;; 覆盖环境变量
       :base-url \"...\"  ;; 覆盖默认 URL}
 
-   环境变量（按优先级）：
-   - BAILIAN_API_KEY
-   - DASHSCOPE_API_KEY
+   环境变量：DASHSCOPE_API_KEY
 
    返回：
-   BailianProvider record
+   DashScopeProvider record
 
    示例：
    (def provider (create-provider))
    (def provider (create-provider {:api-key \"sk-...\"}))"
-  ([] (->BailianProvider {}))
-  ([opts] (->BailianProvider opts)))
+  ([] (->DashScopeProvider {}))
+  ([opts] (->DashScopeProvider opts)))
