@@ -176,15 +176,20 @@
                      (get-in kernel [:settings :max-tool-iterations])
                      default-max-iterations)
         ;; 自愈：上一轮暂停未 resume 会留下悬空 tool_use，开新一轮前补「已取消」配平
-        _ (heal-dangling-tool-calls! store conv-id)
-        result (run-tool-loop kernel (mapv msg/normalize messages)
-                              max-iter [] init-ctx
-                              (:tool-gate opts)
-                              (build-chat-opts kernel opts))]
-    ;; 临时会话仅在完成时清理（暂停需保留历史以便 resume）
-    (when (and ephemeral? (= :completed (:status result)))
-      (memory/mem-clear store conv-id))
-    result))
+        _ (heal-dangling-tool-calls! store conv-id)]
+    (try
+      (let [result (run-tool-loop kernel (mapv msg/normalize messages)
+                                  max-iter [] init-ctx
+                                  (:tool-gate opts)
+                                  (build-chat-opts kernel opts))]
+        ;; 临时会话在完成时清理（暂停需保留历史以便 resume）
+        (when (and ephemeral? (= :completed (:status result)))
+          (memory/mem-clear store conv-id))
+        result)
+      (catch Throwable t
+        ;; 临时会话异常（如 max-iterations）也清理，避免 store 泄漏残留条目
+        (when ephemeral? (memory/mem-clear store conv-id))
+        (throw t)))))
 
 (defn resume
   "从 paused 的 loop-state 继续工具循环。
