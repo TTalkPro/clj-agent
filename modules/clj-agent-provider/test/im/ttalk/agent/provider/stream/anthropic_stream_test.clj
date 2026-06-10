@@ -49,6 +49,30 @@
       (is (= 50 (:output-tokens usage)))
       (is (= 800 (:cache-read-tokens usage))))))
 
+(deftest tool-use-input-accumulation-test
+  (testing "tool_use 块：content_block_start 自带 :input {}，input_json_delta 累积后参数不丢失（回归 BUG1）"
+    (let [events [{:type "content_block_start" :index 0
+                   ;; 真实 Anthropic API 会预置空 :input {}
+                   :content_block {:type "tool_use" :id "t1" :name "get_weather" :input {}}}
+                  {:type "content_block_delta" :index 0
+                   :delta {:type "input_json_delta" :partial_json "{\"city\":"}}
+                  {:type "content_block_delta" :index 0
+                   :delta {:type "input_json_delta" :partial_json "\"Beijing\"}"}}
+                  {:type "content_block_stop" :index 0}]
+          state (run-events events)
+          resp (stream/normalize-response state)]
+      ;; 修复前：(str {} json) 致 cheshire 只解析出 {}，参数整体丢失
+      (is (= [{:id "t1" :name :get_weather :input {:city "Beijing"}}]
+             (:tool-calls resp))))))
+
+(deftest tool-use-empty-input-test
+  (testing "tool_use 无 input_json_delta（空参数工具）时 :input 保持空 map，不报错"
+    (let [events [{:type "content_block_start" :index 0
+                   :content_block {:type "tool_use" :id "t2" :name "now" :input {}}}
+                  {:type "content_block_stop" :index 0}]
+          resp (stream/normalize-response (run-events events))]
+      (is (= [{:id "t2" :name :now :input {}}] (:tool-calls resp))))))
+
 (deftest error-event-test
   (testing "error 事件被记录，build-response 抛出"
     (let [state (run-events [{:type "message_start" :message {:id "m1"}}

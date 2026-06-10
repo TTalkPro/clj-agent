@@ -122,10 +122,14 @@
               :accumulated new-accumulated}])
 
           ;; 工具输入增量（JSON 片段）
+          ;; 注意：content_block_start 的 tool_use 块自带 :input {}（空 map），
+          ;; 不能直接 (str {} partial-json) 否则会拼成 "{}{...}" 致 cheshire 只解析出 {}，
+          ;; 工具参数整体丢失。非字符串累加器一律视作空串起步。
           (= delta-type "input_json_delta")
           (let [block-index (:index event)
                 partial-json (:partial_json delta)
-                existing (get-in state [:content-blocks block-index :input] "")]
+                existing (get-in state [:content-blocks block-index :input])
+                existing (if (string? existing) existing "")]
             [(assoc-in state [:content-blocks block-index :input]
                        (str existing partial-json))
              nil])
