@@ -245,7 +245,28 @@
           tools [{:name "calc" :description "Calculator"}]]
       ((:chat-fn svc) [] {:tools tools :tool-choice :auto})
       (is (= tools (get-in @call-args [:config :tools])))
-      (is (= {:type "auto"} (get-in @call-args [:config :tool-choice]))))))
+      ;; core 只下发中立关键字，wire 转换由各 provider 边界负责（见 openai_compat/anthropic ->wire-tool-choice）
+      (is (= :auto (get-in @call-args [:config :tool-choice]))))))
+
+(deftest test-service-chat-fn-tool-choice-without-tools
+  (testing "无 tools 时即便指定 tool-choice 也不下发（严格 OpenAI 端点会 400）"
+    (let [call-args (atom nil)
+          p (reify provider/ILLMProvider
+              (provider-name [_] :spy)
+              (call-llm [_ config _ _]
+                (reset! call-args {:config config})
+                {:text "ok" :tool-calls nil})
+              (extract-tool-calls [_ response] (:tool-calls response))
+              (extract-text [_ response] (:text response))
+              (build-tool-result [_ tool-id content]
+                {:role "tool" :tool_call_id tool-id :content content})
+              (build-assistant-message [_ response]
+                {:role "assistant" :content (:text response)})
+              (build-result-messages [_ assistant-msg _] [assistant-msg]))
+          svc (service/create-service p {:model "test" :max-tokens 100})]
+      ((:chat-fn svc) [] {:tool-choice :auto})
+      (is (nil? (get-in @call-args [:config :tools])))
+      (is (nil? (get-in @call-args [:config :tool-choice]))))))
 
 (deftest test-service-chat-fn-tool-choice-none
   (testing "chat-fn with :tool-choice :none does not pass tools"

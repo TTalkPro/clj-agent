@@ -321,6 +321,16 @@
 ;;; API 参数构建
 ;;; ============================================================
 
+(defn- ->wire-tool-choice
+  "将 core 下发的中立 tool-choice 翻译为 Anthropic wire 形态。
+   关键字 :auto/:required/:none → {:type ...}；其余（已是 map，如 {:type \"tool\" :name ..}）原样透传。"
+  [tc]
+  (case tc
+    :auto {:type "auto"}
+    :required {:type "any"}
+    :none {:type "none"}
+    tc))
+
 (defn- build-params
   "构建 Anthropic API 请求参数
 
@@ -348,7 +358,7 @@
                         :messages messages}
                  (seq all-tools)     (assoc :tools all-tools)
                  system-prompt       (assoc :system system-prompt)
-                 tool-choice         (assoc :tool_choice tool-choice)
+                 tool-choice         (assoc :tool_choice (->wire-tool-choice tool-choice))
                  (some? temperature) (assoc :temperature temperature)
                  (some? top-p)       (assoc :top_p top-p)
                  (some? top-k)       (assoc :top_k top-k)

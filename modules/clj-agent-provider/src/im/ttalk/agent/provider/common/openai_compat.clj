@@ -25,6 +25,16 @@
 ;;; 参数构建
 ;;; ============================================================
 
+(defn- ->wire-tool-choice
+  "将 core 下发的中立 tool-choice 翻译为 OpenAI wire 形态。
+   关键字 :auto/:required/:none → 字符串；其余（字符串 / {:type \"function\" ...} 指定工具）原样透传。"
+  [tc]
+  (case tc
+    :auto "auto"
+    :required "required"
+    :none "none"
+    tc))
+
 (defn build-messages
   "构建消息列表（含系统提示）
 
@@ -77,7 +87,7 @@
       (some? temperature)       (assoc :temperature temperature)
       (some? top-p)             (assoc :top_p top-p)
       (seq tool-schemas)        (assoc :tools tool-schemas)
-      tool-choice               (assoc :tool_choice tool-choice)
+      tool-choice               (assoc :tool_choice (->wire-tool-choice tool-choice))
       ;; 并行工具调用开关（OpenAI：默认 true；置 false 强制一次一个工具）
       (some? parallel-tool-calls) (assoc :parallel_tool_calls parallel-tool-calls)
       (seq stop)                (assoc :stop stop)

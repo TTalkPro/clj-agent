@@ -28,7 +28,10 @@
 
    合并策略：
    - tool-choice 为 :none 时不传 tools（强制纯文本回复）
-   - tool-choice :auto/:required 转换为 API 格式 {:type \"auto\"}/{:type \"any\"}
+   - tool-choice 以**中立关键字** :auto/:required 下发，由各 provider 边界翻译为自身 wire 格式
+     （OpenAI: \"auto\"/\"required\"；Anthropic: {:type \"auto\"}/{:type \"any\"}）。core 不做带
+     provider 倾向的 wire 转换。
+   - 仅在**确实有 tools** 时才下发 tool-choice：无 tools 还带 tool_choice，严格 OpenAI 端点会 400。
    - system-prompt 直接传递
 
    参数：
@@ -45,12 +48,9 @@
     (cond-> config
       (seq tools)
       (assoc :tools tools)
-      (and tool-choice (not= tool-choice :none))
-      (assoc :tool-choice
-             (case tool-choice
-               :auto {:type "auto"}
-               :required {:type "any"}
-               tool-choice))
+      ;; 只在有 tools 且非 :none 时透传中立 tool-choice（provider 侧翻译）
+      (and tool-choice (not= tool-choice :none) (seq tools))
+      (assoc :tool-choice tool-choice)
       system-prompt
       (assoc :system-prompt system-prompt))))
 
