@@ -44,8 +44,41 @@
 
 **用 JDK 内置的 `java.net.http` + `BodyHandlers/fromLineSubscriber`（响应式 `Flow.Subscriber`）做传输层**，
 保留现有 `on-token`/`on-complete`/`on-error` 回调作为**框架无关的底层原语**，
-再提供三个**可选适配器**（core.async channel / Ring SSE / 阻塞 seq）把这条流接到任意上层。
-Luminus 整合 = 一个 Ring `StreamableResponseBody` 适配器（约 15 行）。
+再提供**可选**适配器（core.async channel / Ring SSE / 阻塞 seq）把这条流接到任意上层。
+Web 框架整合（Luminus/Undertow 等）只作 `examples/` 示例，**不进 core**。
+
+---
+
+## 0.5 设计原则：框架无关（硬约束，不可违反）
+
+> **agent 框架是一个库，不是 web 应用。core 永远不依赖、不捆绑任何 web 框架
+> （Luminus / Ring / Undertow / Jetty / Aleph / http-kit-server 一律不行）。**
+
+理由：
+
+1. **依赖方向**：web 应用**依赖**本库，不能反过来。core 一旦依赖某 web 框架，等于强迫所有
+   使用者都用它——而 agent 的场景远不止 web（CLI、桌面、批处理、MQ 消费者、非 Luminus 的 web 栈…）。
+2. **回调原语就是解耦边界**：`on-token / on-complete / on-error + cancel` 是最小的 push 契约，
+   任何 sink 都能接（http-kit `send!` / Undertow `ServerSentEventConnection.send` / Aleph manifold
+   stream / Jetty async body / 终端 print / core.async channel…）。**框架特定的东西全在适配那一层，
+   core 一无所知。**
+3. **越薄的边界越长寿**：web 框架会换（Luminus 默认 server 就在 http-kit→Immutant→Undertow 间换过几轮），
+   JDK `java.net.http` + 一个回调契约不会。绑死某框架 = 跟着它的生命周期走。
+
+落地约束：
+
+| 层 | 约束 |
+|---|---|
+| **core**（clj-agent-core / clj-agent-provider 的 src） | 零 web 框架依赖。只暴露回调原语（`chat-stream` + on-token/cancel）。传输用 JDK `java.net.http`（非 web 框架） |
+| **集成代码** | 只放 `examples/`（文档级、可跑）；**不进 src、不进核心 `:deps`**。web 依赖只在该 example 的 alias 里 |
+| **不挑框架站队** | 不做"我们集成 Luminus"这种定位。要给示例就**覆盖多个**（http-kit / Undertow-SSE / Aleph）或讲**通用模式**（"拿到 token 往你的 sink 写"） |
+| **若真要发适配器** | 单独的可选模块 + web 依赖标 `provided`/optional，绝不污染 core |
+
+现状核对（已满足）：`chat-stream` 只认回调原语、`stream_client` 用 JDK `java.net.http`、
+`deps.edn` 无任何 Ring/Luminus/Undertow/web-server 依赖。**本原则是"守住现状"，不是"待改造"。**
+
+> 注：下文第 3–4 节给出的 Ring SSE / Undertow / core.async 适配器代码，全部属于"**示例 / 可选**"
+> 范畴，**不是 core 的一部分**——按本原则它们只应出现在 `examples/` 或独立可选模块中。
 
 ---
 
@@ -161,13 +194,18 @@ Luminus 整合 = 一个 Ring `StreamableResponseBody` 适配器（约 15 行）�
 
 ---
 
-## 4. Luminus / Ring 整合（核心诉求）
+## 4. Web 框架整合示例（**仅 examples，不进 core**——见 §0.5）
 
-Luminus = Ring + 路由（reitit/compojure）+ 服务器（Immutant/Undertow 或 http-kit-server）。
-对 SSE，最**可移植**的方式是 Ring 1.6+ 的 `StreamableResponseBody`——sync / async adapter 都支持。
+> 以下是把回调原语接到具体 web 栈的**示例 glue**，按 §0.5 它们只应放在 `examples/`、
+> web 依赖只在 example 的 alias 里。core 不依赖 Ring/Luminus/Undertow。
+> 不只演示一种：SSE-over-Ring（可移植）/ Undertow 原生 SSE / http-kit / Aleph 都是同一个
+> "把 token 往 sink 写"的模式。
+
+以 Ring `StreamableResponseBody` 为例（最可移植，sync/async adapter 都支持）：
 
 ```clojure
-(ns im.ttalk.agent.adapters.ring-sse
+;; 放 examples/，不是 core src
+(ns example.ring-sse
   (:require [ring.core.protocols :as rp]
             [cheshire.core :as json]
             [clojure.java.io :as io]))
@@ -242,10 +280,11 @@ Luminus handler 里：
 
 ## 7. 迁移范围、风险、回滚
 
-- **新增**：`http/stream_client.clj`（java.net.http 真流式传输）+ `adapters/ring_sse.clj`（可选 ring 依赖）+ 可选 `adapters/async_chan.clj`（可选 core.async 依赖）。
+- **新增（core）**：仅 `http/stream_client.clj`（java.net.http 真流式传输）。**适配器不进 core**——
+  Ring SSE / Undertow / core.async 等只作 `examples/` 示例（见 §0.5）。
 - **改**：provider 的 `call-api-stream` / `call-llm-stream` 改走新传输（anthropic / openai_compat 两处 + bailian 仍声明不支持）。SSE 解析（`parse-sse-line` / `process-event`）**复用现有**——它们是纯函数，与传输无关，本就测得好。
 - **保留 http-kit** 用于非流式 `call-llm`（工作良好），不强行大改；后续若要统一可再评估全迁 java.net.http（能彻底去掉 http-kit 依赖）。
-- **依赖**：核心仍零新增（java.net.http 是 JDK 内置）；ring-core / core.async 仅适配器 ns 用，作为**可选/provided 依赖**，不进核心 `:deps`。
+- **依赖**：core 零新增（java.net.http 是 JDK 内置）。ring-core / core.async / web 框架**一律不进核心 `:deps`**——只在 examples 的 alias 里（§0.5 硬约束）。
 - **风险与验证**：流式的真问题（断流、非 2xx、连接生命周期、超时、背压、客户端断连取消）**本地 mock 验不出**，**必须对真实 SSE 端点**（如 GLM/DeepSeek/Anthropic）跑端到端：首 token 延迟、逐块时序、长生成不掐断、断页面后上游停止。
 - **回滚**：传输层隔离在独立 ns，可用 config flag 在新旧传输间切，灰度。
 
@@ -253,9 +292,10 @@ Luminus handler 里：
 
 ## 8. 推荐落地顺序
 
-1. **传输层 + 回调原语**（修 BUG2 本体）：`stream_client.clj`（java.net.http `fromLineSubscriber`），provider 流式切过去；真实端点验证逐块时序。
-2. **Ring SSE 适配器**（Luminus 整合诉求）：`adapters/ring_sse.clj` + 一个 examples/ 下的 Luminus/Ring demo handler（http-kit-server 原生异步版 + StreamableResponseBody 可移植版各一）。
-3. **core.async channel 适配器**（团队熟、可组合）：`adapters/async_chan.clj`。
-4. **接 kernel / SimpleAgent**：service `:stream-fn` + `chat-stream`（ReAct 内"文本回合"流、`on-complete` 落库）。
+1. ✅ **传输层 + 回调原语**（修 BUG2 本体）：`stream_client.clj`（java.net.http `fromLineSubscriber`），provider 流式切过去；真实端点验证逐块时序。**（已完成）**
+2. ✅ **接 kernel / SimpleAgent**：service `:stream-fn` + `invoke-chat-stream` + `chat-stream`（ReAct 内"文本回合"流、`on-complete` 落库）。**（已完成）**
+3. ⏳ **集成示例（examples，非 core）**：按需在 `examples/` 放框架无关的 glue 演示（"token → sink"模式），
+   可选覆盖 http-kit / Undertow 原生 SSE / Aleph / core.async channel。**不挑框架站队，不进 core**（§0.5）。
 
-> 1–2 步即可满足"真流式 + Luminus 整合"两个核心诉求；3–4 步把它做成框架级一等公民。
+> 第 1–2 步（核心能力）已落地：真流式 + 接入 agent 主链路、MiniMax 端到端验证。
+> 第 3 步纯属对外集成的**文档/示例**，按"框架无关"原则只作 examples。
