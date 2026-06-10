@@ -1,9 +1,17 @@
 # D5 — 错误模型统一方案
 
-> 状态：📐 设计中（待实施）
+> 状态：🚧 核心已实施（步骤 1-3、6 完成；4-5 按判断暂缓，见文末）。
 > 来源：2026-06-10 全量审查 D5「错误模型四套并存」。
 > 目标：把"一次操作失败"在全代码库收敛为**一个错误值 + 一套分层信封约定**，
 > 让任意层的调用方用一致方式判断成败、读取错误类型、决定是否重试。
+>
+> **已落地（2026-06-10）**：
+> - 步骤 1：`exception->error` 升级为幂等枢纽（透传 canonical ex-data + 识别 UnsupportedOperationException）。
+> - 步骤 2：openai_compat / anthropic 的 HTTP 失败改用 `errors/http-response->error` + `throw!`。
+> - 步骤 3：bailian 同步失败 + 流式不支持均抛 canonical error（流式不再裸抛 UnsupportedOperationException）。
+> - 步骤 6：README 错误模型说明更新。
+> - **端到端验证**：provider 401 → SimpleAgent `{:status :error}` 且 `:retryable? false`、`:status 401`、`:type :auth-error`（修复前会变成 `:provider-error`/可重试）。回归测试见 client_test/model_test/providers_test。
+> - 步骤 4（kernel 工具错误渲染）、5（converter/factory error payload）暂缓：详见文末「实施说明」。
 
 ---
 
@@ -172,3 +180,22 @@ provider 不再手搓 ex-info 的 data 形状，改为构造 canonical error 再
 - **不**做 D6（core 收回 wire 知识）——那是响应**成功**路径的解析，与错误模型正交。
 - **不**引入 Result/Either 库或 monad；沿用 core 既有的 `[:ok]/[:error]` 朴素元组。
 - **不**改 `{:success bool}` 的布尔字段名（仅统一其失败 payload 为 canonical error）。
+
+---
+
+## 7. 实施说明（步骤 4-5 为何暂缓）
+
+- **步骤 4（kernel 工具错误 → 字符串）暂缓**：D 边界本就该是"给模型读的字符串"，
+  P1 已保证非空（message 为 nil 时回退异常类名）。原计划用 `format-error (exception->error e)`
+  渲染——但 `error.clj` 的类型表是 LLM/HTTP 取向（:auth-error/:provider-error 等），
+  工具内部 NPE 经它会被标成 `[PROVIDER-ERROR]`，**对工具错误是误导**。故保留 P1 的
+  message/类名渲染，不强套 LLM 错误类型。
+- **步骤 5（converter/factory 的失败 payload → canonical）暂缓**：二者是 B 边界
+  result 信封（`{:success bool}` / `[:ok]/[:error]`），其 `:error` 字符串对解析/配置
+  失败已足够可读；升级为 canonical 需让 core 的 converter 反向依赖 error 模块、并改动
+  factory 契约与多处测试，收益（这些错误极少进入需要 `:retryable?` 判断的重试路径）
+  与改动面不成比例。留待与 D7（converter/factory 重构）一并处理更合适。
+
+> 结论：D5 的**核心价值**——provider→client 的错误保真（修复 401 被误标可重试）——
+> 已由步骤 1-3 完整交付并端到端验证。步骤 4-5 属边界 polish，单独看收益有限，
+> 已记录留待相关重构时顺带完成。

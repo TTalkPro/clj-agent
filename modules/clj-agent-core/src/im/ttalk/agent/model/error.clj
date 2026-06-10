@@ -186,9 +186,13 @@
   [response provider]
   (let [status (:status response)
         body (:body response)
+        ;; message 必须是字符串：OpenAI 风格错误体是 {:error {:message ".." :type ".."}}（嵌套 map），
+        ;; 直接取 (:error body) 会得到 map，throw! 的 ex-info 要求 String 会 ClassCastException。
         message (cond
+                  (and (map? body) (map? (:error body)))
+                  (or (get-in body [:error :message]) (pr-str (:error body)))
                   (and (map? body) (or (:error body) (:message body)))
-                  (or (:error body) (:message body))
+                  (str (or (:error body) (:message body)))
                   (string? body) body
                   :else (str "HTTP " status " error"))
         opts {:status status :provider provider}]
@@ -212,7 +216,9 @@
    抛出：
    ExceptionInfo"
   [err]
-  (throw (ex-info (:message err) err)))
+  ;; ex-info 要求 message 为 String；canonical error 的 :message 理应是字符串，
+  ;; 但保险起见强制 str（避免上游构造失误导致 ClassCastException 掩盖真实错误）。
+  (throw (ex-info (str (:message err)) err)))
 
 (defn throw-if-error!
   "如果是错误结果则抛出异常
