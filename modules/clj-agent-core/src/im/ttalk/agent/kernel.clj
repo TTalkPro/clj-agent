@@ -31,8 +31,7 @@
 
     Service 格式:
     Service 是一个 map，定义 LLM 调用接口：
-      {:chat-fn           (fn [messages opts] -> {:text \"...\" :tool-calls [...] :assistant-msg {...}})
-       :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
+      {:chat-fn (fn [messages opts] -> {:text \"...\" :tool-calls [...]})}
 
     返回值格式:
       invoke-tool: {:value v :context ctx}
@@ -250,7 +249,7 @@
     - opts:     {:tools 工具 schema 列表 / :tool-choice / :system-prompt / :context}
 
     返回:
-    {:response {:text \"...\" :tool-calls [...] :assistant-msg {...}}
+    {:response {:text \"...\" :tool-calls [...]}
      :context  updated-ctx}"
   [kernel messages opts]
   (let [service (:service kernel)
