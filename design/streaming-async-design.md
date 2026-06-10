@@ -19,8 +19,16 @@
 >   (2) stream_client 缺默认 Content-Type → 部分服务端解析不到 body。两者均已修 + 回归测试。
 > - 全套单测 **192/762/0**。
 >
-> **待续**：kernel/SimpleAgent `chat-stream` 接入（step 4/5）；Undertow WebSocket 适配器示例；
-> 移除 http-kit 流式死代码（post-stream / post-stream-async / process-sse-stream / stream-request 现已无 provider 调用）。
+> **已落地（续，2026-06-10）**：
+> - 移除 http-kit 流式死代码（`http/client.clj` 605→263 行，仅剩非流式）+ 废弃 with-retry。
+> - `stream_client` 充分测试：本地 `com.sun.net.httpserver` SSE 服务，4 个集成测试（真增量时序 /
+>   Content-Type / 非 2xx canonical / cancel）。
+> - **kernel/SimpleAgent `chat-stream` 接入（step 4/5 完成）**：service `:stream-fn`（不支持流式回退同步）、
+>   kernel `invoke-chat-stream`（复用 chat filter 链）、react loop 按 on-token 走流式、client `chat-stream`。
+>   memory 每回合落库完整 assistant 消息，与同步不分叉。3 个单测 + MiniMax 端到端 live（多轮记忆正确）。
+> - 全套单测 **197/769/0**。
+>
+> **待续**：Undertow WebSocket 适配器示例（用户已暂时忽略，按需再做）。
 
 ---
 

@@ -58,7 +58,10 @@
   - [x] **两条流式路径全部迁移**：anthropic（anthropic/minimax/zhipu）+ openai_compat（openai/deepseek/zhipu/gemini/mistral/ollama/openai-compat）；deepseek 测试改 stub 新传输。
   - [x] **真实端点验证（MiniMax-M2.7 两个端点）**：Anthropic 端点 reasoning 分离、OpenAI 端点 token 逐个到达 + extract-text 完整。`examples/minimax_stream_test.clj`。
   - [x] **live 测试逮到并修 2 个真 bug**：`http-response->error` 嵌套 map message → ClassCastException；stream_client 缺默认 Content-Type。均加回归测试。全套单测 **192/762/0**。
-  - [~] 待续：kernel/SimpleAgent `chat-stream` 接入、Undertow WebSocket 适配器示例、移除 http-kit 流式死代码（现已无 provider 调用）。
+  - [x] **移除 http-kit 流式死代码 + 废弃 with-retry**：`http/client.clj` 删 `stream-request`/`request-stream`/`post-stream`/`process-sse-stream`/`post-stream-async`/`stream-sse`/`parse-sse-line`/`with-retry`（605→263 行），ns 文档改为"仅非流式"；删对应死测试。该模块现只剩非流式请求。
+  - [x] **stream_client 充分测试**：`stream_client_test.clj` 用 JDK 内置 `com.sun.net.httpserver` 起本地 SSE 服务（零依赖不联网），4 个集成测试覆盖真增量时序、默认 Content-Type、Authorization 透传、非 2xx→canonical error、显式 Content-Type 不覆盖、cancel 取消上游。全套 **194/757/0**。
+  - [x] **kernel/SimpleAgent `chat-stream` 接入**：service 加 `:stream-fn`（不支持流式的 provider 回退同步 + 全文单 token）；kernel 加 `invoke-chat-stream`（复用同一 chat filter 链，on-token 透传 terminal）；react loop 有 on-token 时走 invoke-chat-stream；client 加 `chat-stream`。memory 在每回合流结束落库完整 assistant 消息，与同步**不分叉**。单测 3 个（流式/回退/带工具）+ **MiniMax 端到端 live 验证多轮记忆**。全套 **197/769/0**。
+  - [~] 待续：Undertow WebSocket 适配器示例（已忽略，按需再做）。
 - [~] **D5 错误模型统一**（核心已完成 2026-06-10，方案见 `design/error-model-unification.md`）：
   - [x] 步骤1 `exception->error` 升级为幂等枢纽（透传 canonical ex-data + 识别 UnsupportedOperationException）
   - [x] 步骤2 openai_compat / anthropic HTTP 失败改抛 canonical error（`http-response->error` + `throw!`）
