@@ -32,13 +32,28 @@
 - [x] **BUG prompt/protocol.clj 未 require**：`core/prompt/protocol.clj` 补 `clojure.set`/`clojure.string`；`selector.clj` 补 `clojure.set`。
 - [x] **D4 文档承诺不符**：README Filter 段改写为真实 `:chat/:tool` API；**实现了 `:openai-compat` provider**（`openai_compat_provider.clj`，base-url 必填，注册进 factory）；README 流式说明改为「仅 provider 层可用，未接入 kernel/agent」。回归测试 `openai-compat-registered-and-creatable`。
 
-## P2 — 设计 / 工程债 / 测试盲区（需较大重构，逐步推进）
+## P2 — 设计 / 工程债 / 测试盲区
 
-- [ ] **BUG2 http-kit 伪流式**：`provider/http/client.clj`。`:as :stream` 全量缓冲，首 token 延迟失效、长生成超时掐断。需替换 HTTP 客户端方案（java.net.http / clj-http streaming）。
-- [ ] **D5 错误模型四套并存**：统一错误归一化（ex-info / `{:status :error}` / `[:ok v]` / `{:success bool}`），bailian 流式裸抛 UnsupportedOperationException 纳入通道。
-- [ ] **D6 core 泄漏厂商 wire 知识**：`core/model/response.clj:55-159` 等。协议补 `extract-usage`/`extract-finish-reason`，wire 知识收回 provider。
-- [ ] **D7 重复抽象**：4 份响应归一化合并；core 双消息体系统一；移除旧 `http/client.clj with-retry`（会重试 4xx）；删协议死方法。
-- [ ] **并发未设防**：`core/client.clj:90-136` state-atom check-then-act + reset!；`memory/sqlite.clj:36-57` 共享 Connection 非线程安全。
-- [ ] **D9 工程/发布**：provider `:local/root` 进 pom 致发布链断；build.clj scm/url 占位符；clj-http/openai-clojure 死依赖；根 deps.edn 手工拍平。
-- [ ] **测试盲区**：流式整链路、并发、timeout/approval filter、max-iterations 超限、工厂 env 配置、provider record 端到端 mock。
-- [ ] 其余低优先级：mock error-mock 不抛错、`validate-args` 死代码、`combine :separator` 失效、未知错误默认 retryable、余弦零向量 NaN、ephemeral 会话异常路径泄漏 等。
+### ✅ 已完成（2026-06-10，局部、低风险）
+
+> 测试：194 → 196 tests / 754 assertions / 0 failures。
+
+- [x] **D9 工程/发布**：移除死依赖 `openai-clojure`（根+provider）与 `clj-http`（provider）；两个 build.clj scm/url 占位符改为真实仓库 `TTalkPro/clj-agent`；provider build.clj 用 `:override-deps` 把 core 的 `:local/root` 在构建期替换为 `:mvn/version`，修复发布 pom 缺失 core 依赖；README 依赖章节同步。
+- [x] **并发设防（SQLite）**：`memory/sqlite.clj` 所有操作 `(locking conn ...)` 串行化，修复共享 Connection 非线程安全 + with-transaction 全局 autocommit 切换的竞态。（InMemoryStore 经核查 swap! 已原子，无需改。）client ns 补「单实例不可并发 chat/resume」声明。
+- [x] **低优先级 bugs**：
+  - mock `create-error-mock` 现真正抛错（函数型 mock-response 被调用）；`record-history? false` 时 get/clear 不再 NPE。回归测试 `mock-error-and-history-test`。
+  - `tool/validate-args` 接入 `invoke`：缺必填参数返回明确错误而非进函数体 NPE。回归测试 `invoke-validates-required-args`。
+  - `prompt/api combine` 的 `:separator` 用 `(apply concat opts)` 摊平 kwargs，不再静默失效。
+  - `model/error` 未知错误类型默认 `retryable? false`（保守）。回归测试见 model_test。
+  - `prompt/selector` 余弦相似度零向量分母为 0 时记 0 分，避免 NaN 排序。
+  - `react/invoke` try/catch：ephemeral 会话异常路径也清理，不再泄漏 store 条目。
+  - `converter/api validate` 对不支持的 parser fail-closed（返回未通过）而非谎报 `{:valid true}`。
+- [x] **D7（部分）**：`http/client.clj with-retry`（会盲目重试 4xx 的重复实现）标记 `^:deprecated` 并在 docstring 警示，引导改用 `http/retry/maybe-with-retry`。
+
+### ⏳ 待办（架构级，建议各自专项推进，勿在常规改动中草率重构）
+
+- [ ] **BUG2 http-kit 伪流式**：`provider/http/client.clj`。`:as :stream` 全量缓冲，首 token 延迟失效、长生成超时掐断。**需替换 HTTP 客户端方案**（java.net.http / clj-http streaming），影响所有 provider 流式路径，须对真实端点验证。
+- [ ] **D5 错误模型统一**：把 ex-info / `{:status :error}` / `[:ok v]` / `{:success bool}` 四套收敛为一套；bailian 流式裸抛 UnsupportedOperationException 纳入归一化通道。跨多文件、改契约。
+- [ ] **D6 core 收回厂商 wire 知识**：`core/model/response.clj:55-159` 等硬编码各家 usage/finish-reason/thinking 形态。协议补 `extract-usage`/`extract-finish-reason`，wire 知识下沉 provider。
+- [ ] **D7（剩余）重复抽象合并**：4 份响应归一化（model.clj / service.clj / response_parser.clj / stream/openai.clj）合并为一处；core 内 `model/types.clj` 与 `model/message.clj` 双消息体系统一；删协议中无人消费的死方法（build-result-messages 等）。
+- [ ] **测试盲区（增量）**：流式整链路（call-api-stream / process-sse-stream / 断流 / 非 2xx）、并发、timeout/approval filter、provider record 端到端 mock、工厂 env 配置。

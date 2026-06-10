@@ -372,6 +372,12 @@
     (let [e (errors/error :auth-error "unauthorized")]
       (is (not (:retryable? e)))))
 
+  (testing "未知错误类型保守默认不可重试（回归：曾默认 true 致反复重试）"
+    (let [e (errors/error :some-unknown-error "?")]
+      (is (not (:retryable? e))))
+    ;; 显式 :retryable? 仍优先
+    (is (:retryable? (errors/error :some-unknown-error "?" {:retryable? true}))))
+
   (testing "error with opts"
     (let [e (errors/error :network-error "failed" {:status 502 :provider :openai})]
       (is (= 502 (:status e)))

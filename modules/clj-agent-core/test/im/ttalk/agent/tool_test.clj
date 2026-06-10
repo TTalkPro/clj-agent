@@ -33,3 +33,20 @@
           required (get-in schema [:input_schema :required])]
       (is (= ["x"] required))
       (is (contains? (get-in schema [:input_schema :properties]) :precision)))))
+
+(deftool needs-city
+  "查天气（city 必填）"
+  [[city :string "城市"]]
+  (str city " 晴"))
+
+(deftest invoke-validates-required-args
+  (testing "LLM 漏传必填参数时返回明确错误，而非进入函数体 NPE（回归：validate-args 曾是死代码）"
+    (let [r (tool/invoke #'needs-city {})]
+      (is (false? (:success r)))
+      (is (re-find #"缺少必需参数: city" (:error r)))))
+  (testing "提供必填参数正常执行"
+    (let [r (tool/invoke #'needs-city {:city "北京"})]
+      (is (:success r))
+      (is (= "北京 晴" (:result r)))))
+  (testing "带 :default 的参数省略不算缺参"
+    (is (:success (tool/invoke #'round-num {:x 1})))))

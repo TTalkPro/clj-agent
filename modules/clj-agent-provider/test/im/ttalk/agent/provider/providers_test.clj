@@ -11,7 +11,8 @@
             [im.ttalk.agent.provider.mistral :as mistral]
             [im.ttalk.agent.provider.deepseek :as deepseek]
             [im.ttalk.agent.provider.minimax :as minimax]
-            [im.ttalk.agent.provider.ollama :as ollama]))
+            [im.ttalk.agent.provider.ollama :as ollama]
+            [im.ttalk.agent.provider.mock :as mock]))
 
 ;;; ============================================================
 ;;; defprovider 生成的 provider
@@ -92,6 +93,16 @@
     (let [supported (set (llm/supported-providers))]
       (are [k] (contains? supported k)
         :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :bailian :openai-compat :mock))))
+
+(deftest mock-error-and-history-test
+  (testing "create-error-mock 调用时抛 ex-info（回归：曾把函数对象当文本返回不抛错）"
+    (let [p (mock/create-error-mock)]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (model/call-llm p {} [{:role "user" :content "hi"}] [])))))
+  (testing "record-history? false 时 get/clear 不 NPE，返回 []"
+    (let [p (mock/create-mock-provider {:record-history? false})]
+      (is (= [] (mock/get-call-history p)))
+      (is (= [] (mock/clear-call-history p))))))
 
 (deftest openai-compat-registered-and-creatable
   (testing "openai-compat 经 factory 创建：base-url 必填，provider-name 为 :openai-compat"
