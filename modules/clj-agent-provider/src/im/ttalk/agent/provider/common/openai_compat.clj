@@ -21,7 +21,8 @@
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]
-            [im.ttalk.agent.model.error :as errors]))
+            [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.streaming :as streaming]))
 
 ;;; ============================================================
 ;;; 参数构建
@@ -237,7 +238,7 @@
         result (promise)
         err    (promise)
         ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发（不再是 http-kit 伪流式）
-        {:keys [future]}
+        {:keys [future cancel]}
         (stream-client/post-stream-async
           api-url
           {:headers headers :body params :timeout timeout
@@ -250,9 +251,15 @@
                                                                  :id (get-id)
                                                                  :model (get-model))))
            :on-error (fn [e] (deliver err e))
-           :provider (:provider-name config)})]
-    @future                              ;; 阻塞直到流结束（保持同步签名）
+           :provider (:provider-name config)})
+        cancelled? (atom false)
+        ;; 包装的 cancel：先标记本地 cancelled? 再取消上游；取消时 @future 各种异常都吞，
+        ;; cond 里 cancelled? 优先于 err（取消会触发 onError 网络异常）。
+        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
+    (try @future                         ;; 阻塞直到流结束（保持同步签名）
+         (catch Throwable _ nil))
     (cond
+      @cancelled?        (stream/build-response (stream/make-initial-state))  ;; 取消：空响应（token 已流出），不抛错
       (realized? err)    (errors/throw! @err)
       (realized? result) @result
       :else (errors/throw! (errors/error :provider-error

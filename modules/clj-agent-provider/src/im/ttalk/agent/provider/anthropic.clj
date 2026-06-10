@@ -73,6 +73,7 @@
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.common.cache :as cache]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
             [im.ttalk.agent.provider.wire.anthropic :as wire]
@@ -483,7 +484,7 @@
         result (promise)
         err    (promise)
         ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发（不再是 http-kit 伪流式）
-        {:keys [future]}
+        {:keys [future cancel]}
         (stream-client/post-stream-async
           api-url
           {:headers headers :body params :timeout timeout
@@ -493,9 +494,16 @@
            :on-token on-token
            :on-complete (fn [state] (deliver result (stream/build-response state)))
            :on-error (fn [e] (deliver err e))
-           :provider (:provider-name config :anthropic)})]
-    @future                              ;; 阻塞直到流结束（保持同步签名）
+           :provider (:provider-name config :anthropic)})
+        cancelled? (atom false)
+        ;; 登记「包装的 cancel」：被调用时先标记本地 cancelled?，再取消上游。
+        ;; 取消会让 java.net.http 触发 onError（连接中止的网络异常）或让 future 抛
+        ;; CancellationException——故 @future 宽 catch，且 cond 里 cancelled? 优先于 err。
+        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
+    (try @future                         ;; 阻塞直到流结束（保持同步签名）
+         (catch Throwable _ nil))
     (cond
+      @cancelled?        (stream/build-response (stream/make-initial-state))  ;; 取消：空响应（token 已流出），不抛错
       (realized? err)    (errors/throw! @err)
       (realized? result) @result
       :else (errors/throw! (errors/error :provider-error
