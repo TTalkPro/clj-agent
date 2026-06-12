@@ -8,9 +8,6 @@
         ;; 日志
         com.taoensso/timbre {:mvn/version "6.3.0"}
 
-        ;; HTTP (LLM provider http client)
-        http-kit/http-kit {:mvn/version "2.8.0"}
-
         ;; 持久化 ChatMemory（SQLite 后端，按需加载 core.memory.sqlite）
         com.github.seancorfield/next.jdbc {:mvn/version "1.3.939"}
         org.xerial/sqlite-jdbc {:mvn/version "3.45.1.0"}}
