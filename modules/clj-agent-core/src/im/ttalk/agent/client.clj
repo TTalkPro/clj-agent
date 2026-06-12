@@ -42,7 +42,8 @@
      (when (= :paused (:status r))
        (resume a \"approved\")))"
   (:refer-clojure :exclude [reset!])
-  (:require [im.ttalk.agent.callbacks :as cb]
+  (:require [im.ttalk.agent.advisor.memory :as memory-filter]
+            [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.error :as errors]
@@ -69,6 +70,17 @@
   [kernel]
   (some #(when (= :memory (:name %)) (:store %)) (:filters kernel)))
 
+(defn- with-memory-filter
+  "返回把 memory-filter(store) 挂到（或替换进）kernel 的副本。
+   store 为 nil 时只移除原有 memory-filter（无记忆 kernel）。
+   memory-filter 始终放最前，确保其他 filter 看到完整历史。"
+  [kernel store]
+  (let [others (vec (remove #(= :memory (:name %)) (:filters kernel)))]
+    (assoc kernel :filters
+           (if store
+             (into [(memory-filter/memory-filter store)] others)
+             others))))
+
 (defn create-agent
   "创建 Agent
 
@@ -80,28 +92,46 @@
    - :temperature   温度
    - :system-prompt 系统提示词
    - :tools         tool var / inline-tool map 列表
-   - :filters       Filter 列表
    - :memory        ChatMemory store（可选，默认 in-memory；false → 无记忆）
    - :conversation-id 会话 ID（可选）
    - :max-iterations 最大工具循环次数（默认 10）
    - :callbacks     回调 map（:on-turn-start/:on-turn-end/:on-turn-error/:on-llm-call/
                               :on-llm-result/:on-tool-call/:on-tool-result/:on-interrupt/:on-resume）
 
+   :kernel 与 :memory 可独立同时指定，store 解析规则：
+   - :memory store   → 用它（预构建 kernel 上的 memory-filter 会被重挂到该 store）
+   - :memory false   → 无记忆（预构建 kernel 上的 memory-filter 会被移除）
+   - :memory 缺省    → 复用 kernel memory-filter 的 store；都没有则默认 in-memory
+
+   Agent 层不暴露 kernel filter（传入 :filters 会被忽略并警告）；
+   需要 filter 请用 kernel/build-kernel 自建后经 :kernel 传入。
+
    返回 Agent map"
   [opts]
-  (let [prebuilt (:kernel opts)
+  (when (contains? opts :filters)
+    (log/warn "create-agent 不接受 :filters（agent 层只暴露 :callbacks）；"
+              "如需 kernel filter，请自建 kernel 后以 :kernel 传入"))
+  (let [opts (dissoc opts :filters)
+        prebuilt (:kernel opts)
         kstore (when prebuilt (kernel-memory-store prebuilt))
         store (cond
                 (false? (:memory opts)) nil   ;; 显式 false → 无记忆（子 agent 隔离用）
-                kstore kstore
-                :else  (or (:memory opts) (memory/in-memory-store)))
-        _ (when prebuilt
-            (cond
-              (and kstore (:memory opts) (not (identical? kstore (:memory opts))))
-              (log/warn "create-agent 同时收到 :kernel 与不同的 :memory；以 kernel 自带 memory-filter 的 store 为准")
-              (nil? kstore)
-              (log/warn "create-agent 收到的预构建 :kernel 未挂载 memory-filter；多轮对话历史不会持久化")))
-        k (or prebuilt (common/build-kernel (assoc opts :memory store)))]
+                (:memory opts) (:memory opts) ;; 显式 store → 以用户指定为准
+                kstore kstore                 ;; 复用预构建 kernel 自带的 store
+                :else  (memory/in-memory-store))
+        k (cond
+            (nil? prebuilt)
+            (common/build-kernel (assoc opts :memory store))
+
+            (identical? store kstore)
+            prebuilt   ;; store 未变，原样复用
+
+            :else
+            (do
+              (when (and kstore store)
+                (log/info "create-agent 同时收到 :kernel 与不同的 :memory；"
+                          "以 :memory 为准，kernel memory-filter 已重挂到该 store"))
+              (with-memory-filter prebuilt store)))]
     {:id              (str "agent-" (java.util.UUID/randomUUID))
      :kernel          k
      :memory          store
