@@ -45,7 +45,9 @@
 ;;; Kernel Record
 ;;; ============================================================
 
-(defrecord Kernel [service filters tools tool-vars settings])
+;; inline-handlers: {keyword -> (fn [args ctx] result)} — 内联工具处理函数，
+;; 由 delegate-tool 等动态构建的工具填充，与 tool-vars（var 引用）互补。
+(defrecord Kernel [service filters tools tool-vars inline-handlers settings])
 
 ;;; ============================================================
 ;;; Build API
@@ -70,18 +72,25 @@
                    :settings {:max-tool-iterations 10}})"
   [{:keys [service tools tool-vars filters settings]
     :or {tools [] filters [] settings {}}}]
-  (let [tool-vars-list (vec (or tool-vars tools))
-        compiled-tools (vec (for [v tool-vars-list
-                                  :when (tool/tool-function? v)]
-                              (tool/get-schema v)))
-        tool-vars-map (into {}
-                            (for [v tool-vars-list
-                                  :when (tool/tool-function? v)]
-                              [(keyword (:name (tool/get-schema v))) v]))]
+  (let [all-tools (vec (or tool-vars tools))
+        ;; 内联工具：map 且含 :handler fn（由 delegate-tool 等动态构建）
+        inline-tools (filter #(and (map? %) (fn? (:handler %))) all-tools)
+        var-tools    (filter var? all-tools)
+
+        compiled-var-tools (vec (for [v var-tools :when (tool/tool-function? v)]
+                                  (tool/get-schema v)))
+        var-map            (into {} (for [v var-tools :when (tool/tool-function? v)]
+                                      [(keyword (:name (tool/get-schema v))) v]))
+
+        ;; 内联工具：schema 去掉 :handler，handler 单独存入 inline-handlers
+        compiled-inline-tools (mapv #(dissoc % :handler) inline-tools)
+        inline-handler-map    (into {} (mapv #(vector (keyword (:name %)) (:handler %))
+                                             inline-tools))]
     (->Kernel service
               (vec filters)
-              compiled-tools
-              tool-vars-map
+              (into compiled-var-tools compiled-inline-tools)
+              var-map
+              inline-handler-map
               settings)))
 
 ;;; ============================================================
@@ -206,31 +215,46 @@
     错误:
     抛 ex-info（仅函数未找到；执行异常被 terminal 捕获为错误结果字符串）"
   [kernel fn-name args context]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))
-        found (find-function kernel fn-key)
-        _ (when-not found
-            (throw (ex-info (str "函数未找到: " fn-key)
-                            {:fn-name fn-key
-                             :available (list-functions kernel)})))
-        {:keys [tool-var]} found
-        func-def (build-func-def fn-key tool-var)
-        ;; 最内层：执行函数。异常捕获为错误结果（不中断 filter 链）
-        terminal (fn [req]
-                   (let [exec (try (tool/invoke tool-var (:args req) (:context req))
-                                   (catch Exception e
-                                     ;; getMessage 可能为 nil（如 NPE）→ 回退类名，避免 "错误: " 空串
-                                     {:success false
-                                      :error (or (not-empty (.getMessage e))
-                                                 (.getName (class e)))}))
-                         value (if (:success exec)
-                                 (:result exec)
-                                 (str "错误: " (:error exec)))]
-                     {:result value :context (or (:context exec) (:context req))}))
-        chain (filters/build-chain
-                (keep :tool (:filters kernel))
-                terminal)
-        out (chain {:function func-def :args args :context context})]
-    {:value (:result out) :context (:context out)}))
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
+    (if-let [inline-handler (get (:inline-handlers kernel) fn-key)]
+      ;; 内联工具（由 delegate-tool 等构建）：通过同一 filter 链执行
+      (let [func-def {:name fn-key :schema nil :sensitive false}
+            terminal (fn [req]
+                       (try
+                         (let [raw (inline-handler (:args req) (:context req))
+                               [res ctx] (if (and (map? raw) (contains? raw :result))
+                                           [(:result raw) (or (:context raw) (:context req))]
+                                           [raw (:context req)])]
+                           {:result (if (string? res) res (pr-str res)) :context ctx})
+                         (catch Exception e
+                           {:result (str "错误: " (or (not-empty (.getMessage e))
+                                                       (.getName (class e))))
+                            :context (:context req)})))
+            chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
+            out   (chain {:function func-def :args args :context context})]
+        {:value (:result out) :context (:context out)})
+
+      ;; 普通 var 工具（原有逻辑）
+      (let [found (find-function kernel fn-key)
+            _ (when-not found
+                (throw (ex-info (str "函数未找到: " fn-key)
+                                {:fn-name fn-key
+                                 :available (list-functions kernel)})))
+            {:keys [tool-var]} found
+            func-def (build-func-def fn-key tool-var)
+            terminal (fn [req]
+                       (let [exec (try (tool/invoke tool-var (:args req) (:context req))
+                                       (catch Exception e
+                                         {:success false
+                                          :error (or (not-empty (.getMessage e))
+                                                     (.getName (class e)))}))
+                             value (if (:success exec)
+                                     (:result exec)
+                                     (str "错误: " (:error exec)))]
+                         {:result value :context (or (:context exec) (:context req))}))
+            chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
+            out   (chain {:function func-def :args args :context context})]
+        {:value (:result out) :context (:context out)}))))
 
 ;;; ============================================================
 ;;; Invoke API - invoke-chat（纯 LLM 调用，带 chat filter）

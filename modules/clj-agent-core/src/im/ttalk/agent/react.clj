@@ -7,8 +7,13 @@
    按 conversation-id 拼出完整历史。
 
    store 显式传入(kernel 不再持有 memory)：用于 heal 与临时会话清理；
-   与 kernel 上挂载的 memory-filter 必须是同一个 store 实例。"
+   与 kernel 上挂载的 memory-filter 必须是同一个 store 实例。
+
+   callbacks 独立于 kernel filter：:on-llm-call/:on-llm-result/:on-tool-result
+   在循环关键节点直接触发，不走 filter 链。gate 评估结果缓存，确保每个工具调用
+   恰好触发一次观察回调（不重复）。"
   (:require [clojure.string]
+            [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.tool :as tool]
@@ -33,11 +38,9 @@
       (vec (for [tool-schema all-tools
                  :let [fn-name (keyword (:name tool-schema))
                        v (get tool-vars-map fn-name)]
-                 :when (and v
-                            (or (nil? tags-set)
-                                (tool/has-any-tag? v tags-set))
-                            (or (nil? exclude-tags-set)
-                                (not (tool/has-any-tag? v exclude-tags-set))))]
+                 :when (and (or (nil? v)  ;; inline tools（无 var）始终保留
+                                (and (or (nil? tags-set) (tool/has-any-tag? v tags-set))
+                                     (or (nil? exclude-tags-set) (not (tool/has-any-tag? v exclude-tags-set))))))]
              tool-schema)))))
 
 (defn- build-chat-opts
@@ -51,9 +54,7 @@
         tool-choice (or (:tool-choice opts) :auto)]
     (cond-> {:tools tool-schemas :tool-choice tool-choice}
       sp-str (assoc :system-prompt sp-str)
-      ;; 流式：on-token 透传，run-tool-loop 据此走 invoke-chat-stream
       (:on-token opts) (assoc :on-token (:on-token opts))
-      ;; 取消令牌：循环据它在回合间停止，并把在途 cancel 登记给它
       (:cancel-token opts) (assoc :cancel-token (:cancel-token opts)))))
 
 (defn execute-batch
@@ -63,28 +64,34 @@
    - :proceed 调 kernel/invoke-tool（异常捕获为错误结果，不中断）
    - :reject 跳过执行，填入「已拒绝执行」中立结果
 
+   on-tool-result: (fn [tool-name result-str])，nil 时不触发。在 execute-batch 内
+   对每个实际执行的工具恰好触发一次（:reject 的工具不触发）。
+
    返回: {:messages [...] :records [...] :context ...}"
-  [kernel tool-calls gate tool-context init-records]
-  (reduce
-    (fn [{:keys [messages records context]} tc]
-      (let [fn-key (keyword (:name tc))
-            decision (if gate (gate tc) :proceed)]
-        (if (= :reject decision)
-          {:messages (conj messages (msg/tool-result (:id tc) (:name tc) "已拒绝执行"))
-           :records  (conj records {:name fn-key :args (:input tc) :result :rejected})
-           :context  context}
-          (let [{:keys [value context]}
-                (try (kernel/invoke-tool kernel fn-key (:input tc) context)
-                     (catch Exception e
-                       ;; getMessage 可能为 nil（如 NPE）→ 回退类名，避免 "错误: " 空串
-                       {:value (str "错误: " (or (not-empty (.getMessage e))
-                                                 (.getName (class e))))
-                        :context context}))]
-            {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
-             :records  (conj records {:name fn-key :args (:input tc) :result value})
-             :context  context}))))
-    {:messages [] :records init-records :context tool-context}
-    tool-calls))
+  ([kernel tool-calls gate tool-context init-records]
+   (execute-batch kernel tool-calls gate tool-context init-records nil))
+  ([kernel tool-calls gate tool-context init-records on-tool-result]
+   (reduce
+     (fn [{:keys [messages records context]} tc]
+       (let [fn-key (keyword (:name tc))
+             decision (if gate (gate tc) :proceed)]
+         (if (= :reject decision)
+           {:messages (conj messages (msg/tool-result (:id tc) (:name tc) "已拒绝执行"))
+            :records  (conj records {:name fn-key :args (:input tc) :result :rejected})
+            :context  context}
+           (let [{:keys [value context]}
+                 (try (kernel/invoke-tool kernel fn-key (:input tc) context)
+                      (catch Exception e
+                        {:value (str "错误: " (or (not-empty (.getMessage e))
+                                                   (.getName (class e))))
+                         :context context}))]
+             (when on-tool-result
+               (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
+             {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
+              :records  (conj records {:name fn-key :args (:input tc) :result value})
+              :context  context}))))
+     {:messages [] :records init-records :context tool-context}
+     tool-calls)))
 
 (defn run-tools
   "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。"
@@ -102,9 +109,10 @@
 
 (defn heal-dangling-tool-calls!
   "开新一轮前的自愈：为 conv-id 历史里的悬空 tool_use 补「已取消」中立结果，使会话重新配平。
-   无悬空则 no-op。store 即挂载于 kernel 的同一 memory store。"
+   无悬空则 no-op。store 即挂载于 kernel 的同一 memory store。
+   store 为 nil 时（如 :memory false 的子 Agent）直接跳过，无需自愈。"
   [store conv-id]
-  (when conv-id
+  (when (and store conv-id)
     (let [dangling (dangling-tool-call-ids (memory/mem-get store conv-id))]
       (when (seq dangling)
         (memory/mem-add store conv-id
@@ -115,62 +123,72 @@
 (defn- run-tool-loop
   "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或被 gate 暂停。
 
+   callbacks 携带观察回调（:on-llm-call/:on-llm-result/:on-tool-result）和元数据
+   （:metadata）。gate 评估结果按 tool-call :id 缓存，确保每个工具调用恰好触发
+   一次（不因 pause 检测的两阶段逻辑而重复）。
+
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {:tool-calls :remaining :records} :pending-tool {...} :tool-context c}"
-  [kernel delta remaining records tctx gate chat-opts]
-  (let [token (:cancel-token chat-opts)]
-   (loop [delta delta, remaining remaining, records records, tctx tctx]
-    ;; 回合间取消检查：上一回合后若被请求取消，则不再发起下一个 LLM 调用
-    (if (streaming/cancelled? token)
-      {:status :cancelled :tool-context tctx :tool-calls-made records}
-    ;; 注意：不在 loop 顶部检查上限。否则会在「最后一批工具已执行（副作用已发生）、
-    ;; 但其 tool-result 尚未经 invoke-chat→memory-filter 落库」之际抛异常，导致结果丢失、
-    ;; 历史留下悬空 tool_use（下一轮 heal 误标"已取消"，与实际相反）。
-    ;; 改为：先让 invoke-chat 落库上一批结果并给 LLM 产出最终文本的机会；只有当 LLM
-    ;; 仍要调工具、却已无预算处理其结果时，才在 execute-batch 之前抛出（绝不执行无法落库的批次）。
-    (let [;; 每个 LLM 回合：有 on-token 走流式（invoke-chat-stream），否则同步。
-          ;; 工具回合通常无 :token（只产 tool_calls），最终文本回合才逐 token 流给用户。
-          ;; 流式时把 *register-cancel* 绑到 token，provider 据此登记在途 cancel-fn。
-          {:keys [response context]}
-          (if (:on-token chat-opts)
-            (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
-              (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx)))
-            (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
-          tctx context
-          calls (response/response-tool-calls response)]
-      (cond
-        ;; 本回合进行中被取消：返回 :cancelled（token 已流给用户）
-        (streaming/cancelled? token)
-        {:status :cancelled :response response
-         :tool-context tctx :tool-calls-made records}
+  [kernel delta remaining records tctx gate chat-opts callbacks]
+  (let [token (:cancel-token chat-opts)
+        meta (or (:metadata callbacks) {})
+        on-tool-result (:on-tool-result callbacks)]
+    (loop [delta delta, remaining remaining, records records, tctx tctx]
+      (if (streaming/cancelled? token)
+        {:status :cancelled :tool-context tctx :tool-calls-made records}
+        (do
+          ;; 每次 LLM 调用前触发（观察用，不影响流程）
+          (cb/invoke callbacks :on-llm-call delta meta)
+          (let [{:keys [response context]}
+                (if (:on-token chat-opts)
+                  (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
+                    (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx)))
+                  (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
+                tctx context
+                calls (response/response-tool-calls response)]
+            ;; 每次 LLM 返回后触发（观察用，不影响流程）
+            (cb/invoke callbacks :on-llm-result response meta)
+            (cond
+              (streaming/cancelled? token)
+              {:status :cancelled :response response
+               :tool-context tctx :tool-calls-made records}
 
-        (empty? calls)
-        {:status :completed :response response
-         :tool-context tctx :tool-calls-made records}
+              (empty? calls)
+              {:status :completed :response response
+               :tool-context tctx :tool-calls-made records}
 
-        (and gate (some #(= :pause (gate %)) calls))
-        (let [paused-call (first (filter #(= :pause (gate %)) calls))]
-          {:status :paused
-           :pause-reason (str "需要审批: " (:name paused-call))
-           :loop-state {:tool-calls calls :remaining (dec remaining) :records records}
-           :pending-tool {:name (:name paused-call)
-                          :args (:input paused-call)
-                          :tool-call paused-call}
-           :tool-calls-made records
-           :tool-context tctx})
+              ;; gate 评估缓存：按 :id 存结果，确保每个 tool-call 恰好评估一次。
+              ;; 这修正了原来 some+filter 两阶段导致的双重触发问题，
+              ;; 使 on-tool-call 集成在 gate 中时能保证「每工具恰好一次」语义。
+              :else
+              (let [gate-cache (when gate
+                                 (into {} (mapv #(vector (:id %) (gate %)) calls)))
+                    cached-gate (when gate-cache
+                                  (fn [tc] (get gate-cache (:id tc) :proceed)))
+                    paused-call (when gate-cache
+                                  (first (filter #(= :pause (get gate-cache (:id %) :proceed)) calls)))]
+                (cond
+                  (some? paused-call)
+                  {:status :paused
+                   :pause-reason (str "需要审批: " (:name paused-call))
+                   :loop-state {:tool-calls calls :remaining (dec remaining) :records records}
+                   :pending-tool {:name (:name paused-call)
+                                  :args (:input paused-call)
+                                  :tool-call paused-call}
+                   :tool-calls-made records
+                   :tool-context tctx}
 
-        ;; 还要调工具但预算耗尽（含 max-iterations<=0 的退化/负数配置）：不执行，直接抛
-        (<= remaining 0)
-        (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
-                        {:reason :max-iterations-exceeded
-                         :tool-call-count (count records)
-                         :tool-calls-made records}))
+                  (<= remaining 0)
+                  (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
+                                  {:reason :max-iterations-exceeded
+                                   :tool-call-count (count records)
+                                   :tool-calls-made records}))
 
-        :else
-        (let [{:keys [messages records context]}
-              (execute-batch kernel calls gate tctx records)]
-          (recur messages (dec remaining) records context))))))))
+                  :else
+                  (let [{:keys [messages records context]}
+                        (execute-batch kernel calls cached-gate tctx records on-tool-result)]
+                    (recur messages (dec remaining) records context)))))))))))
 
 (defn invoke
   "工具调用循环主入口（统一循环）。
@@ -179,7 +197,8 @@
    - kernel:   Kernel 实例（需注册 LLM 服务）
    - store:    ChatMemory store（与 kernel 上 memory-filter 同一实例；用于 heal/临时清理）
    - messages: 本轮新消息（中立消息）
-   - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags}
+   - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags
+               :callbacks  回调 map（:on-llm-call/:on-llm-result/:on-tool-result/:metadata 等）}
 
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
@@ -196,20 +215,19 @@
         max-iter (or (:max-iterations opts)
                      (get-in kernel [:settings :max-tool-iterations])
                      default-max-iterations)
-        ;; 自愈：上一轮暂停未 resume 会留下悬空 tool_use，开新一轮前补「已取消」配平
+        callbacks (or (:callbacks opts) {})
         _ (heal-dangling-tool-calls! store conv-id)]
     (try
       (let [result (run-tool-loop kernel (mapv msg/normalize messages)
                                   max-iter [] init-ctx
                                   (:tool-gate opts)
-                                  (build-chat-opts kernel opts))]
-        ;; 临时会话在完成时清理（暂停需保留历史以便 resume）
-        (when (and ephemeral? (= :completed (:status result)))
+                                  (build-chat-opts kernel opts)
+                                  callbacks)]
+        (when (and ephemeral? store (= :completed (:status result)))
           (memory/mem-clear store conv-id))
         result)
       (catch Throwable t
-        ;; 临时会话异常（如 max-iterations）也清理，避免 store 泄漏残留条目
-        (when ephemeral? (memory/mem-clear store conv-id))
+        (when (and ephemeral? store) (memory/mem-clear store conv-id))
         (throw t)))))
 
 (defn resume
@@ -226,12 +244,14 @@
   (let [{:keys [tool-calls remaining records]} loop-state
         tctx (or (:context opts) (ctx/create))
         gate (:tool-gate opts)
-        ;; rejected：把暂停那批里 gate 判 :pause 的工具落实为 :reject（否则会被执行）
+        callbacks (or (:callbacks opts) {})
+        on-tool-result (:on-tool-result callbacks)
         resume-gate (if (= decision :approved)
                       (constantly :proceed)
                       (fn [tc] (if (and gate (= :pause (gate tc))) :reject :proceed)))
         {:keys [messages records context]}
-        (execute-batch kernel tool-calls resume-gate tctx records)]
+        (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
     (run-tool-loop kernel messages remaining records context
                    gate
-                   (build-chat-opts kernel opts))))
+                   (build-chat-opts kernel opts)
+                   callbacks)))

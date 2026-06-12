@@ -228,11 +228,11 @@
       (is (true? (get-in r [:error :retryable?])))
       ;; agent 状态落到 :error
       (is (= :error (:status @(:state-atom a))))))
-  (testing "普通异常 -> provider-error，并触发 :on-error 回调"
+  (testing "普通异常 -> provider-error，并触发 :callbacks :on-turn-error"
     (let [seen (atom nil)
           a (agent/create-agent {:provider (throwing-provider (RuntimeException. "boom"))
                                  :model "test"
-                                 :on-error (fn [{:keys [error]}] (reset! seen error))})
+                                 :callbacks {:on-turn-error (fn [err _m] (reset! seen err))}})
           r (agent/chat a "hi")]
       (is (= :error (:status r)))
       (is (= :provider-error (get-in r [:error :type])))
@@ -272,25 +272,30 @@
       (is (= "来自预构建" (:text (agent/chat a "测试")))))))
 
 ;;; ============================================================
-;;; pause / resume（需配置 :on-pause 启用 gate）
+;;; pause / resume（通过 callbacks :on-tool-call 启用 gate）
 ;;; ============================================================
 
-(deftest no-pause-without-on-pause-test
-  (testing "不配 on-pause：敏感工具不暂停，直接执行"
+(defn- dangerous-gate
+  "拦截 :dangerous-tool，用于 pause/resume 测试。"
+  []
+  {:on-tool-call (fn [n _] (when (= :dangerous-tool n) {:interrupt "需要审批"}))})
+
+(deftest no-pause-without-on-tool-call-test
+  (testing "不配 callbacks :on-tool-call：所有工具直接执行，不暂停"
     (let [p (ts/create-mock-provider
               [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "x"}}]}
                {:text "已执行" :tool-calls nil}])
-          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin})] ;; 无 :on-pause
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin})]
       (let [r (agent/chat a "删除")]
         (is (= :completed (:status r)))
         (is (= :dangerous-tool (:name (first (:tool-calls-made r)))))))))
 
 (deftest sensitive-pause-test
-  (testing "配 on-pause：敏感工具暂停"
+  (testing "on-tool-call 返回 {:interrupt ...}：危险工具暂停"
     (let [p (ts/create-mock-provider
               [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "/tmp/x"}}]}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                                 :on-pause (fn [_] nil)})
+                                 :callbacks (dangerous-gate)})
           r (agent/chat a "删除文件")]
       (is (= :paused (:status r)))
       (is (string? (:pause-reason r)))
@@ -302,7 +307,7 @@
             [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "目标"}}]}
              {:text "操作已完成" :tool-calls nil}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                               :on-pause (fn [_] nil)})]
+                               :callbacks (dangerous-gate)})]
     (agent/chat a "执行危险操作")
     (is (agent/paused? a))
     (let [r (agent/resume a "approved")]
@@ -315,7 +320,7 @@
             [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "目标"}}]}
              {:text "好的，已取消" :tool-calls nil}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                               :on-pause (fn [_] nil)})]
+                               :callbacks (dangerous-gate)})]
     (agent/chat a "执行危险操作")
     (let [r (agent/resume a "rejected")]
       (is (= :completed (:status r)))
@@ -326,23 +331,25 @@
         (is (not-any? #(re-find #"已执行危险操作" (:content %)) tool-msgs))))))
 
 (deftest mixed-tools-pause-test
-  (testing "safe + sensitive 混合：在 sensitive 处暂停"
+  (testing "safe + sensitive 混合：在 dangerous-tool 处暂停"
     (let [p (ts/create-mock-provider
               [{:text nil :tool-calls [{:id "c1" :name :safe-tool :input {:input "数据"}}
                                        {:id "c2" :name :dangerous-tool :input {:target "目标"}}]}
                {:text "全部完成" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                                 :on-pause (fn [_] nil)})
+                                 :callbacks (dangerous-gate)})
           r (agent/chat a "混合操作")]
       (is (= :paused (:status r)))
       (is (= :dangerous-tool (:name (:pending-tool r)))))))
 
-(deftest on-pause-callback-test
+(deftest on-interrupt-callback-test
   (let [log (atom nil)
         p (ts/create-mock-provider
             [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "重要"}}]}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                               :on-pause (fn [info] (reset! log info))})]
+                               :callbacks (assoc (dangerous-gate)
+                                                 :on-interrupt
+                                                 (fn [info _m] (reset! log info)))})]
     (agent/chat a "删除重要文件")
     (is (some? @log))
     (is (string? (:reason @log)))
@@ -351,7 +358,7 @@
 (deftest resume-not-paused-throws-test
   (let [p (ts/create-mock-provider [{:text "正常" :tool-calls nil}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                               :on-pause (fn [_] nil)})]
+                               :callbacks (dangerous-gate)})]
     (agent/chat a "你好")
     (is (thrown? clojure.lang.ExceptionInfo (agent/resume a "approved")))))
 
@@ -365,7 +372,7 @@
               [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "x"}}]}
                {:text "新回答" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
-                                 :on-pause (fn [_] nil)})]
+                                 :callbacks (dangerous-gate)})]
       (is (= :paused (:status (agent/chat a "删除"))))
       ;; 不 resume，直接新对话
       (let [r (agent/chat a "换个问题")]
@@ -383,7 +390,7 @@
                [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "/tmp/x"}}]}])
           a1 (agent/create-agent {:provider p1 :model "test" :tools ts/test-plugin
                                   :memory store :conversation-id "shared-heal"
-                                  :on-pause (fn [_] nil)})]
+                                  :callbacks (dangerous-gate)})]
       (is (= :paused (:status (agent/chat a1 "删除"))))
       ;; 第二个 agent 自身不处于暂停态 → cancel-pending! 不触发，纯靠 kernel 入口自愈
       (let [p2 (ts/create-mock-provider [{:text "新回答" :tool-calls nil}])
