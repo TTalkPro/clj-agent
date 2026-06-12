@@ -22,7 +22,7 @@
    (dashscope/call-dashscope config messages tools)"
   (:require [clojure.string :as str]
             [cheshire.core :as json]
-            [org.httpkit.client :as http]
+            [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.streaming :as streaming]
@@ -120,20 +120,17 @@
 (defn- do-request
   "执行 HTTP 请求
 
-   参数:
-   - url: API URL
-   - api-key: API Key
-   - body: 请求体
-   - opts: {:timeout ...}"
+    参数:
+    - url: API URL
+    - api-key: API Key
+    - body: 请求体
+    - opts: {:timeout ...}"
   [url api-key body opts]
   (let [timeout (or (:timeout opts) default-timeout)
-        response @(http/request
-                    {:method :post
-                     :url url
-                     :headers {"Authorization" (str "Bearer " api-key)
-                               "Content-Type" "application/json"}
-                     :body (json/generate-string body)
-                     :timeout timeout})]
+        response (http/post url
+                            :headers {"Authorization" (str "Bearer " api-key)}
+                            :body body
+                            :timeout timeout)]
     ;; D5：失败一律抛 canonical error（ex-info data 即 errors/error map）。
     ;; 连接级错误（DNS/超时/重置）：网络层失败，可重试。
     (when-let [err (:error response)]
