@@ -1,5 +1,5 @@
 (ns im.ttalk.agent.provider.http.client
-  "HTTP 客户端工具模块（基于 http-kit）——**仅非流式**请求/响应。
+  "HTTP 客户端工具模块（基于 java.net.http）——**仅非流式**请求/响应。
 
    流式（SSE）已迁移到 `im.ttalk.agent.provider.http.stream-client`（java.net.http 真增量，
    见 design/streaming-async-design.md）；本模块不再提供流式 API。
@@ -11,11 +11,27 @@
    (http/post-async url callback :body {...})   ; 异步回调
    (http/request :get url :async? true :callback (fn [resp] ...))"
   (:refer-clojure :exclude [get])
-  (:require [org.httpkit.client :as http]
-            [cheshire.core :as json]
+  (:require [cheshire.core :as json]
             [taoensso.timbre :as log]
             [clojure.string :as str])
-  (:import [java.net URLEncoder]))
+  (:import [java.net URI URLEncoder]
+           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
+                          HttpResponse$BodyHandlers HttpHeaders]
+           [java.time Duration]
+           [java.nio.charset StandardCharsets]))
+
+;; ============================================================
+;; 共享 HttpClient（连接池复用；executor 可换虚拟线程）
+;; ============================================================
+
+(defonce ^{:doc "默认共享 HttpClient。executor 用虚拟线程：回调跑在虚拟线程上，
+   高并发不被固定线程池饿死；JDK 24+ 起 synchronized 不再 pin 虚拟线程。"}
+  default-client
+  (delay
+    (-> (HttpClient/newBuilder)
+        (.connectTimeout (Duration/ofSeconds 30))
+        (.executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor))
+        (.build))))
 
 ;; ============================================================
 ;; 配置默认值
@@ -84,6 +100,16 @@
         (clojure.core/get headers :x-request-id)
         (clojure.core/get headers "x-request-id"))))
 
+(defn- http-headers->map
+  "将 java.net.http.HttpHeaders 转换为 Clojure map，key 转为小写字符串。
+    HttpHeaders.map() 返回 Map<String,List<String>>，遍历得到 Map.Entry。"
+  [^HttpHeaders http-headers]
+  (let [hdrs-map (.map http-headers)
+        result (java.util.HashMap.)]
+    (doseq [[^String k v] hdrs-map]
+      (.put result (str/lower-case k) v))
+    (into {} result)))
+
 (defn- parse-response
   "解析 HTTP 响应
 
@@ -99,7 +125,6 @@
      :body (if (= as :json)
              (if (string? body)
                (try (json/parse-string body true)
-                    ;; 解析失败回退原始字符串（保留 body 供上层排查），但记 debug 不再完全无声
                     (catch Exception e
                       (log/debug "HTTP 响应体 JSON 解析失败，回退原始字符串"
                                  {:status status :error (.getMessage e)})
@@ -109,72 +134,87 @@
      :success? (<= 200 status 299)}))
 
 ;; ============================================================
+;; 请求构建
+;; ============================================================
+
+(defn- has-content-type?
+  [headers]
+  (some (fn [[k _]] (= "content-type" (str/lower-case (name k)))) headers))
+
+(defn- build-request
+  ^HttpRequest [method url headers body timeout]
+  (let [method-kw (keyword method)
+        body-str (when body
+                   (if (string? body) body (json/generate-string body)))
+        uri (URI/create url)
+        timeout-dur (Duration/ofMillis (or timeout *default-timeout*))
+        base-builder (-> (HttpRequest/newBuilder uri)
+                         (.timeout timeout-dur))
+        base-builder (if-not (has-content-type? headers)
+                       (doto base-builder (.header "Content-Type" "application/json"))
+                       base-builder)
+        req-builder (cond
+                      (= method-kw :get) (.GET base-builder)
+                      (= method-kw :post) (.POST base-builder (HttpRequest$BodyPublishers/ofString body-str))
+                      (= method-kw :put) (.PUT base-builder (HttpRequest$BodyPublishers/ofString body-str))
+                      (= method-kw :patch) (.PATCH base-builder (HttpRequest$BodyPublishers/ofString body-str))
+                      (= method-kw :delete) (.DELETE base-builder))]
+    (doseq [[k v] headers]
+      (.header req-builder (name k) (str v)))
+    (.build req-builder)))
+
+(defn- body-handler
+  "根据 :as 参数返回合适的 HttpResponse.BodyHandler"
+  [as]
+  (case as
+    :json (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)
+    :text (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)
+    :byte-array (HttpResponse$BodyHandlers/ofByteArray)
+    :stream (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)
+    (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))
+
+;; ============================================================
 ;; 核心请求函数
 ;; ============================================================
 
 (defn request
-  "发送 HTTP 请求
-
-   参数:
-   - method: 请求方法 (:get :post :put :patch :delete)
-   - url: 请求 URL
-
-   选项:
-   - :async?       是否异步（默认 false）
-   - :callback     异步回调 (fn [response])
-   - :headers      请求头 map
-   - :body         请求体（会自动 JSON 序列化）
-   - :query-params 查询参数
-   - :timeout      超时毫秒数
-   - :as           响应格式 (:json :text :stream :byte-array)
-
-   同步用法:
-   (request :get \"https://api.example.com/data\")
-   => {:status 200, :body {...}, :success? true}
-
-   异步用法:
-   (request :get \"https://api.example.com/data\"
-     :async? true
-     :callback (fn [resp]
-                 (println \"Status:\" (:status resp))))"
+  "发送 HTTP 请求"
   [method url & {:keys [async? callback headers body query-params timeout as]
                  :or {async? false
                       timeout *default-timeout*
                       as :json}}]
-  (let [opts (cond-> {:method method
-                      :url url
-                      :timeout timeout
-                      :as (case as
-                            :json :text
-                            :stream :stream
-                            :byte-array :byte-array
-                            :text)}
-                 true (assoc :headers (merge *default-headers* headers))
-                 body (assoc :body (if (string? body)
-                                    body
-                                    (json/generate-string body)))
-                 query-params (assoc :query-params query-params))]
+  (let [url (if query-params (build-url url query-params) url)
+        headers (merge *default-headers* headers)
+        req (build-request method url headers body timeout)
+        handler (body-handler as)
+        client @default-client]
     (if async?
-      ;; 异步模式
-      (http/request opts
-        (fn [{:keys [status headers body error] :as resp}]
-          (let [parsed (parse-response resp as)]
-            (when callback
-              (callback parsed)))))
-      ;; 同步模式
-      (let [resp @(http/request opts)]
-        (parse-response resp as)))))
+      (let [cf (.sendAsync ^HttpClient client req handler)]
+        (.thenApply cf
+          (reify java.util.function.Function
+            (apply [_ resp]
+              (let [status (.statusCode resp)
+                    headers (http-headers->map (.headers resp))
+                    body (.body resp)
+                    parsed (parse-response {:status status :headers headers :body body} as)]
+                (when callback
+                  (callback parsed))
+                parsed)))))
+      (try
+        (let [resp (.send ^HttpClient client req handler)
+              status (.statusCode resp)
+              headers (http-headers->map (.headers resp))
+              body (.body resp)]
+          (parse-response {:status status :headers headers :body body} as))
+        (catch java.io.IOException e
+          {:status 0 :error (.getMessage e) :success? false})))))
 
 ;; ============================================================
 ;; HTTP 便捷方法（宏批量生成）
 ;; ============================================================
 
 (defmacro ^:private defhttp-methods
-  "批量生成同步和异步 HTTP 便捷方法
-
-   对每个 [method has-body?] 对，生成:
-   - 同步函数: (method url & opts)
-   - 异步函数: (method-async url callback & opts)"
+  "批量生成同步和异步 HTTP 便捷方法"
   [& specs]
   `(do
      ~@(mapcat
@@ -199,25 +239,25 @@
                             :headers ~'headers
                             :query-params ~'query-params
                             :timeout ~'timeout :async? false)))
-              (if has-body?
-                `(defn ~async-name
-                   ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
-                   [~'url ~'callback & {:keys [~'headers ~'body ~'query-params ~'timeout]
-                                        :or {~'timeout *default-timeout*}}]
-                   (request ~method-kw ~'url
-                            :headers ~'headers :body ~'body
-                            :query-params ~'query-params
-                            :timeout ~'timeout
-                            :async? true :callback ~'callback))
-                `(defn ~async-name
-                   ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
-                   [~'url ~'callback & {:keys [~'headers ~'query-params ~'timeout]
-                                        :or {~'timeout *default-timeout*}}]
-                   (request ~method-kw ~'url
-                            :headers ~'headers
-                            :query-params ~'query-params
-                            :timeout ~'timeout
-                            :async? true :callback ~'callback)))]))
+               (if has-body?
+                 `(defn ~async-name
+                    ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
+                    [~'url ~'callback & {:keys [~'headers ~'body ~'query-params ~'timeout]
+                                         :or {~'timeout *default-timeout*}}]
+                    (request ~method-kw ~'url
+                             :headers ~'headers :body ~'body
+                             :query-params ~'query-params
+                             :timeout ~'timeout
+                             :async? true :callback ~'callback))
+                 `(defn ~async-name
+                    ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
+                    [~'url ~'callback & {:keys [~'headers ~'query-params ~'timeout]
+                                         :or {~'timeout *default-timeout*}}]
+                    (request ~method-kw ~'url
+                             :headers ~'headers
+                             :query-params ~'query-params
+                             :timeout ~'timeout
+                             :async? true :callback ~'callback)))]))
          specs)))
 
 (defhttp-methods
@@ -232,12 +272,7 @@
 ;; ============================================================
 
 (defn post-json
-  "POST JSON 请求（简化版）
-
-   自动设置 Content-Type 和 Accept 为 application/json
-
-   示例:
-   (post-json \"https://api.example.com/users\" {:name \"test\"})"
+  "POST JSON 请求（简化版）"
   ([url body]
    (post-json url body {}))
   ([url body opts]
@@ -249,10 +284,7 @@
          :timeout (or (:timeout opts) *default-timeout*))))
 
 (defn get-json
-  "GET JSON 请求（简化版）
-
-   示例:
-   (get-json \"https://api.example.com/users\")"
+  "GET JSON 请求（简化版）"
   ([url]
    (get-json url {}))
   ([url opts]
