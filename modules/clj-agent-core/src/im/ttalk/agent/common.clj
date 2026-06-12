@@ -21,9 +21,11 @@
     - :max-tokens    最大生成 token 数（默认 4096）
     - :temperature   温度参数（可选）
     - :tools         tool var 列表
-    - :filters       filter 向量（可选）
     - :memory        ChatMemory store（已解析；以 memory-filter 形态挂进 kernel）
-    - :max-iterations 最大工具调用循环次数（默认 10）"
+    - :max-iterations 最大工具调用循环次数（默认 10）
+
+    Agent 层不暴露 kernel filter：此处只挂 memory-filter。
+    需要自定义 filter 时，请直接用 kernel/build-kernel 自建后传 :kernel。"
   [opts]
   (let [service (service/create-service
                   (:provider opts)
@@ -32,13 +34,9 @@
                     (:temperature opts) (assoc :temperature (:temperature opts))))
         tools (:tools opts [])
         store (:memory opts)
-        user-filters (if (vector? (:filters opts))
-                       (:filters opts)
-                       (vec (:filters opts [])))
-        ;; memory-filter 放最前面，确保其他 filter 看到完整历史
         filters (if store
-                  (into [(memory-filter/memory-filter store)] user-filters)
-                  user-filters)]
+                  [(memory-filter/memory-filter store)]
+                  [])]
     (kernel/build-kernel
       {:service  service
        :tools    tools
