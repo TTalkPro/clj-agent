@@ -168,28 +168,80 @@
       ;; 历史：user, assistant(tool_calls), tool-result, assistant(text)
       (is (= 4 (count (agent/get-history a)))))))
 
-(deftest prebuilt-kernel-reuses-its-store-test
-  (testing "传入预构建 :kernel 时，agent 复用 kernel memory-filter 的 store，多轮历史不丢（回归 BUG5）"
+(deftest prebuilt-kernel-and-memory-test
+  (testing ":kernel 未传 :memory → 复用 kernel memory-filter 的 store，多轮历史不丢（回归 BUG5）"
     (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
                                       {:text "回复2" :tool-calls nil}])
           kernel-store (memory/in-memory-store)
           svc (service/create-service p {:model "test" :max-tokens 100})
-          ;; 预构建 kernel：memory-filter 绑定 kernel-store
           k (kernel/build-kernel {:service svc
                                   :filters [(ma/memory-filter kernel-store)]})
-          ;; 故意再传一个不同的 :memory，验证以 kernel 自带 store 为准
-          other-store (memory/in-memory-store)
-          a (agent/create-agent {:kernel k :memory other-store})]
-      ;; agent 的 store 必须是 kernel 的 store，而非另传的 other-store
+          a (agent/create-agent {:kernel k})]
       (is (identical? kernel-store (:memory a)))
-      (is (not (identical? other-store (:memory a))))
-      ;; 多轮对话：历史正确累积在同一 store（脱节时第二轮会丢历史）
+      ;; kernel 原样复用（store 未变不重建）
+      (is (identical? k (:kernel a)))
       (agent/chat a "消息1")
       (is (= 2 (count (agent/get-history a))))
       (agent/chat a "消息2")
-      (is (= 4 (count (agent/get-history a))))
-      ;; other-store 从未被写入
-      (is (empty? (memory/mem-get other-store (:conversation-id a)))))))
+      (is (= 4 (count (agent/get-history a))))))
+
+  (testing ":kernel + :memory 同时指定 → 以 :memory 为准，memory-filter 重挂到用户 store"
+    (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
+                                      {:text "回复2" :tool-calls nil}])
+          kernel-store (memory/in-memory-store)
+          my-store (memory/in-memory-store)
+          svc (service/create-service p {:model "test" :max-tokens 100})
+          k (kernel/build-kernel {:service svc
+                                  :filters [(ma/memory-filter kernel-store)]})
+          a (agent/create-agent {:kernel k :memory my-store})]
+      ;; agent 与重挂后的 kernel filter 用同一个用户 store（不脱节）
+      (is (identical? my-store (:memory a)))
+      (agent/chat a "消息1")
+      (agent/chat a "消息2")
+      (is (= 4 (count (memory/mem-get my-store (:conversation-id a)))))
+      ;; kernel 原 store 从未被写入
+      (is (empty? (memory/mem-get kernel-store (:conversation-id a))))))
+
+  (testing ":kernel 无 memory-filter 且未传 :memory → 自动挂默认 store，多轮可用"
+    (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
+                                      {:text "回复2" :tool-calls nil}])
+          svc (service/create-service p {:model "test" :max-tokens 100})
+          k (kernel/build-kernel {:service svc})
+          a (agent/create-agent {:kernel k})]
+      (is (some? (:memory a)))
+      (is (= [:memory] (mapv :name (:filters (:kernel a)))))
+      (agent/chat a "消息1")
+      (agent/chat a "消息2")
+      (is (= 4 (count (agent/get-history a))))))
+
+  (testing ":kernel + :memory false → 移除 memory-filter，完全无记忆"
+    (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}])
+          kernel-store (memory/in-memory-store)
+          svc (service/create-service p {:model "test" :max-tokens 100})
+          k (kernel/build-kernel {:service svc
+                                  :filters [(ma/memory-filter kernel-store)]})
+          a (agent/create-agent {:kernel k :memory false})]
+      (is (nil? (:memory a)))
+      (is (empty? (filter #(= :memory (:name %)) (:filters (:kernel a)))))
+      (is (= :completed (:status (agent/chat a "消息1"))))
+      (is (empty? (agent/get-history a)))
+      ;; kernel 原 store 不被写入
+      (is (empty? (memory/mem-get kernel-store (:conversation-id a))))))
+
+  (testing ":kernel + :memory 重挂时保留其他自定义 filter（顺序：memory 最前）"
+    (let [filter-ran (atom false)
+          audit {:name :audit
+                 :chat (fn [req chain] (reset! filter-ran true) (chain req))}
+          p (ts/create-mock-provider [{:text "OK" :tool-calls nil}])
+          my-store (memory/in-memory-store)
+          svc (service/create-service p {:model "test" :max-tokens 100})
+          k (kernel/build-kernel {:service svc
+                                  :filters [(ma/memory-filter (memory/in-memory-store)) audit]})
+          a (agent/create-agent {:kernel k :memory my-store})]
+      (is (= [:memory :audit] (mapv :name (:filters (:kernel a)))))
+      (agent/chat a "你好")
+      (is (true? @filter-ran) "自定义 filter 重挂后仍生效")
+      (is (= 2 (count (memory/mem-get my-store (:conversation-id a))))))))
 
 (defn- spy-provider [log]
   (reify provider/ILLMProvider
@@ -270,6 +322,32 @@
           k (kernel/build-kernel {:service svc})
           a (agent/create-agent {:kernel k})]
       (is (= "来自预构建" (:text (agent/chat a "测试")))))))
+
+(deftest create-agent-ignores-filters-test
+  (testing "agent 层不暴露 kernel filter：create-agent 传 :filters 被忽略，只挂 memory-filter"
+    (let [filter-ran (atom false)
+          user-filter {:name :user-spy
+                       :chat (fn [req chain] (reset! filter-ran true) (chain req))}
+          p (ts/create-mock-provider [{:text "OK" :tool-calls nil}])
+          a (agent/create-agent {:provider p :model "test"
+                                 :filters [user-filter]})]
+      ;; kernel 上只有 memory-filter，没有用户 filter
+      (is (= [:memory] (mapv :name (:filters (:kernel a)))))
+      (let [r (agent/chat a "你好")]
+        (is (= :completed (:status r)))
+        (is (false? @filter-ran) "用户 filter 不应被执行"))))
+  (testing "需要 filter 时走自建 kernel（:kernel 路径仍完整支持 filter）"
+    (let [filter-ran (atom false)
+          user-filter {:name :user-spy
+                       :chat (fn [req chain] (reset! filter-ran true) (chain req))}
+          p (ts/create-mock-provider [{:text "OK" :tool-calls nil}])
+          svc (service/create-service p {:model "test" :max-tokens 100})
+          store (memory/in-memory-store)
+          k (kernel/build-kernel {:service svc
+                                  :filters [(ma/memory-filter store) user-filter]})
+          a (agent/create-agent {:kernel k})]
+      (agent/chat a "你好")
+      (is (true? @filter-ran) "自建 kernel 的 filter 正常生效"))))
 
 ;;; ============================================================
 ;;; pause / resume（通过 callbacks :on-tool-call 启用 gate）
