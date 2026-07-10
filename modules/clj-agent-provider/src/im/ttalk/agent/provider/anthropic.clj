@@ -78,6 +78,8 @@
             [im.ttalk.agent.provider.wire.anthropic :as wire]
             [im.ttalk.agent.provider.stream.anthropic :as stream]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 配置
 ;;; ============================================================
@@ -483,6 +485,7 @@
        :make-initial-state stream/make-initial-state
        :build-response stream/build-response
        :on-token on-token
+       :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
        :provider (:provider-name config :anthropic)})))
 
 (defn call-anthropic-stream-async

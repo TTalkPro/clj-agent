@@ -21,6 +21,7 @@
             [taoensso.timbre :as log]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.streaming :as streaming]
+            [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.http.client :as http-client])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
@@ -149,33 +150,56 @@
    在 post-stream-async 的 opts 之外新增/替代：
    - :make-initial-state (fn [] state)        初始状态构造器（取消时再次调用以构建空响应）
    - :build-response     (fn [final-state])   流结束时构建最终响应
+   - :retry              建链阶段重试（opt-in，同 http.retry/maybe-with-retry 约定：
+                         true → 默认配置；map → 合并 default-retry-opts）。
+                         仅当失败可重试（canonical error :retryable?）**且尚未向
+                         on-token 流出任何 token** 时退避重试——token 已出说明调用方
+                         已观察到部分输出，重试会重复内容，此时按原样抛错。
+                         流式错误体不带响应头，故不支持 Retry-After，只走指数退避。
    （:initial-state / :on-complete / :on-error 由本函数接管，调用方不再传。）
 
-   取消语义：包装的 cancel 登记到 im.ttalk.agent.streaming 的在途注册表；被调用时
-   先标记本地 cancelled? 再取消上游。取消会让 java.net.http 触发 onError（连接中止）
-   或让 future 抛 CancellationException——故 @future 宽 catch，且 cond 里 cancelled?
-   优先于 err。取消返回空响应（token 已流出），不抛错。
+   取消语义：包装的 cancel 登记到 im.ttalk.agent.streaming 的在途注册表（每次
+   attempt 重新登记，替换为最新 cancel）；被调用时先标记本地 cancelled? 再取消上游。
+   取消会让 java.net.http 触发 onError（连接中止）或让 future 抛 CancellationException
+   ——故 @future 宽 catch，且 cond 里 cancelled? 优先于 err。取消返回空响应，不抛错、
+   不重试。
 
    失败：err 已兑现 → 按 D5 canonical error 抛出；流结束但无结果 → :provider-error。"
-  [url {:keys [make-initial-state build-response provider] :as opts}]
-  (let [result (promise)
-        err    (promise)
-        {:keys [future cancel]}
-        (post-stream-async
-          url
-          (-> opts
-              (dissoc :make-initial-state :build-response)
-              (assoc :initial-state (make-initial-state)
-                     :on-complete (fn [state] (deliver result (build-response state)))
-                     :on-error (fn [e] (deliver err e)))))
-        cancelled? (atom false)
-        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
-    (try @future                         ;; 阻塞直到流结束（保持同步签名）
-         (catch Throwable _ nil))
-    (cond
-      @cancelled?        (build-response (make-initial-state))
-      (realized? err)    (errors/throw! @err)
-      (realized? result) @result
-      :else (errors/throw! (errors/error :provider-error
-                                         "流式响应未产出结果"
-                                         {:provider provider})))))
+  [url {:keys [make-initial-state build-response provider on-token retry] :as opts}]
+  (let [retry-cfg (cond
+                    (true? retry) retry/default-retry-opts
+                    (map? retry)  (merge retry/default-retry-opts retry)
+                    :else         nil)]
+    (loop [attempt 0]
+      (let [result (promise)
+            err    (promise)
+            tokens-out? (atom false)
+            {:keys [future cancel]}
+            (post-stream-async
+              url
+              (-> opts
+                  (dissoc :make-initial-state :build-response :retry)
+                  (assoc :initial-state (make-initial-state)
+                         :on-token (when on-token
+                                     (fn [t] (reset! tokens-out? true) (on-token t)))
+                         :on-complete (fn [state] (deliver result (build-response state)))
+                         :on-error (fn [e] (deliver err e)))))
+            cancelled? (atom false)
+            _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
+        (try @future                     ;; 阻塞直到流结束（保持同步签名）
+             (catch Throwable _ nil))
+        (cond
+          @cancelled?        (build-response (make-initial-state))
+          (realized? err)
+          (let [e @err]
+            (if (and retry-cfg
+                     (< attempt (:max-retries retry-cfg))
+                     (:retryable? e)
+                     (not @tokens-out?))
+              (do (Thread/sleep (long (retry/compute-backoff attempt retry-cfg)))
+                  (recur (inc attempt)))
+              (errors/throw! e)))
+          (realized? result) @result
+          :else (errors/throw! (errors/error :provider-error
+                                             "流式响应未产出结果"
+                                             {:provider provider})))))))

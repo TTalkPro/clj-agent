@@ -29,6 +29,8 @@
             [im.ttalk.agent.provider.common.response-parser :as parser]
             [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 配置
 ;;; ============================================================
@@ -232,6 +234,7 @@
        :make-initial-state dstream/make-initial-state
        :build-response dstream/build-response
        :on-token on-token
+       :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
        :provider :dashscope})))
 
 ;;; ============================================================

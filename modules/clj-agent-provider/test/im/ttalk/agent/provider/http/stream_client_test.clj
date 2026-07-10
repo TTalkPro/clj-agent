@@ -144,6 +144,79 @@
           (is (= "application/xml" (:content-type @captured))))
         (finally (.stop server 0))))))
 
+;;; ============================================================
+;;; post-stream-sync 建链重试（opt-in）
+;;; ============================================================
+
+(defn- start-flaky-server
+  "前 fail-times 次请求回 status（如 503），之后走 SSE 成功流。返回含 :attempts 计数。"
+  [fail-times status lines]
+  (let [attempts (atom 0)
+        server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/"
+      (reify HttpHandler
+        (handle [_ ex]
+          (let [n (swap! attempts inc)]
+            (if (<= n fail-times)
+              (error-response! ex status "{\"error\":{\"message\":\"busy\"}}")
+              (write-sse-chunks! ex lines 0))))))
+    (.start server)
+    {:server server :port (.getPort (.getAddress server)) :attempts attempts}))
+
+(deftest sync-retry-transient-then-success-test
+  (testing ":retry 开启时，503 建链失败退避重试后成功；token 只流出一次"
+    (let [{:keys [server port attempts]}
+          (start-flaky-server 1 503 ["data: {\"v\":1}" "" "data: [DONE]"])
+          tokens (atom [])]
+      (try
+        (let [resp (sc/post-stream-sync (str "http://127.0.0.1:" port "/x")
+                     {:headers {} :body {:a 1}
+                      :parse-fn parse-data :process-fn accumulate
+                      :make-initial-state (fn [] {})
+                      :build-response identity
+                      :on-token (fn [t] (swap! tokens conj t))
+                      :retry {:max-retries 2 :base-delay 1 :max-delay 5}
+                      :provider :test})]
+          (is (= 2 @attempts) "首次 503 + 重试成功 = 2 次请求")
+          (is (= {:vals [1]} resp))
+          (is (= [{:v 1}] @tokens) "token 不重复"))
+        (finally (.stop server 0))))))
+
+(deftest sync-retry-not-on-non-transient-test
+  (testing "401（不可重试）即使开了 :retry 也立即抛出，只打一次"
+    (let [{:keys [server port attempts]} (start-flaky-server 99 401 [])]
+      (try
+        (let [e (try (sc/post-stream-sync (str "http://127.0.0.1:" port "/x")
+                       {:headers {} :body {:a 1}
+                        :parse-fn parse-data :process-fn accumulate
+                        :make-initial-state (fn [] {})
+                        :build-response identity
+                        :on-token (fn [_])
+                        :retry {:max-retries 3 :base-delay 1}
+                        :provider :test})
+                     nil
+                     (catch clojure.lang.ExceptionInfo ex (ex-data ex)))]
+          (is (= :auth-error (:type e)))
+          (is (= 1 @attempts) "不可重试错误不应重试"))
+        (finally (.stop server 0))))))
+
+(deftest sync-no-retry-by-default-test
+  (testing "未开 :retry 时 503 直接抛出，只打一次（默认行为不变）"
+    (let [{:keys [server port attempts]} (start-flaky-server 99 503 [])]
+      (try
+        (let [e (try (sc/post-stream-sync (str "http://127.0.0.1:" port "/x")
+                       {:headers {} :body {:a 1}
+                        :parse-fn parse-data :process-fn accumulate
+                        :make-initial-state (fn [] {})
+                        :build-response identity
+                        :on-token (fn [_])
+                        :provider :test})
+                     nil
+                     (catch clojure.lang.ExceptionInfo ex (ex-data ex)))]
+          (is (true? (:retryable? e)))
+          (is (= 1 @attempts)))
+        (finally (.stop server 0))))))
+
 (deftest cancel-stops-upstream-test
   (testing "cancel 后停止接收后续 token（取消上游）"
     (let [;; 20 块、每块间隔 80ms，给 cancel 留出时间

@@ -23,6 +23,8 @@
             [im.ttalk.agent.provider.stream.openai :as stream]
             [im.ttalk.agent.model.error :as errors]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 参数构建
 ;;; ============================================================
@@ -236,6 +238,7 @@
                                                           :id (get-id)
                                                           :model (get-model)))
        :on-token on-token
+       :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
        :provider (:provider-name config)})))
 
 ;;; ============================================================
