@@ -283,7 +283,7 @@
           (build-invoke-opts agent run-id opts))))))
 
 (defn chat-stream
-  "流式对话。`on-token` 接收 {:token / :reasoning-token / :accumulated ...}。
+  "流式对话。`on-token` 接收 {:token / :reasoning-token ...}（增量 token，需全文请自行累积）。
 
    返回最终结果（与 chat 同形）。取消：opts 传 `:cancel-token`。"
   ([agent message on-token] (chat-stream agent message on-token nil))

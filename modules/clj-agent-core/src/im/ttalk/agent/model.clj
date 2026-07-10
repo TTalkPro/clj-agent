@@ -62,7 +62,7 @@
      - config:   配置（同 call-llm）
      - messages: 消息列表
      - tools:    工具定义列表
-     - on-token: 回调函数 (fn [{:keys [token index accumulated]}] ...)
+     - on-token: 回调函数 (fn [{:keys [token index]}] ...)
 
      返回：最终完整响应
 
@@ -120,7 +120,7 @@
     (let [response (call-llm this config messages tools)
           text (extract-text this response)]
       (when (and on-token (seq text))
-        (on-token {:token text :index 0 :accumulated text}))
+        (on-token {:token text :index 0}))
       response))
 
   ;; 默认能力：不支持

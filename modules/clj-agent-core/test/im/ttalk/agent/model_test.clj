@@ -111,7 +111,7 @@
                 (let [response (provider/call-llm this config messages tools)
                       text (provider/extract-text this response)]
                   (when (and on-token (seq text))
-                    (on-token {:token text :index 0 :accumulated text}))
+                    (on-token {:token text :index 0}))
                   response))
               (extract-tool-calls [_ _response] nil)
               (extract-text [_ response] (:text response))

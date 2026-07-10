@@ -102,7 +102,7 @@
     :stream-fn (fn [messages opts on-token] -> normalized-response)}
 
    - :chat-fn   同步调用。
-   - :stream-fn 流式调用：on-token 接收 {:token / :reasoning-token / :accumulated ...}，
+   - :stream-fn 流式调用：on-token 接收 {:token / :reasoning-token ...}（增量，不含全文累积），
      返回最终归一化响应（与 chat-fn 同形）。provider 不支持流式时回退同步，并把全文作为
      单个 token emit（保证 chat-stream 对任何 provider 都可用）。
 
@@ -126,5 +126,5 @@
          (let [resp (normalize-response provider
                                         (provider/call-llm provider call-config messages tools))]
            (when-let [t (response/response-text resp)]
-             (when on-token (on-token {:token t :accumulated t})))
+             (when on-token (on-token {:token t})))
            resp))))})
