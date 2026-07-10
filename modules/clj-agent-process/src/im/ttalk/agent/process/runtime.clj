@@ -260,16 +260,10 @@
              :events-processed   0}]
      (drive rt))))
 
-(defn resume
-  "从 :paused 返回值续跑。data 交给暂停 step 的 :on-resume
-   (fn [data state context])，其返回值语义与 on-activate 相同
-   （events 继续 / 再次 pause / error / terminate）。"
-  [paused data]
-  (let [rt (::runtime paused)
-        _  (when-not rt
-             (throw (ex-info "resume 需要 run-process 返回的 :paused 结果" {})))
-        step-id (:paused-step rt)
-        f (get-in rt [:spec :steps step-id :on-resume])
+(defn- resume*
+  "对 rt 的暂停 step 执行 on-resume 并继续驱动（resume 与 resume-from-snapshot 共用）。"
+  [rt step-id data]
+  (let [f (get-in rt [:spec :steps step-id :on-resume])
         _ (when-not f
             (throw (ex-info (str "step " step-id " 未定义 :on-resume") {:step step-id})))
         sstate (get-in rt [:steps-state step-id])
@@ -285,6 +279,47 @@
       :paused     (do (notify-quiescent! rt :paused) (finish-paused rt))
       :terminated (finish rt :completed)
       (finish rt :failed (second outcome)))))
+
+(defn resume
+  "从 :paused 返回值续跑。data 交给暂停 step 的 :on-resume
+   (fn [data state context])，其返回值语义与 on-activate 相同
+   （events 继续 / 再次 pause / error / terminate）。"
+  [paused data]
+  (let [rt (::runtime paused)]
+    (when-not rt
+      (throw (ex-info "resume 需要 run-process 返回的 :paused 结果" {})))
+    (resume* rt (:paused-step rt) data)))
+
+(defn resume-from-snapshot
+  "跨进程重启的恢复：用 on-quiescent 的 :paused 快照重建 runtime 并 resume。
+
+   与 resume 的区别：resume 用运行期的返回值（含未消费的事件队列）；
+   本函数只有可序列化快照——**事件队列不在快照中**（设计文档已知限制），
+   暂停点之后完全由 on-resume 产出的事件驱动。
+
+   参数:
+   - spec:     原 process-spec（快照不含函数，须由代码侧提供同一 spec）
+   - snapshot: on-quiescent 收到的 :paused 快照（{:step-states :context :paused-step ...}）
+   - data:     交给 on-resume 的恢复数据
+   - opts:     {:on-quiescent :max-events}（同 run-process）"
+  [spec {:keys [step-states context paused-step]} data
+   & [{:keys [on-quiescent max-events]}]]
+  (when-not paused-step
+    (throw (ex-info "resume-from-snapshot 需要 reason=:paused 的快照" {})))
+  (let [steps-state (into {}
+                          (map (fn [id]
+                                 [id (step/init-state (get-in spec [:steps id])
+                                                      (get step-states id))]))
+                          (:step-order spec))
+        rt {:spec               spec
+            :effective-bindings (effective-bindings spec)
+            :steps-state        steps-state
+            :event-queue        []
+            :context            (or context (ctx/create))
+            :on-quiescent       on-quiescent
+            :max-events         (or max-events default-max-events)
+            :events-processed   0}]
+    (resume* rt paused-step data)))
 
 (defn paused?
   "结果是否处于暂停态。"
