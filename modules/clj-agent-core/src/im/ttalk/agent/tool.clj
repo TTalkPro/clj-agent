@@ -292,26 +292,6 @@
   [v]
   (:tool/schema (meta v)))
 
-(defn get-params
-  "获取 tool function 的参数定义
-
-   参数:
-   - v: var 引用
-
-   返回: 参数定义列表"
-  [v]
-  (:tool/params (meta v)))
-
-(defn sensitive?
-  "检查 tool function 是否标记为敏感工具
-
-   参数:
-   - v: var 引用
-
-   返回: boolean"
-  [v]
-  (boolean (:tool/sensitive (meta v))))
-
 (defn context-tool?
   "检查 tool function 是否需要 context
 
@@ -322,16 +302,6 @@
   [v]
   (boolean (:tool/context (meta v))))
 
-(defn get-category
-  "获取 tool function 的分类
-
-   参数:
-   - v: var 引用
-
-   返回: 分类关键字（默认 :general）"
-  [v]
-  (or (:tool/category (meta v)) :general))
-
 (defn get-tags
   "获取 tool function 的标签集合
 
@@ -341,18 +311,6 @@
    返回: 标签集合（set）或 nil"
   [v]
   (:tool/tags (meta v)))
-
-(defn has-tag?
-  "检查 tool function 是否包含指定标签
-
-   参数:
-   - v:   var 引用
-   - tag: 标签关键字
-
-   返回: boolean"
-  [v tag]
-  (boolean (when-let [tags (get-tags v)]
-             (contains? tags tag))))
 
 (defn has-any-tag?
   "检查 tool function 是否包含任意一个指定标签

@@ -25,9 +25,7 @@
     Query API - 查询 Kernel 状态:
       (:tools kernel)                         ;; 所有 tool schemas
       (list-functions kernel)                 ;; 所有函数名
-      (list-functions-by-tag kernel :weather) ;; 按 tag 过滤
       (find-function kernel :get-weather)
-      (get-tool-var kernel :get-weather)
 
     Service 格式:
     Service 是一个 map，定义 LLM 调用接口：
@@ -118,69 +116,6 @@
     关键字列表"
   [kernel]
   (keys (:tool-vars kernel)))
-
-(defn get-tool-var
-  "获取指定名称的 tool var
-
-    参数:
-    - kernel:  Kernel 实例
-    - fn-name: 函数名（关键字或字符串）
-
-    返回:
-    var 引用或 nil"
-  [kernel fn-name]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (get (:tool-vars kernel) fn-key)))
-
-;;; ============================================================
-;;; Query API - Tag 过滤
-;;; ============================================================
-
-(defn list-functions-by-tag
-  "列出带有指定 tag 的函数名称
-
-    参数:
-    - kernel: Kernel 实例
-    - tag:    标签关键字
-
-    返回:
-    关键字列表"
-  [kernel tag]
-  (vec (for [[fn-name v] (:tool-vars kernel)
-             :when (tool/has-tag? v tag)]
-         fn-name)))
-
-(defn list-functions-by-tags
-  "列出带有任意指定 tags 的函数名称（OR 逻辑）
-
-    参数:
-    - kernel: Kernel 实例
-    - tags:   标签集合
-
-    返回:
-    关键字列表"
-  [kernel tags]
-  (let [tags-set (set tags)]
-    (vec (for [[fn-name v] (:tool-vars kernel)
-               :when (tool/has-any-tag? v tags-set)]
-           fn-name))))
-
-(defn list-functions-with-all-tags
-  "列出同时带有所有指定 tags 的函数名称（AND 逻辑）
-
-    参数:
-    - kernel: Kernel 实例
-    - tags:   标签集合
-
-    返回:
-    关键字列表"
-  [kernel tags]
-  (let [tags-set (set tags)]
-    (vec (for [[fn-name v] (:tool-vars kernel)
-               :let [tool-tags (tool/get-tags v)]
-               :when (and tool-tags
-                          (every? #(contains? tool-tags %) tags-set))]
-           fn-name))))
 
 ;;; ============================================================
 ;;; Invoke API - invoke-tool（函数调用，经过 Filter 管道）
