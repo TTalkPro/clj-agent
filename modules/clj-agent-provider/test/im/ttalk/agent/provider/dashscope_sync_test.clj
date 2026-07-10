@@ -11,16 +11,18 @@
            [java.net InetSocketAddress]))
 
 (defn- start-server [status body]
-  (let [server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+  (let [captured (atom nil)
+        server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
     (.createContext server "/"
       (reify HttpHandler
         (handle [_ exchange]
+          (reset! captured (slurp (.getRequestBody exchange)))
           (let [b (.getBytes (json/generate-string body) "UTF-8")]
             (.add (.getResponseHeaders exchange) "Content-Type" "application/json")
             (.sendResponseHeaders exchange status (count b))
             (with-open [os (.getResponseBody exchange)] (.write os b))))))
     (.start server)
-    {:server server :port (.getPort (.getAddress server))}))
+    {:server server :port (.getPort (.getAddress server)) :captured captured}))
 
 (deftest sync-success-returns-parsed-response-test
   (testing "成功响应返回解析后的 OpenAI 兼容 map（回归：曾必抛 :parse-error）"
@@ -37,6 +39,29 @@
                                               :base-url (str "http://127.0.0.1:" port "/")})]
           (is (= "杭州" (get-in resp [:choices 0 :message :content])))
           (is (= "stop" (get-in resp [:choices 0 :finish_reason]))))
+        (finally (.stop server 0))))))
+
+(deftest deftool-input-schema-not-dropped-test
+  (testing "deftool 风格工具（:input_schema）参数不被丢成空对象（回归：旧手写转换只认 :parameters）"
+    (let [{:keys [server port captured]}
+          (start-server 200 {:output {:choices [{:finish_reason "stop"
+                                                 :message {:role "assistant" :content "ok"}}]}})
+          input-schema {:type "object"
+                        :properties {:city {:type "string" :description "城市"}}
+                        :required ["city"]}]
+      (try
+        (dashscope/call-dashscope {:model "qwen-plus"}
+                                  [{:role "user" :content "北京天气"}]
+                                  [{:name :get-weather
+                                    :description "查天气"
+                                    :input_schema input-schema}]
+                                  {:api-key "k" :base-url (str "http://127.0.0.1:" port "/")})
+        (let [sent (json/parse-string @captured true)
+              tool (first (get-in sent [:parameters :tools]))]
+          (is (= "get-weather" (get-in tool [:function :name])))
+          (is (= (json/parse-string (json/generate-string input-schema) true)
+                 (get-in tool [:function :parameters]))
+              "deftool 的 :input_schema 必须落到 wire 的 :parameters"))
         (finally (.stop server 0))))))
 
 (deftest sync-4xx-throws-canonical-error-test

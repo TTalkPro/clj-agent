@@ -20,13 +20,14 @@
 
    ;; 同步调用
    (dashscope/call-dashscope config messages tools)"
-  (:require [clojure.string :as str]
-            [cheshire.core :as json]
-            [im.ttalk.agent.provider.http.client :as http]
+  (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
-            [im.ttalk.agent.provider.stream.dashscope :as dstream]))
+            [im.ttalk.agent.provider.stream.dashscope :as dstream]
+            [im.ttalk.agent.provider.schema.openai :as schema]
+            [im.ttalk.agent.provider.common.response-parser :as parser]
+            [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
 ;;; ============================================================
 ;;; 配置
@@ -51,17 +52,6 @@
 ;;; 请求/响应转换
 ;;; ============================================================
 
-(defn- tool->dashscope-schema
-  "将工具定义转换为 DashScope 格式"
-  [tool]
-  {:type "function"
-   :function {:name (name (:name tool))
-              :description (:description tool)
-              :parameters (or (:parameters tool)
-                              {:type "object"
-                               :properties {}
-                               :required []})}})
-
 (defn- build-request
   "构建 DashScope API 请求体
 
@@ -81,8 +71,10 @@
                  (:top-p llm-config)
                  (assoc :top_p (:top-p llm-config))
 
+                 ;; 复用 schema.openai：同时识别 :parameters 与 deftool 的 :input_schema
+                 ;; （旧手写转换只认 :parameters，deftool 工具在 DashScope 下参数被静默丢成空对象）
                  (seq tools)
-                 (assoc :tools (mapv tool->dashscope-schema tools)))]
+                 (assoc :tools (schema/tools->schemas tools)))]
     {:model model
      :input {:messages messages}
      :parameters params}))
@@ -258,33 +250,23 @@
     ;; DashScope 原生流式（X-DashScope-SSE: enable + incremental_output）
     (call-dashscope-stream llm-config messages tools on-token opts))
 
+  ;; parse-response 已把 DashScope 响应整形为 OpenAI 兼容格式，
+  ;; 解析/构造直接复用 OpenAI 家族的共享实现（消除与 response-parser/openai-compat 的重复）。
   (extract-tool-calls [_ response]
-    (let [message (get-in response [:choices 0 :message])
-          tool-calls (:tool_calls message)]
-      (when (seq tool-calls)
-        (mapv (fn [tc]
-                {:id (:id tc)
-                 :name (keyword (get-in tc [:function :name]))
-                 :input (try
-                          (json/parse-string (get-in tc [:function :arguments]) true)
-                          (catch Exception _
-                            {}))})
-              tool-calls))))
+    (parser/extract-tool-calls response))
 
   (extract-text [_ response]
-    (get-in response [:choices 0 :message :content]))
+    (parser/extract-text response))
 
   (build-tool-result [_ tool-id content]
-    {:role "tool"
-     :tool_call_id tool-id
-     :content (if (string? content) content (json/generate-string content))})
+    (compat/build-tool-result tool-id content))
 
   (supports-function-calling? [_] true)
 
   (supports-stream? [_] true)  ;; 原生 SSE（X-DashScope-SSE + incremental_output）
 
   (tool->schema [_ tool]
-    (tool->dashscope-schema tool)))
+    (schema/tool->schema tool)))
 
 ;;; ============================================================
 ;;; 工厂函数
