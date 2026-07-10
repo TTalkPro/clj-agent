@@ -220,22 +220,6 @@
   ;; 但保险起见强制 str（避免上游构造失误导致 ClassCastException 掩盖真实错误）。
   (throw (ex-info (str (:message err)) err)))
 
-(defn throw-if-error!
-  "如果是错误结果则抛出异常
-
-   参数：
-   - result: [:ok value] 或 [:error err]
-
-   返回：
-   value（如果成功）
-
-   抛出：
-   ExceptionInfo（如果失败）"
-  [result]
-  (if (and (vector? result) (= :error (first result)))
-    (throw! (second result))
-    (if (vector? result) (second result) result)))
-
 ;;; ============================================================
 ;;; 错误格式化
 ;;; ============================================================
@@ -283,20 +267,4 @@
      [:ok (f)]
      (catch Exception e
        [:error (exception->error e context)]))))
-
-(defn safe-execute
-  "安全执行函数，失败时返回默认值
-
-   参数：
-   - f:       要执行的函数
-   - default: 默认值
-
-   返回：
-   函数结果或默认值
-
-   示例：
-   (safe-execute #(parse-json data) nil)"
-  [f default]
-  (let [[status result] (with-error-handling f)]
-    (if (= :ok status) result default)))
 

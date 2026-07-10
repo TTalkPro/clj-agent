@@ -42,8 +42,3 @@
        :tools    tools
        :filters  filters
        :settings {:max-tool-iterations (or (:max-iterations opts) 10)}})))
-
-(defn ensure-kernel
-  "获取或构建 Kernel（opts 已含 :kernel 则直接用）"
-  [opts]
-  (or (:kernel opts) (build-kernel opts)))
