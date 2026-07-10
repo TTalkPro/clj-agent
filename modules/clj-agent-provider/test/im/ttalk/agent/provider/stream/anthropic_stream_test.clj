@@ -62,7 +62,7 @@
           state (run-events events)
           resp (stream/normalize-response state)]
       ;; 修复前：(str {} json) 致 cheshire 只解析出 {}，参数整体丢失
-      (is (= [{:id "t1" :name :get_weather :input {:city "Beijing"}}]
+      (is (= [{:id "t1" :name "get_weather" :args {:city "Beijing"}}]
              (:tool-calls resp))))))
 
 (deftest tool-use-empty-input-test
@@ -71,7 +71,7 @@
                    :content_block {:type "tool_use" :id "t2" :name "now" :input {}}}
                   {:type "content_block_stop" :index 0}]
           resp (stream/normalize-response (run-events events))]
-      (is (= [{:id "t2" :name :now :input {}}] (:tool-calls resp))))))
+      (is (= [{:id "t2" :name "now" :args {}}] (:tool-calls resp))))))
 
 (deftest error-event-test
   (testing "error 事件被记录，build-response 抛出"

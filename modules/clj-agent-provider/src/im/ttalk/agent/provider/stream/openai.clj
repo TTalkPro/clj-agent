@@ -17,7 +17,7 @@
    (stream/build-response final-state :id \"xxx\" :model \"gpt-4\")"
   (:require [cheshire.core :as json]
             [taoensso.timbre :as log]
-            [im.ttalk.agent.model.types :as types]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]))
 
 (set! *warn-on-reflection* true)
@@ -200,7 +200,7 @@
    返回：
    统一响应格式：
    {:text \"...\"
-    :tool-calls [{:id :name :input}]
+    :tool-calls [{:id :name :args}]
     :finish-reason :stop | :tool-use
     :provider :openai
     ...}
@@ -219,7 +219,7 @@
                                           (json/parse-string
                                             (str (get-in tc [:function :arguments])) true)
                                           (catch Exception _ {}))]
-                               (types/make-tool-call
+                               (msg/tool-call
                                  (:id tc)
                                  (get-in tc [:function :name])
                                  args)))

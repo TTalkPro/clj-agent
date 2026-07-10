@@ -26,7 +26,7 @@
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
-            [im.ttalk.agent.model.types :as types]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]))
 
 (set! *warn-on-reflection* true)
@@ -272,7 +272,8 @@
          vals
          (filter #(= (:type %) "tool_use"))
          (mapv (fn [{:keys [id name input]}]
-                 (types/make-tool-call id name input))))))
+                 ;; Anthropic wire 的 tool_use 块字段叫 :input；统一响应形状为 :args
+                 (msg/tool-call id name input))))))
 
 (defn normalize-response
   "从流式状态构建统一格式响应
@@ -283,7 +284,7 @@
    返回：
    统一响应格式：
    {:text \"...\"
-    :tool-calls [{:id :name :input}]
+    :tool-calls [{:id :name :args}]
     :usage {:input-tokens n :output-tokens m :total-tokens t}
     :finish-reason :stop | :tool-use | :max-tokens
     :provider :anthropic

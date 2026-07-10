@@ -98,7 +98,7 @@
 (defn test-llm-and-tool-callbacks []
   (section "场景 2: LLM/工具回调（on-llm-call/result/tool-call/tool-result）")
   (let [log (atom [])
-        p (mock {:text nil :tool-calls [{:id "t1" :name :get-weather :input {:city "北京"}}]}
+        p (mock {:text nil :tool-calls [{:id "t1" :name "get-weather" :args {:city "北京"}}]}
                 {:text "北京晴天" :tool-calls nil})
         a (agent/create-agent
             {:provider p :model "test"
@@ -134,7 +134,7 @@
 (defn test-on-tool-call-interrupt []
   (section "场景 3: on-tool-call 返回 {:interrupt ...} 触发暂停")
   (let [log (atom [])
-        p (mock {:text nil :tool-calls [{:id "t2" :name :get-weather :input {:city "上海"}}]}
+        p (mock {:text nil :tool-calls [{:id "t2" :name "get-weather" :args {:city "上海"}}]}
                 {:text "审批后：上海晴天" :tool-calls nil})
         blocked-tools (atom #{"get-weather"})
         a (agent/create-agent
@@ -170,7 +170,7 @@
   (section "场景 4: on-turn-error 触发（max-iterations 超限）")
   (let [log (atom [])
         ;; 永远返回工具调用，触发 max-iterations
-        p (->MockProvider (atom (repeat {:text nil :tool-calls [{:id "tx" :name :get-weather :input {:city "x"}}]})))
+        p (->MockProvider (atom (repeat {:text nil :tool-calls [{:id "tx" :name "get-weather" :args {:city "x"}}]})))
         a (agent/create-agent
             {:provider p :model "test"
              :tools [#'get-weather]
@@ -200,7 +200,7 @@
                          :timeout     10000})
 
         ;; 父 agent：LLM 先调用 do_research 工具，再返回文本
-        p (mock {:text nil :tool-calls [{:id "d1" :name :do-research :input {:task "分析量子计算"}}]}
+        p (mock {:text nil :tool-calls [{:id "d1" :name "do-research" :args {:task "分析量子计算"}}]}
                 {:text "综合子agent结论：量子计算前景广阔" :tool-calls nil})
 
         log (atom [])
@@ -226,7 +226,7 @@
   (section "场景 6: :on-pause 与 :callbacks 向后兼容并存")
   (let [old-pause-log (atom nil)
         new-cb-log    (atom nil)
-        p (mock {:text nil :tool-calls [{:id "s1" :name :send-message :input {:to "A" :text "Hi"}}]}
+        p (mock {:text nil :tool-calls [{:id "s1" :name "send-message" :args {:to "A" :text "Hi"}}]}
                 {:text "完成" :tool-calls nil})
         a (agent/create-agent
             {:provider p :model "test"

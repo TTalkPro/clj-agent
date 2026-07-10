@@ -16,7 +16,7 @@
    ;; 创建响应
    (def r (resp/make-response
             :text \"你好\"
-            :tool-calls [{:id \"1\" :name :calc :input {:x 1}}]
+            :tool-calls [{:id \"1\" :name \"calc\" :args {:x 1}}]
             :usage {:input_tokens 100 :output_tokens 50}))
 
    ;; 使用协议方法
@@ -209,7 +209,7 @@
   (response-tool-calls [this]
     "获取工具调用列表
 
-     返回：工具调用列表 [{:id \"...\" :name :keyword :input {...}}] 或 nil")
+     返回：工具调用列表 [{:id \"...\" :name \"字符串\" :args {...}}] 或 nil")
 
   (has-tool-calls? [this]
     "是否包含工具调用

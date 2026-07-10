@@ -70,7 +70,7 @@
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.model :as proto]
-            [im.ttalk.agent.model.types :as types]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.cache :as cache]
@@ -196,12 +196,13 @@
    - response: Anthropic API 响应
 
    返回：
-   工具调用列表 [{:id \"...\" :name :keyword :input {...}}]"
+   工具调用列表 [{:id \"...\" :name \"字符串\" :args {...}}]"
   [response]
   (->> (:content response)
        (filter #(= (:type %) "tool_use"))
        (mapv (fn [{:keys [id name input]}]
-               (types/make-tool-call id name input)))))
+               ;; wire tool_use 块字段叫 :input；统一响应形状为 :args
+               (msg/tool-call id name input)))))
 
 (defn extract-text
   "从 Anthropic 响应中提取文本
@@ -293,7 +294,7 @@
    返回：
    统一响应格式：
    {:text \"...\"
-    :tool-calls [{:id :name :input}]
+    :tool-calls [{:id :name :args}]
     :usage {:input-tokens n :output-tokens m :total-tokens t}
     :finish-reason :stop | :tool-use | :max-tokens | ...
     :model \"...\"

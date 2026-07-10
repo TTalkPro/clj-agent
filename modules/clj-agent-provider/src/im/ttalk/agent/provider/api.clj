@@ -28,7 +28,7 @@
   (:require [im.ttalk.agent.provider.factory.builder :as builder]
             [im.ttalk.agent.provider.factory.registry :as registry]
             [im.ttalk.agent.model :as proto]
-            [im.ttalk.agent.model.types :as types]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]))
 
@@ -145,7 +145,7 @@
    - response: API 响应
 
    返回：
-   工具调用列表 [{:id \"...\" :name :keyword :input {...}}]"
+   工具调用列表 [{:id \"...\" :name \"字符串\" :args {...}}]"
   [provider response]
   (proto/extract-tool-calls provider response))
 
@@ -186,16 +186,16 @@
 ;;; ============================================================
 
 (def make-tool-call
-  "创建工具调用结构
+  "创建工具调用结构（v0.2 起与中立消息 tool-call 同构）
 
    参数：
-   - id:    工具调用 ID
-   - name:  工具名称
-   - input: 工具输入参数
+   - id:   工具调用 ID
+   - name: 工具名称（keyword/字符串，规范化为字符串）
+   - args: 工具参数 map
 
    返回：
-   {:id \"...\" :name :keyword :input {...}}"
-  types/make-tool-call)
+   {:id \"...\" :name \"字符串\" :args {...}}"
+  msg/tool-call)
 
 (def make-response
   "创建统一响应结构
@@ -273,20 +273,20 @@
 ;;; ============================================================
 
 (def user-message
-  "创建用户消息"
-  types/user-message)
+  "创建用户消息（中立格式 {:role :user ...}）"
+  msg/user)
 
 (def assistant-message
-  "创建助手消息"
-  types/assistant-message)
+  "创建助手消息（中立格式 {:role :assistant ...}）"
+  msg/assistant)
 
 (def system-message
-  "创建系统消息"
-  types/system-message)
+  "创建系统消息（中立格式 {:role :system ...}）"
+  msg/system)
 
 (def tool-message
-  "创建工具结果消息"
-  types/tool-message)
+  "创建工具结果消息（中立格式 {:role :tool :tool-call-id ...}；参数 [id name content]）"
+  msg/tool-result)
 
 ;;; ============================================================
 ;;; 错误处理

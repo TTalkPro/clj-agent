@@ -17,7 +17,7 @@
    ;; 标准化响应为统一格式
    (parser/normalize-response response)"
   (:require [cheshire.core :as json]
-            [im.ttalk.agent.model.types :as types]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]))
 
 (set! *warn-on-reflection* true)
@@ -70,18 +70,18 @@
    - response: API 响应
 
    返回：
-   工具调用列表 [{:id \"...\" :name :keyword :input {...}}] 或 nil
+   工具调用列表 [{:id \"...\" :name \"字符串\" :args {...}}] 或 nil
 
    示例：
    (extract-tool-calls response)
-   ; => [{:id \"call_123\" :name :calculator :input {:expression \"2+2\"}}]"
+   ; => [{:id \"call_123\" :name \"calculator\" :args {:expression \"2+2\"}}]"
   [response]
   (when-let [tool-calls (:tool_calls (get-message response))]
     (mapv (fn [tc]
             (let [args (try
                          (json/parse-string (get-in tc [:function :arguments]) true)
                          (catch Exception _ {}))]
-              (types/make-tool-call
+              (msg/tool-call
                 (:id tc)
                 (get-in tc [:function :name])
                 args)))
@@ -136,7 +136,7 @@
    返回：
    统一响应格式：
    {:text \"...\"
-    :tool-calls [{:id :name :input}]
+    :tool-calls [{:id :name :args}]
     :usage {:input-tokens n :output-tokens m :total-tokens t}
     :finish-reason :stop | :tool-use | :max-tokens | ...
     :model \"...\"

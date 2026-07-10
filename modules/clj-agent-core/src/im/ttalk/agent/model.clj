@@ -74,7 +74,7 @@
   (extract-tool-calls [this response]
     "从响应中提取工具调用
 
-     返回：工具调用列表 [{:id \"...\" :name :keyword :input {...}}]")
+     返回：工具调用列表 [{:id \"...\" :name \"字符串\" :args {...}}]（与中立消息 tool-call 同构）")
 
   (extract-text [this response]
     "从响应中提取文本内容

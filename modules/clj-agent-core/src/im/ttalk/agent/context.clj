@@ -2,7 +2,7 @@
   "ToolContext - 请求/会话级的扁平状态 map
 
    重构后（Memory Filter 模式）：对话消息不再放在 Context，而是由
-   Memory Filter 按 conversation-id 存进 ChatMemory store（见 core/memory）。
+   记忆由 clj-agent-client 模块的 memory advisor 按 conversation-id 自管（core 对其零感知）。
    Context 退化为一个**单层扁平 map**，承载：
    - :conversation-id  会话 ID（Memory Filter 读取）
    - 任意工具/filter 的请求级共享 k/v（对标 Spring AI ToolContext）

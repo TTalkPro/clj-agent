@@ -3,7 +3,7 @@
   (:require [clojure.test :refer [deftest testing is are]]
             [im.ttalk.agent.model :as provider]
             [im.ttalk.agent.model.service :as service]
-            [im.ttalk.agent.model.types :as types]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]))
 
@@ -71,7 +71,7 @@
 (deftest test-extract-tool-calls
   (testing "extract-tool-calls returns tool calls from response"
     (let [p (make-test-provider)
-          tcs [{:id "tc1" :name :calc :input {:x 1}}]]
+          tcs [{:id "tc1" :name "calc" :args {:x 1}}]]
       (is (= tcs (provider/extract-tool-calls p {:tool-calls tcs})))
       (is (nil? (provider/extract-tool-calls p {:tool-calls nil}))))))
 
@@ -149,7 +149,7 @@
 
 (deftest test-service-chat-fn-tool-calls-response
   (testing "chat-fn correctly normalizes tool-calls response"
-    (let [tool-calls [{:id "tc1" :name :calculator :input {:expr "2+2"}}]
+    (let [tool-calls [{:id "tc1" :name "calculator" :args {:expr "2+2"}}]
           p (make-test-provider {:text "" :tool-calls tool-calls})
           svc (service/create-service p {:model "test" :max-tokens 100})
           result ((:chat-fn svc) [{:role "user" :content "calc 2+2"}] {})]
@@ -213,21 +213,20 @@
 ;;; Types Tests
 ;;; ============================================================
 
-(deftest test-make-tool-call
-  (testing "make-tool-call creates proper structure"
-    (let [tc (types/make-tool-call "id1" "calc" {:x 1})]
-      (is (types/tool-call? tc))
+(deftest test-tool-call
+  (testing "统一 tool-call 形状 {:id :name(字符串) :args}（v0.2）"
+    (let [tc (msg/tool-call "id1" "calc" {:x 1})]
       (is (= "id1" (:id tc)))
-      (is (= :calc (:name tc)))
-      (is (= {:x 1} (:input tc)))))
+      (is (= "calc" (:name tc)))
+      (is (= {:x 1} (:args tc)))))
 
-  (testing "make-tool-call with keyword name"
-    (let [tc (types/make-tool-call "id2" :search {:q "test"})]
-      (is (= :search (:name tc)))))
+  (testing "keyword name 规范化为字符串"
+    (let [tc (msg/tool-call "id2" :search {:q "test"})]
+      (is (= "search" (:name tc)))))
 
-  (testing "make-tool-call with nil input"
-    (let [tc (types/make-tool-call "id3" :foo nil)]
-      (is (= {} (:input tc))))))
+  (testing "nil args 归一化为空 map"
+    (let [tc (msg/tool-call "id3" :foo nil)]
+      (is (= {} (:args tc))))))
 
 (deftest test-make-response
   (testing "make-response creates proper structure"
@@ -244,27 +243,22 @@
   (testing "has-text? and has-tool-calls?"
     (is (response/has-text? (response/make-response :text "hi")))
     (is (not (response/has-text? (response/make-response :text ""))))
-    (is (response/has-tool-calls? (response/make-response :tool-calls [{:id "1" :name :x :input {}}])))
+    (is (response/has-tool-calls? (response/make-response :tool-calls [{:id "1" :name "x" :args {}}])))
     (is (not (response/has-tool-calls? (response/make-response :tool-calls []))))))
 
 (deftest test-message-helpers
-  (testing "user-message"
-    (is (= {:role "user" :content "hi"} (types/user-message "hi"))))
+  (testing "中立消息构造（v0.2 唯一词汇，keyword role）"
+    (is (= {:role :user :content "hi"} (msg/user "hi")))
+    (is (= {:role :assistant :content "hello"} (msg/assistant "hello")))
+    (is (= {:role :system :content "You are helpful"} (msg/system "You are helpful")))
+    (is (= {:role :tool :tool-call-id "t1" :name "calc" :content "result"}
+           (msg/tool-result "t1" "calc" "result"))))
 
-  (testing "assistant-message"
-    (is (= {:role "assistant" :content "hello"} (types/assistant-message "hello"))))
-
-  (testing "assistant-message with tool-calls"
-    (let [msg (types/assistant-message "text" [{:id "1"}])]
-      (is (= "assistant" (:role msg)))
-      (is (= [{:id "1"}] (:tool_calls msg)))))
-
-  (testing "system-message"
-    (is (= {:role "system" :content "You are helpful"} (types/system-message "You are helpful"))))
-
-  (testing "tool-message"
-    (is (= {:role "tool" :tool_call_id "t1" :content "result"}
-           (types/tool-message "t1" "result")))))
+  (testing "带工具调用的 assistant 消息"
+    (let [m (msg/assistant-tool-calls [(msg/tool-call "1" "f" {})] "text")]
+      (is (= :assistant (:role m)))
+      (is (= "text" (:content m)))
+      (is (= [{:id "1" :name "f" :args {}}] (:tool-calls m))))))
 
 ;;; ============================================================
 ;;; Errors Tests
