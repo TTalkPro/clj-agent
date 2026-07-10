@@ -1,20 +1,23 @@
 # clj-agent-core
 
-核心模块 - Kernel 编排器、Tool 系统、Filter 中间件
+核心模块 - 协议（端口）+ Kernel 原语
 
 [English](#english) | 中文
 
 ## 概述
 
-`clj-agent-core` 同时是**协议（端口）层**与 **Agent 运行时**：
+`clj-agent-core` 是**协议（端口）层**与 **kernel 原语**：
 
 - **协议 / 契约**：`ILLMProvider`、中立消息、统一响应、通用 Service —— 任何实现协议的 jar 都能作为 provider 注入
-- **client**：高层 Agent（`create-agent`/`chat`/`resume`），内置按 conversation-id 的记忆
 - **Kernel**：中央编排器，提供 `invoke-chat` / `invoke-tool` 原语（经 advisor 洋葱链）
 - **deftool**：宏，同时定义函数和生成 LLM tool schema
-- **Advisor**：洋葱式 around 中间件（对标 Spring AI Advisor），含记忆 advisor
-- **Memory**：ChatMemory（in-memory / windowed / SQLite）
+- **Advisor**：洋葱式 around 中间件执行器（对标 Spring AI Advisor）
 - **Context**：请求级共享状态
+- **streaming**：流式取消令牌
+
+Agent 运行时（client / ReAct 循环 / ChatMemory / 记忆 advisor / callbacks / subagent）
+已于 2026-07 下沉至 [`clj-agent-client`](../clj-agent-client/README.md)（命名空间不变）；
+core 对记忆与循环零感知。
 
 ## 依赖
 
@@ -23,12 +26,9 @@
 {:deps {im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}}}
 ```
 
-内部依赖：无（core 定义协议/契约 + Agent 运行时；provider 反过来依赖 core）
+内部依赖：无
 
-外部依赖：
-- com.taoensso/timbre 6.3.0（日志）
-- com.github.seancorfield/next.jdbc 1.3.939（memory/sqlite，按需）
-- org.xerial/sqlite-jdbc 3.45.1.0（memory/sqlite，按需）
+外部依赖：无（纯 Clojure）
 
 ## 命名空间
 
@@ -37,48 +37,29 @@
 | 命名空间 | 说明 |
 |---------|------|
 | `im.ttalk.agent.model` | `ILLMProvider` 协议（端口，中立消息边界） |
-| `im.ttalk.agent.model.message` / `.response` / `.error` / `.types` | 中立消息、统一响应、错误、构造器 |
+| `im.ttalk.agent.model.message` / `.response` / `.error` | 中立消息、统一响应、错误 |
 | `im.ttalk.agent.model.service` | 通用 create-service（仅凭协议包装任意 provider） |
 
-**Agent 运行时**
+**Kernel 原语**
 
 | 命名空间 | 说明 |
 |---------|------|
 | `im.ttalk.agent.kernel` | Kernel 构建、调用、查询 API |
 | `im.ttalk.agent.tool` | `deftool` 宏定义 |
-| `im.ttalk.agent.advisor` | Advisor 洋葱链创建和内置 Advisor |
-| `im.ttalk.agent.advisor.memory` | 按 conversation-id 串历史的记忆 advisor |
+| `im.ttalk.agent.advisor` | Advisor 洋葱链执行器与内置 tool filter |
 | `im.ttalk.agent.context` | Context 状态管理 |
-| `im.ttalk.agent.memory` / `.memory.sqlite` | ChatMemory store |
-| `im.ttalk.agent.react` | ReAct 工具调用循环 |
-| `im.ttalk.agent.client` | 高级 Agent API（create-agent / chat / resume） |
-| `im.ttalk.agent.common` | 共享 Kernel 构建逻辑 |
+| `im.ttalk.agent.streaming` | 流式取消令牌 |
 
-> 各厂商实现（`im.ttalk.agent.provider.*`）在 `clj-agent-provider`，依赖本模块的协议。
+> 各厂商实现（`im.ttalk.agent.provider.*`）在 `clj-agent-provider`；Agent 运行时
+> （`client`/`react`/`memory`/`advisor.memory`/`callbacks`/`subagent`/`common`）在
+> `clj-agent-client`——两者都依赖本模块。
 
 ## API 参考
 
-### 高层 Agent API（client，推荐入门）
+### 高层 Agent API
 
-```clojure
-(require '[im.ttalk.agent.client :as agent])
-
-;; 创建 Agent（默认带 in-memory 记忆，按 conversation-id 累积）
-(def a (agent/create-agent
-         {:provider provider          ;; 任意 ILLMProvider 实例（必需）
-          :model "gpt-4"
-          :system-prompt "你是助手"
-          :tools [#'my-tool]          ;; 可选
-          :memory store               ;; 可选，默认 (memory/in-memory-store)
-          :conversation-id "u1"       ;; 可选，默认随机 UUID
-          :on-pause (fn [info] ...)}))  ;; 可选，配置即启用敏感工具 pause/resume
-
-(agent/chat a "你好")        ;; => {:status :completed :text "..." :tool-calls-made [...]}
-(agent/resume a "approved")  ;; pause 后批准/拒绝
-(agent/paused? a)
-(agent/get-history a)        ;; 该会话中立消息历史
-(agent/reset! a)             ;; 清空当前会话
-```
+`create-agent`/`chat`/`resume` 等高层 API 见
+[`clj-agent-client`](../clj-agent-client/README.md)。
 
 ### Kernel Build API
 
@@ -95,8 +76,9 @@
 
 ### Kernel Invoke API
 
-kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环不在 kernel**，已下沉到
-`im.ttalk.agent.client`（`create-agent` + `chat`，或 `im.ttalk.agent.react/invoke`）。
+kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环不在 kernel**，在
+`clj-agent-client` 模块（`im.ttalk.agent.client` 的 `create-agent` + `chat`，
+或 `im.ttalk.agent.react/invoke`）。
 
 ```clojure
 ;; 调用工具函数（经过 :phase :tool filter 链）
@@ -173,20 +155,6 @@ filters/logging-filter
 (ctx/with-conversation-id ctx "u1")   ;; 设会话 id（返回新 ctx）
 ```
 
-### Memory（ChatMemory）
-
-```clojure
-(require '[im.ttalk.agent.memory :as memory]
-         '[im.ttalk.agent.memory.sqlite :as sqlite])
-
-(memory/in-memory-store)                              ;; 进程内（默认）
-(memory/windowed (memory/in-memory-store)
-                 {:max-messages 20})                  ;; 滑动窗口（pairing-safe）
-(sqlite/sqlite-store "agent.db")                      ;; SQLite 持久化（":memory:" 为进程内库）
-
-;; ChatMemory 协议：mem-get / mem-add / mem-clear —— 自定义后端实现此协议即可
-```
-
 ### 中立消息 / 通用 Service
 
 ```clojure
@@ -211,23 +179,23 @@ filters/logging-filter
 
 ### Overview
 
-`clj-agent-core` is both the **protocol (port) layer** and the **Agent runtime**:
+`clj-agent-core` is the **protocol (port) layer** plus **kernel primitives**:
 
 - **Protocol / contract**: `ILLMProvider`, neutral messages, unified response, generic Service — any jar implementing the protocol can be injected as a provider
-- **client**: High-level Agent (`create-agent`/`chat`/`resume`) with built-in per-conversation-id memory
 - **Kernel**: Central orchestrator exposing `invoke-chat` / `invoke-tool` primitives (through the advisor onion chain)
 - **deftool**: Macro that defines a function and generates its LLM tool schema
-- **Advisor**: Onion-style around middleware (mirrors Spring AI Advisor), incl. memory advisor
-- **Memory**: ChatMemory (in-memory / windowed / SQLite)
+- **Advisor**: Onion-style around middleware executor (mirrors Spring AI Advisor)
 - **Context**: Per-request shared state
+
+The Agent runtime (client / ReAct loop / ChatMemory / memory advisor / callbacks /
+subagent) moved to [`clj-agent-client`](../clj-agent-client/README.md) in 2026-07
+(namespaces unchanged); core knows nothing about memory or loops.
 
 ### Key APIs
 
-- `agent/create-agent` → `agent/chat` / `agent/resume` - High-level Agent with memory
 - `kernel/build-kernel {:service :tools :filters :settings}` - Declarative kernel construction
 - `kernel/invoke-tool` / `kernel/invoke-chat` - Primitives through the :tool / :chat advisor chains
-  (the tool-calling loop lives in `im.ttalk.agent.react` / `client`, not the kernel)
+  (the tool-calling loop lives in `clj-agent-client`, not the kernel)
 - `deftool` - Define tool with auto-generated schema
 - `service/create-service` - Wrap any `ILLMProvider` into a kernel service (protocol-only)
-- `memory/in-memory-store` / `memory/windowed` / `sqlite/sqlite-store` - ChatMemory backends
 - `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/set-vars`, `ctx/with-conversation-id` - Context

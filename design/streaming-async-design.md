@@ -78,7 +78,7 @@ Web 框架整合（Luminus/Undertow 等）只作 `examples/` 示例，**不进 c
 
 | 层 | 约束 |
 |---|---|
-| **core**（clj-agent-core / clj-agent-provider 的 src） | 零 web 框架依赖。只暴露回调原语（`chat-stream` + on-token/cancel）。传输用 JDK `java.net.http`（非 web 框架） |
+| **库本体**（clj-agent-core / clj-agent-client / clj-agent-provider 的 src） | 零 web 框架依赖。只暴露回调原语（`chat-stream` + on-token/cancel）。传输用 JDK `java.net.http`（非 web 框架） |
 | **集成代码** | 只放 `examples/`（文档级、可跑）；**不进 src、不进核心 `:deps`**。web 依赖只在该 example 的 alias 里 |
 | **不挑框架站队** | 不做"我们集成 Luminus"这种定位。要给示例就**覆盖多个**（http-kit / Undertow-SSE / Aleph）或讲**通用模式**（"拿到 token 往你的 sink 写"） |
 | **若真要发适配器** | 单独的可选模块 + web 依赖标 `provided`/optional，绝不污染 core |

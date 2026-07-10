@@ -1,6 +1,8 @@
 # 设计：洋葱式 Filter + kernel 瘦身（loop / memory 下沉 simpleagent）
 
-> 状态：🚧 **机制层已实施；模块下沉未做**（2026-07-10 核对）。
+> 状态：✅ **全部实施**（机制层 2026-06；模块下沉 2026-07-10 完成——落地为
+> `clj-agent-client` 模块而非原设计的 simpleagent 命名，**命名空间保持不变**，
+> 仅打包位置迁移。验收标准「clj-agent-core 内 grep ChatMemory 零命中」已成立）。
 >
 > | 决策 | 状态 | 落地位置 |
 > |---|---|---|
@@ -8,14 +10,10 @@
 > | 5. chat/tool 复用同一执行器，仅 terminal 与 filter 集不同 | ✅ 已实施 | `kernel.clj` invoke-chat/invoke-tool 均走 build-chain |
 > | 1. kernel 去 `:memory`（record 层面零感知） | ✅ 已实施 | `kernel.clj` Kernel record 无 :memory 字段 |
 > | 内置 filter（logging/timeout/approval）改 `:tool` around | ✅ 已实施 | `advisor.clj` |
-> | 2. 工具循环下沉 simpleagent | ❌ 未做 | 仍在 core 的 `react.clj`（invoke/resume/execute-batch/run-tool-loop/heal） |
-> | 3. ChatMemory 下沉 simpleagent | ❌ 未做 | 协议/store 仍在 core 的 `memory.clj` + `memory/sqlite.clj`（§5 验收标准「core 内 grep ChatMemory 零命中」当前不成立） |
+> | 2. 工具循环下沉 | ✅ 2026-07-10 | `clj-agent-client` 模块的 `react.clj`（ns 不变） |
+> | 3. ChatMemory 下沉 | ✅ 2026-07-10 | `clj-agent-client` 模块的 `memory.clj` + `memory/sqlite.clj` + `advisor/memory.clj`（next.jdbc/sqlite 依赖随迁，core 零外部依赖） |
 >
-> **下沉未做的原因与去留**：`simpleagent` 独立模块始终未创建（现只有 clj-agent-core /
-> clj-agent-provider 两模块，agent 门面为 core 的 `client.clj`）。当前没有第二个
-> loop/memory 消费者，下沉收益主要是「core 真正 memory 无关」的架构洁癖；
-> 排期 v0.2，或修订本设计目标接受「record 层零感知即可」。
->
+
 > 本文合并本轮架构讨论的全部决策：
 > 1. kernel 的不可约内核 = `invoke-chat` + `invoke-tool` + Filter 机制 + 统一 Request/Response。
 > 2. **工具调用循环**（invoke/resume/execute-batch/run-tool-loop/heal）下沉到 simpleagent。

@@ -47,11 +47,10 @@ LLM Provider 和 Service 工厂模块
 内部依赖：`clj-agent-core`（实现其 `im.ttalk.agent.model/ILLMProvider` 协议）
 
 外部依赖：
-- net.clojars.wkok/openai-clojure 0.21.0
-- clj-http/clj-http 3.12.3
-- http-kit/http-kit 2.8.0
-- cheshire/cheshire 5.12.0
-- com.taoensso/timbre 6.3.0
+- cheshire/cheshire 5.12.0（JSON）
+- com.taoensso/timbre 6.3.0（日志）
+
+> HTTP 客户端（同步 + SSE 真流式）走 JDK 内置 java.net.http，零额外依赖。
 
 ## 支持的 Provider
 

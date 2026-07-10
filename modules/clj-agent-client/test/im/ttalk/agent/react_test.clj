@@ -64,8 +64,8 @@
                   (if (= n 1)
                     (response/make-response
                       :text nil
-                      :tool-calls [{:id "tc1" :name "append-item" :input {:item "book"}}
-                                   {:id "tc2" :name "append-item" :input {:item "pen"}}])
+                      :tool-calls [{:id "tc1" :name "append-item" :args {:item "book"}}
+                                   {:id "tc2" :name "append-item" :args {:item "pen"}}])
                     (response/make-response :text "已添加 book 和 pen" :tool-calls nil)))))
         store (memory/in-memory-store)
         kernel (build [#'append-item] svc store)]
@@ -86,7 +86,7 @@
                 (let [n (swap! call-count inc)]
                   (if (<= n 3)
                     (response/make-response :text nil
-                      :tool-calls [{:id (str "tc" n) :name "inc-counter" :input {}}])
+                      :tool-calls [{:id (str "tc" n) :name "inc-counter" :args {}}])
                     (response/make-response :text "计数完成" :tool-calls nil)))))
         store (memory/in-memory-store)
         kernel (build [#'inc-counter] svc store)]
@@ -106,7 +106,7 @@
                 ;; 永远返回工具调用（每次唯一 id），逼近上限
                 (fn [] (response/make-response :text nil
                          :tool-calls [{:id (str "tc" (swap! tc-id inc))
-                                       :name "inc-counter" :input {}}])))
+                                       :name "inc-counter" :args {}}])))
           store (memory/in-memory-store)
           kernel (build [#'inc-counter] svc store)
           ex (try
@@ -132,7 +132,7 @@
   (testing "max-iterations 为负数时不会无限循环，立即抛上限错误"
     (let [svc (mock-service
                 (fn [] (response/make-response :text nil
-                         :tool-calls [{:id "tc" :name "inc-counter" :input {}}])))
+                         :tool-calls [{:id "tc" :name "inc-counter" :args {}}])))
           store (memory/in-memory-store)
           kernel (build [#'inc-counter] svc store)]
       (is (thrown? clojure.lang.ExceptionInfo
@@ -148,7 +148,7 @@
                 (let [n (swap! call-count inc)]
                   (if (= n 1)
                     (response/make-response :text nil
-                      :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}])
+                      :tool-calls [{:id "tc1" :name "simple-echo" :args {:text "hi"}}])
                     (response/make-response :text "done" :tool-calls nil)))))
         store (memory/in-memory-store)
         kernel (build [#'simple-echo] svc store)]
@@ -186,7 +186,7 @@
                 (let [n (swap! call-count inc)]
                   (if (= n 1)
                     (response/make-response :text nil
-                      :tool-calls [{:id "tc1" :name "simple-echo" :input {:text "hi"}}])
+                      :tool-calls [{:id "tc1" :name "simple-echo" :args {:text "hi"}}])
                     (response/make-response :text "done" :tool-calls nil)))))
         store (memory/in-memory-store)
         kernel (build [#'simple-echo] svc store)

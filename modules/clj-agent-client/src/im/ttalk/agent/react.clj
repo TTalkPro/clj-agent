@@ -79,10 +79,10 @@
              decision (if gate (gate tc) :proceed)]
          (if (= :reject decision)
            {:messages (conj messages (msg/tool-result (:id tc) (:name tc) "已拒绝执行"))
-            :records  (conj records {:name fn-key :args (:input tc) :result :rejected})
+            :records  (conj records {:name fn-key :args (:args tc) :result :rejected})
             :context  context}
            (let [{:keys [value context]}
-                 (try (kernel/invoke-tool kernel fn-key (:input tc) context)
+                 (try (kernel/invoke-tool kernel fn-key (:args tc) context)
                       (catch Exception e
                         {:value (str "错误: " (or (not-empty (.getMessage e))
                                                    (.getName (class e))))
@@ -90,7 +90,7 @@
              (when on-tool-result
                (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
              {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
-              :records  (conj records {:name fn-key :args (:input tc) :result value})
+              :records  (conj records {:name fn-key :args (:args tc) :result value})
               :context  context}))))
      {:messages [] :records init-records :context tool-context}
      tool-calls)))
@@ -176,7 +176,7 @@
                    :pause-reason (str "需要审批: " (:name paused-call))
                    :loop-state {:tool-calls calls :remaining (dec remaining) :records records}
                    :pending-tool {:name (:name paused-call)
-                                  :args (:input paused-call)
+                                  :args (:args paused-call)
                                   :tool-call paused-call}
                    :tool-calls-made records
                    :tool-context tctx}

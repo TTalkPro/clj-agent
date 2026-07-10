@@ -169,7 +169,8 @@
   [agent]
   (when-let [on-tool-call (get-in agent [:callbacks :on-tool-call])]
     (fn [tc]
-      (let [cb-result (try (on-tool-call (:name tc) (:input tc))
+      (let [tool-name (let [n (:name tc)] (if (keyword? n) (name n) (str n)))
+            cb-result (try (on-tool-call tool-name (:args tc))
                            (catch Throwable _ nil))]
         (if (and (map? cb-result) (:interrupt cb-result))
           :pause

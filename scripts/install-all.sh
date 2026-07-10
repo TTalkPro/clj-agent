@@ -8,6 +8,7 @@ echo "=========================================="
 # 按依赖顺序安装
 MODULES=(
   "clj-agent-core"
+  "clj-agent-client"
   "clj-agent-provider"
 )
 

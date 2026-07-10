@@ -18,18 +18,21 @@ English | [中文](README.md)
 
 ## Architecture Overview
 
-Dependency Inversion: **Core defines the protocol (port) + Agent runtime; Provider implements the protocol and depends on Core.** Any jar implementing `im.ttalk.agent.model/ILLMProvider` can be injected as a provider.
+Dependency Inversion: **Core defines the protocol (port) + kernel primitives; Client is the Agent runtime; Provider implements the protocol — Client and Provider each depend on Core, not on each other.** Any jar implementing `im.ttalk.agent.model/ILLMProvider` can be injected as a provider.
 
 ```mermaid
 graph TB
-    subgraph "clj-agent-core (protocol + Agent runtime)"
+    subgraph "clj-agent-core (protocol + kernel primitives)"
         PROTO[ILLMProvider protocol<br/>im.ttalk.agent.model<br/>neutral-message boundary]
         SV[Generic Service<br/>wraps any provider via protocol only]
-        SA[SimpleAgent / client<br/>Synchronous Stateful + Pause/Resume]
         K[Kernel<br/>Central Orchestrator]
-        RE[ReAct<br/>Tool-call Loop]
         AD[Advisor<br/>Middleware Onion Chain]
         T[deftool]
+    end
+
+    subgraph "clj-agent-client (Agent runtime, depends on core)"
+        SA[client<br/>Synchronous Stateful + Pause/Resume]
+        RE[ReAct<br/>Tool-call Loop]
         ME[ChatMemory]
     end
 
@@ -57,9 +60,11 @@ graph TB
 ```mermaid
 graph LR
     provider[clj-agent-provider<br/>vendor adapters]
-    core[clj-agent-core<br/>protocol + Agent runtime]
+    client[clj-agent-client<br/>Agent runtime]
+    core[clj-agent-core<br/>protocol + kernel primitives]
 
     provider --> core
+    client --> core
 ```
 
 ## Module Structure
@@ -67,7 +72,8 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + Agent runtime; no internal deps
+│   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + kernel primitives; zero deps
+│   ├── clj-agent-client/    # Agent runtime (client/react/memory/subagent), depends on core
 │   └── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
 ├── examples/              # Usage Examples
 ├── docs/                  # Design Documents
@@ -349,12 +355,12 @@ Context manages shared state within a conversation:
 Core:
 
 - org.clojure/clojure 1.11.4
-- cheshire/cheshire 5.12.0
-- com.taoensso/timbre 6.3.0
-- http-kit/http-kit 2.8.0
-- net.clojars.wkok/openai-clojure 0.21.0
+- cheshire/cheshire 5.12.0 (provider, JSON)
+- com.taoensso/timbre 6.3.0 (client / provider, logging)
 
-Persistent ChatMemory (SQLite backend, opt-in via `im.ttalk.agent.memory.sqlite`):
+> The core module has zero external deps; HTTP uses the JDK's built-in java.net.http.
+
+Persistent ChatMemory (client module, SQLite backend, opt-in via `im.ttalk.agent.memory.sqlite`):
 
 - com.github.seancorfield/next.jdbc 1.3.939
 - org.xerial/sqlite-jdbc 3.45.1.0

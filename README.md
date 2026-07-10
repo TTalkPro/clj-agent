@@ -40,18 +40,21 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 ## 架构概览
 
-采用依赖倒置(DIP)：**Core 定义协议(端口)+ Agent 运行时;Provider 实现协议并依赖 Core**。任何实现 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能注入 agent。
+采用依赖倒置(DIP)：**Core 定义协议(端口)+ kernel 原语;Client 是 Agent 运行时;Provider 实现协议——Client 与 Provider 各自依赖 Core，互不依赖**。任何实现 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能注入 agent。
 
 ```mermaid
 graph TB
-    subgraph "clj-agent-core（协议 + Agent 运行时）"
+    subgraph "clj-agent-core（协议 + kernel 原语）"
         PROTO[ILLMProvider 协议<br/>im.ttalk.agent.model<br/>中立消息边界]
         SV[通用 Service<br/>仅凭协议包装任意 provider]
-        SA[SimpleAgent / client<br/>同步有状态 + pause/resume]
         K[Kernel<br/>中央编排器]
-        RE[ReAct<br/>工具调用循环]
         AD[Advisor<br/>中间件洋葱链]
         T[deftool]
+    end
+
+    subgraph "clj-agent-client（Agent 运行时，依赖 core）"
+        SA[client<br/>同步有状态 + pause/resume]
+        RE[ReAct<br/>工具调用循环]
         ME[ChatMemory]
     end
 
@@ -82,9 +85,11 @@ graph TB
 ```mermaid
 graph LR
     provider[clj-agent-provider<br/>厂商适配器]
-    core[clj-agent-core<br/>协议 + Agent 运行时]
+    client[clj-agent-client<br/>Agent 运行时]
+    core[clj-agent-core<br/>协议 + kernel 原语]
 
     provider --> core
+    client --> core
 ```
 
 ## 模块结构
@@ -92,7 +97,8 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + Agent 运行时(kernel/tool/advisor/react/...)；零内部依赖
+│   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + kernel 原语(kernel/tool/advisor)；零依赖
+│   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent)，依赖 core
 │   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
 ├── examples/              # 使用示例
 ├── docs/                  # 设计文档
@@ -114,6 +120,7 @@ clj-agent/
 
 ;; 或者只引用特定模块
 {:deps {im.ttalk/clj-agent-core {:local/root "/path/to/clj-agent/modules/clj-agent-core"}
+        im.ttalk/clj-agent-client {:local/root "/path/to/clj-agent/modules/clj-agent-client"}
         im.ttalk/clj-agent-provider  {:local/root "/path/to/clj-agent/modules/clj-agent-provider"}}}
 ```
 
@@ -137,6 +144,7 @@ clj-agent/
 先打包并安装到 `~/.m2/repository`：
 
 ```bash
+# 或用 ./scripts/install-all.sh 一次装全部三个模块（core → client → provider）
 cd /path/to/clj-agent/modules/clj-agent-core
 clj -T:build jar      # 打包
 clj -T:build install  # 安装到本地 Maven 仓库
@@ -146,7 +154,8 @@ clj -T:build install  # 安装到本地 Maven 仓库
 
 ```clojure
 ;; deps.edn
-{:deps {im.ttalk/clj-agent-core {:mvn/version "0.1.xxx"}}}
+{:deps {im.ttalk/clj-agent-client {:mvn/version "0.1.xxx"}     ;; agent 运行时（引 core）
+        im.ttalk/clj-agent-provider {:mvn/version "0.1.xxx"}}}  ;; 厂商适配器
 ```
 
 > **建议**：本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。
@@ -439,7 +448,7 @@ Context 管理对话中的共享状态：
   {:model "gpt-4" :max-tokens 1024}
   [{:role "user" :content "北京天气怎么样？"}]
   [{:name "get-weather" :description "获取天气" :parameters {...}}])
-;; => {:text "..." :tool-calls [{:id "..." :name :get-weather :input {:city "北京"}}]}
+;; => {:text "..." :tool-calls [{:id "..." :name "get-weather" :args {:city "北京"}}]}
 ```
 
 ## 高级用法：完整示例
@@ -486,18 +495,19 @@ Context 管理对话中的共享状态：
 cd modules/clj-agent-core && clojure -M:test
 ```
 
-> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对两个模块并行跑测试。
+> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对三个模块并行跑测试。
 
 ## 依赖
 
 核心依赖：
 
 - org.clojure/clojure 1.11.4
-- cheshire/cheshire 5.12.0
-- com.taoensso/timbre 6.3.0
-- http-kit/http-kit 2.8.0（provider HTTP 客户端）
+- cheshire/cheshire 5.12.0（provider，JSON）
+- com.taoensso/timbre 6.3.0（client / provider，日志）
 
-持久化 ChatMemory（SQLite 后端，按需引入 `im.ttalk.agent.memory.sqlite`）：
+> core 模块零外部依赖；HTTP 客户端走 JDK 内置 java.net.http，无额外依赖。
+
+持久化 ChatMemory（client 模块，SQLite 后端，按需引入 `im.ttalk.agent.memory.sqlite`）：
 
 - com.github.seancorfield/next.jdbc 1.3.939
 - org.xerial/sqlite-jdbc 3.45.1.0

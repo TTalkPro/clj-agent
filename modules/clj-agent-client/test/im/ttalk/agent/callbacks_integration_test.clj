@@ -73,7 +73,7 @@
     (let [log (atom [])
           p (ts/create-mock-provider
               [{:text nil
-                :tool-calls [{:id "t1" :name :mock-get-weather :input {:city "北京"}}]}
+                :tool-calls [{:id "t1" :name "mock-get-weather" :args {:city "北京"}}]}
                {:text "北京晴天 25°C" :tool-calls nil}])
           a (agent/create-agent
               {:provider p :model "test"
@@ -102,9 +102,9 @@
         (testing "on-tool-call 恰好触发 1 次（gate 缓存修复，无双重触发）"
           (is (= 1 (event-count log :tool-call))))
 
-        (testing "on-tool-call 收到正确的 tool 名（keyword）和 args"
+        (testing "on-tool-call 收到正确的 tool 名（字符串，v0.2 统一形状）和 args"
           (let [[_ n args] (first-event log :tool-call)]
-            (is (= :mock-get-weather n) "name 是 keyword")
+            (is (= "mock-get-weather" n) "name 是字符串")
             (is (= {:city "北京"} args) "args 包含城市")))
 
         (testing "on-tool-result 触发 1 次"
@@ -124,16 +124,16 @@
     (let [log (atom [])
           p (ts/create-mock-provider
               [{:text nil
-                :tool-calls [{:id "t2" :name :mock-get-weather :input {:city "上海"}}]}
+                :tool-calls [{:id "t2" :name "mock-get-weather" :args {:city "上海"}}]}
                {:text "审批通过后：上海晴天" :tool-calls nil}])
-          blocked-tools (atom #{:mock-get-weather})
+          blocked-tools (atom #{"mock-get-weather"})
           a (agent/create-agent
               {:provider p :model "test"
                :tools ts/mock-tools
                :callbacks
                {:on-tool-call  (fn [n _args]
                                   (when (contains? @blocked-tools n)
-                                    {:interrupt (str (name n) " 需要人工审批")}))
+                                    {:interrupt (str n " 需要人工审批")}))
                 :on-interrupt  (fn [info _m]
                                   (swap! log conj [:interrupt (:reason info)]))
                 :on-resume     (fn [_info _m]
@@ -161,8 +161,8 @@
           endless-calls (repeatedly #(hash-map
                                        :text nil
                                        :tool-calls [{:id "tx"
-                                                     :name :mock-get-weather
-                                                     :input {:city "x"}}]))
+                                                     :name "mock-get-weather"
+                                                     :args {:city "x"}}]))
           p (ts/create-mock-provider (take 20 endless-calls))
           a (agent/create-agent
               {:provider p :model "test"
@@ -196,7 +196,7 @@
 
           p (ts/create-mock-provider
               [{:text nil
-                :tool-calls [{:id "d1" :name :do_research :input {:task "分析量子计算"}}]}
+                :tool-calls [{:id "d1" :name "do_research" :args {:task "分析量子计算"}}]}
                {:text "综合子agent结论：量子计算前景广阔" :tool-calls nil}])
 
           a (agent/create-agent

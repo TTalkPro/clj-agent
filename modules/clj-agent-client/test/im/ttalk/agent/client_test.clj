@@ -43,7 +43,7 @@
 (deftest tool-calling-test
   (testing "工具调用：先 tool_calls 后 text"
     (let [p (ts/create-mock-provider
-              [{:text nil :tool-calls [{:id "c1" :name :mock-get-weather :input {:city "北京"}}]}
+              [{:text nil :tool-calls [{:id "c1" :name "mock-get-weather" :args {:city "北京"}}]}
                {:text "北京晴 25°C" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test" :tools ts/mock-tools})
           r (agent/chat a "北京天气？")]
@@ -157,7 +157,7 @@
   (testing "工具回合不流正文，最终文本回合逐 token；历史含完整 tool 链"
     (let [tokens (atom [])
           p (streaming-provider
-              (atom [{:tokens [] :tool-calls [{:id "c1" :name :mock-get-weather :input {:city "北京"}}]}
+              (atom [{:tokens [] :tool-calls [{:id "c1" :name "mock-get-weather" :args {:city "北京"}}]}
                      {:tokens ["北京" "晴" "25°C"] :tool-calls nil}]))
           a (agent/create-agent {:provider p :model "test" :tools ts/mock-tools})
           r (agent/chat-stream a "北京天气?" (fn [t] (when (:token t) (swap! tokens conj (:token t)))))]
@@ -354,14 +354,14 @@
 ;;; ============================================================
 
 (defn- dangerous-gate
-  "拦截 :dangerous-tool，用于 pause/resume 测试。"
+  "拦截 dangerous-tool，用于 pause/resume 测试（v0.2：tool 名为字符串）。"
   []
-  {:on-tool-call (fn [n _] (when (= :dangerous-tool n) {:interrupt "需要审批"}))})
+  {:on-tool-call (fn [n _] (when (= "dangerous-tool" n) {:interrupt "需要审批"}))})
 
 (deftest no-pause-without-on-tool-call-test
   (testing "不配 callbacks :on-tool-call：所有工具直接执行，不暂停"
     (let [p (ts/create-mock-provider
-              [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "x"}}]}
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "x"}}]}
                {:text "已执行" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin})]
       (let [r (agent/chat a "删除")]
@@ -371,18 +371,18 @@
 (deftest sensitive-pause-test
   (testing "on-tool-call 返回 {:interrupt ...}：危险工具暂停"
     (let [p (ts/create-mock-provider
-              [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "/tmp/x"}}]}])
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "/tmp/x"}}]}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
                                  :callbacks (dangerous-gate)})
           r (agent/chat a "删除文件")]
       (is (= :paused (:status r)))
       (is (string? (:pause-reason r)))
-      (is (= :dangerous-tool (:name (:pending-tool r))))
+      (is (= "dangerous-tool" (:name (:pending-tool r))))
       (is (agent/paused? a)))))
 
 (deftest resume-approved-test
   (let [p (ts/create-mock-provider
-            [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "目标"}}]}
+            [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "目标"}}]}
              {:text "操作已完成" :tool-calls nil}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
                                :callbacks (dangerous-gate)})]
@@ -395,7 +395,7 @@
 
 (deftest resume-rejected-test
   (let [p (ts/create-mock-provider
-            [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "目标"}}]}
+            [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "目标"}}]}
              {:text "好的，已取消" :tool-calls nil}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
                                :callbacks (dangerous-gate)})]
@@ -411,19 +411,19 @@
 (deftest mixed-tools-pause-test
   (testing "safe + sensitive 混合：在 dangerous-tool 处暂停"
     (let [p (ts/create-mock-provider
-              [{:text nil :tool-calls [{:id "c1" :name :safe-tool :input {:input "数据"}}
-                                       {:id "c2" :name :dangerous-tool :input {:target "目标"}}]}
+              [{:text nil :tool-calls [{:id "c1" :name "safe-tool" :args {:input "数据"}}
+                                       {:id "c2" :name "dangerous-tool" :args {:target "目标"}}]}
                {:text "全部完成" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
                                  :callbacks (dangerous-gate)})
           r (agent/chat a "混合操作")]
       (is (= :paused (:status r)))
-      (is (= :dangerous-tool (:name (:pending-tool r)))))))
+      (is (= "dangerous-tool" (:name (:pending-tool r)))))))
 
 (deftest on-interrupt-callback-test
   (let [log (atom nil)
         p (ts/create-mock-provider
-            [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "重要"}}]}])
+            [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "重要"}}]}])
         a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
                                :callbacks (assoc (dangerous-gate)
                                                  :on-interrupt
@@ -431,7 +431,7 @@
     (agent/chat a "删除重要文件")
     (is (some? @log))
     (is (string? (:reason @log)))
-    (is (= :dangerous-tool (:name (:pending-tool @log))))))
+    (is (= "dangerous-tool" (:name (:pending-tool @log))))))
 
 (deftest resume-not-paused-throws-test
   (let [p (ts/create-mock-provider [{:text "正常" :tool-calls nil}])
@@ -447,7 +447,7 @@
 (deftest cancel-pending-protection-test
   (testing "暂停后不 resume 直接开新对话：补「已取消」结果，无悬空 tool_use"
     (let [p (ts/create-mock-provider
-              [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "x"}}]}
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "x"}}]}
                {:text "新回答" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
                                  :callbacks (dangerous-gate)})]
@@ -465,7 +465,7 @@
   (testing "暂停未 resume，另一 agent（共享 store/同 conv）开新对话：kernel 自愈悬空 tool_use"
     (let [store (memory/in-memory-store)
           p1 (ts/create-mock-provider
-               [{:text nil :tool-calls [{:id "c1" :name :dangerous-tool :input {:target "/tmp/x"}}]}])
+               [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "/tmp/x"}}]}])
           a1 (agent/create-agent {:provider p1 :model "test" :tools ts/test-plugin
                                   :memory store :conversation-id "shared-heal"
                                   :callbacks (dangerous-gate)})]

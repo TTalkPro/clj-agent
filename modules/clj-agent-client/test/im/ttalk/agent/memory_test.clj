@@ -86,7 +86,7 @@
   (let [store (mem/in-memory-store)
         response (resp/make-response
                    :text nil
-                   :tool-calls [{:id "c1" :name :get_weather :input {:city "北京"}}])]
+                   :tool-calls [{:id "c1" :name "get_weather" :args {:city "北京"}}])]
     (run-filter store [(msg/user "天气")] {:conversation-id "s3"} response)
     (let [stored (last (mem/mem-get store "s3"))]
       (is (msg/has-tool-calls? stored))

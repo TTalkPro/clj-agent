@@ -21,13 +21,14 @@
 
 (defn response->neutral
   "把归一化响应(ILLMResponse)转成中立 assistant 消息。
-    归一化响应里 text / tool-calls 已是 provider 无关形态。"
+    归一化响应的 tool-calls 已与中立形状同构（{:id :name(字符串) :args}，
+    v0.2 统一后不再需要 :input→:args 换名），仅经 msg/tool-call 复位形状。"
   [response]
   (let [text (resp/response-text response)
         calls (resp/response-tool-calls response)]
     (if (seq calls)
       (msg/assistant-tool-calls
-        (mapv (fn [{:keys [id name input]}] (msg/tool-call id name input)) calls)
+        (mapv (fn [{:keys [id name args]}] (msg/tool-call id name args)) calls)
         (when (seq text) text))
       (msg/assistant text))))
 
