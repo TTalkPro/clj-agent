@@ -19,27 +19,28 @@
   (:require [cheshire.core :as json]
             [clojure.string]
             [taoensso.timbre :as log]
-            [im.ttalk.agent.model.error :as errors])
+            [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.streaming :as streaming]
+            [im.ttalk.agent.provider.http.client :as http-client])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-                          HttpResponse$BodyHandler HttpResponse$BodySubscribers]
+                          HttpResponse HttpResponse$BodyHandler
+                          HttpResponse$BodySubscribers HttpResponse$ResponseInfo]
            [java.util.concurrent Flow$Subscriber]
            [java.util.function Function]
            [java.time Duration]
            [java.nio.charset StandardCharsets]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 共享 HttpClient（连接池复用；executor 可换虚拟线程）
 ;;; ============================================================
 
-(defonce ^{:doc "默认共享 HttpClient。executor 用虚拟线程：回调跑在虚拟线程上，
-   高并发流不被固定线程池饿死；JDK 24+ 起 synchronized 不再 pin 虚拟线程。"}
+(def ^{:doc "默认共享 HttpClient——与非流式 http.client 同一实例（同一连接池 / 虚拟线程 executor），
+   避免两套独立连接池。"}
   default-client
-  (delay
-    (-> (HttpClient/newBuilder)
-        (.connectTimeout (Duration/ofSeconds 30))
-        (.executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor))
-        (.build))))
+  http-client/default-client)
 
 ;;; ============================================================
 ;;; Flow.Subscriber：逐行喂给 parse-fn/process-fn
@@ -109,7 +110,7 @@
         ;; BodyHandler：先看状态码——2xx 走流式 subscriber；非 2xx 收错误体字符串
         handler  (reify HttpResponse$BodyHandler
                    (apply [_ info]
-                     (if (<= 200 (.statusCode info) 299)
+                     (if (<= 200 (.statusCode ^HttpResponse$ResponseInfo info) 299)
                        (HttpResponse$BodySubscribers/fromLineSubscriber
                          (line-subscriber {:parse-fn parse-fn :process-fn process-fn
                                            :on-token on-token :on-complete on-complete
@@ -117,15 +118,18 @@
                                           state cancel-p))
                        (HttpResponse$BodySubscribers/ofString StandardCharsets/UTF_8))))
         req      (build-request url headers body timeout)
-        cf       (.sendAsync ^HttpClient (or client @default-client) req handler)
+        ^HttpClient http-client (or client @default-client)
+        ^java.util.concurrent.CompletableFuture cf (.sendAsync http-client req handler)
         ;; 非 2xx：在 future 完成时把错误体转 canonical error → on-error（D5）
         cf2      (.thenApply cf
                    (reify Function
                      (apply [_ resp]
-                       (let [status (.statusCode resp)]
+                       (let [^HttpResponse resp resp
+                             status (.statusCode resp)]
                          (when-not (<= 200 status 299)
-                           (let [parsed (try (json/parse-string (.body resp) true)
-                                             (catch Exception _ (.body resp)))]
+                           (let [body (.body resp)
+                                 parsed (try (json/parse-string body true)
+                                             (catch Exception _ body))]
                              (when on-error
                                (on-error (errors/http-response->error
                                            {:status status :body parsed}
@@ -135,3 +139,43 @@
      :cancel (fn []
                (when (realized? cancel-p) (.cancel ^java.util.concurrent.Flow$Subscription @cancel-p))
                (.cancel cf true))}))
+
+(defn post-stream-sync
+  "post-stream-async 的同步包装：阻塞当前线程直至流结束，返回最终响应（保持同步签名）。
+
+   之前 openai_compat / anthropic / dashscope 三处各自手写同一套
+   「promise 对 + 包装 cancel + cond 分派」编排，现统一收敛于此。
+
+   在 post-stream-async 的 opts 之外新增/替代：
+   - :make-initial-state (fn [] state)        初始状态构造器（取消时再次调用以构建空响应）
+   - :build-response     (fn [final-state])   流结束时构建最终响应
+   （:initial-state / :on-complete / :on-error 由本函数接管，调用方不再传。）
+
+   取消语义：包装的 cancel 登记到 im.ttalk.agent.streaming 的在途注册表；被调用时
+   先标记本地 cancelled? 再取消上游。取消会让 java.net.http 触发 onError（连接中止）
+   或让 future 抛 CancellationException——故 @future 宽 catch，且 cond 里 cancelled?
+   优先于 err。取消返回空响应（token 已流出），不抛错。
+
+   失败：err 已兑现 → 按 D5 canonical error 抛出；流结束但无结果 → :provider-error。"
+  [url {:keys [make-initial-state build-response provider] :as opts}]
+  (let [result (promise)
+        err    (promise)
+        {:keys [future cancel]}
+        (post-stream-async
+          url
+          (-> opts
+              (dissoc :make-initial-state :build-response)
+              (assoc :initial-state (make-initial-state)
+                     :on-complete (fn [state] (deliver result (build-response state)))
+                     :on-error (fn [e] (deliver err e)))))
+        cancelled? (atom false)
+        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
+    (try @future                         ;; 阻塞直到流结束（保持同步签名）
+         (catch Throwable _ nil))
+    (cond
+      @cancelled?        (build-response (make-initial-state))
+      (realized? err)    (errors/throw! @err)
+      (realized? result) @result
+      :else (errors/throw! (errors/error :provider-error
+                                         "流式响应未产出结果"
+                                         {:provider provider})))))

@@ -13,12 +13,15 @@
   (:refer-clojure :exclude [get])
   (:require [cheshire.core :as json]
             [taoensso.timbre :as log]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [im.ttalk.agent.model.error :as errors])
   (:import [java.net URI URLEncoder]
-           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-                          HttpResponse$BodyHandlers HttpHeaders]
+           [java.net.http HttpClient HttpRequest HttpRequest$Builder HttpRequest$BodyPublishers
+                          HttpResponse HttpResponse$BodyHandlers HttpHeaders]
            [java.time Duration]
            [java.nio.charset StandardCharsets]))
+
+(set! *warn-on-reflection* true)
 
 ;; ============================================================
 ;; 共享 HttpClient（连接池复用；executor 可换虚拟线程）
@@ -104,11 +107,11 @@
   "将 java.net.http.HttpHeaders 转换为 Clojure map，key 转为小写字符串。
     HttpHeaders.map() 返回 Map<String,List<String>>，遍历得到 Map.Entry。"
   [^HttpHeaders http-headers]
-  (let [hdrs-map (.map http-headers)
-        result (java.util.HashMap.)]
-    (doseq [[^String k v] hdrs-map]
-      (.put result (str/lower-case k) v))
-    (into {} result)))
+  (persistent!
+    (reduce (fn [m [^String k v]]
+              (assoc! m (str/lower-case k) v))
+            (transient {})
+            (.map http-headers))))
 
 (defn- parse-response
   "解析 HTTP 响应
@@ -133,6 +136,22 @@
              body)
      :success? (<= 200 status 299)}))
 
+(defn response->error
+  "把失败的 HTTP 响应（本模块 request/post 返回的 map）转为 canonical error
+   （D5：ex-info data 即 canonical error map；保留 body/headers/request-id 于 :context 供排查）。
+
+   之前 openai_compat / anthropic / dashscope 各自维护同一逻辑，现统一于此。"
+  [response provider]
+  (let [status (or (:status response) 0)
+        base (if (and (zero? status) (:error response))
+               ;; 连接级失败（无 HTTP 状态码）：网络错误，可重试
+               (errors/error :network-error
+                             (str "连接失败: " (:error response))
+                             {:provider provider})
+               ;; HTTP 4xx/5xx：按状态码分类（401/403→auth 不可重试；429→限流；5xx→provider 可重试）
+               (errors/http-response->error response provider))]
+    (assoc base :context (select-keys response [:body :headers :request-id :error]))))
+
 ;; ============================================================
 ;; 请求构建
 ;; ============================================================
@@ -148,17 +167,19 @@
                    (if (string? body) body (json/generate-string body)))
         uri (URI/create url)
         timeout-dur (Duration/ofMillis (or timeout *default-timeout*))
-        base-builder (-> (HttpRequest/newBuilder uri)
-                         (.timeout timeout-dur))
+        ^HttpRequest$Builder base-builder (-> (HttpRequest/newBuilder uri)
+                                              (.timeout timeout-dur))
         base-builder (if-not (has-content-type? headers)
                        (doto base-builder (.header "Content-Type" "application/json"))
                        base-builder)
-        req-builder (cond
-                      (= method-kw :get) (.GET base-builder)
-                      (= method-kw :post) (.POST base-builder (HttpRequest$BodyPublishers/ofString body-str))
-                      (= method-kw :put) (.PUT base-builder (HttpRequest$BodyPublishers/ofString body-str))
-                      (= method-kw :patch) (.PATCH base-builder (HttpRequest$BodyPublishers/ofString body-str))
-                      (= method-kw :delete) (.DELETE base-builder))]
+        ;; 注：HttpRequest.Builder 没有 .PATCH 方法，PATCH 必须走通用 .method
+        ^HttpRequest$Builder req-builder
+        (cond
+          (= method-kw :get) (.GET base-builder)
+          (= method-kw :post) (.POST base-builder (HttpRequest$BodyPublishers/ofString body-str))
+          (= method-kw :put) (.PUT base-builder (HttpRequest$BodyPublishers/ofString body-str))
+          (= method-kw :patch) (.method base-builder "PATCH" (HttpRequest$BodyPublishers/ofString body-str))
+          (= method-kw :delete) (.DELETE base-builder))]
     (doseq [[k v] headers]
       (.header req-builder (name k) (str v)))
     (.build req-builder)))
@@ -193,7 +214,8 @@
         (.thenApply cf
           (reify java.util.function.Function
             (apply [_ resp]
-              (let [status (.statusCode resp)
+              (let [^HttpResponse resp resp
+                    status (.statusCode resp)
                     headers (http-headers->map (.headers resp))
                     body (.body resp)
                     parsed (parse-response {:status status :headers headers :body body} as)]
@@ -201,7 +223,7 @@
                   (callback parsed))
                 parsed)))))
       (try
-        (let [resp (.send ^HttpClient client req handler)
+        (let [^HttpResponse resp (.send ^HttpClient client req handler)
               status (.statusCode resp)
               headers (http-headers->map (.headers resp))
               body (.body resp)]
