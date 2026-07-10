@@ -25,7 +25,6 @@
             [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.error :as errors]
-            [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.stream.dashscope :as dstream]))
 
@@ -127,35 +126,30 @@
     - opts: {:timeout ...}"
   [url api-key body opts]
   (let [timeout (or (:timeout opts) default-timeout)
+        ;; http/post 默认 :as :json——:body 已解析为 map（解析失败时回退原始字符串）。
+        ;; 注意不能再对 :body 调 json/parse-string（对 map 会抛 ClassCastException，
+        ;; 曾导致同步路径成功响应也被误报 :parse-error）。
         response (http/post url
                             :headers {"Authorization" (str "Bearer " api-key)}
                             :body body
                             :timeout timeout)]
-    ;; D5：失败一律抛 canonical error（ex-info data 即 errors/error map）。
-    ;; 连接级错误（DNS/超时/重置）：网络层失败，可重试。
-    (when-let [err (:error response)]
-      (errors/throw! (errors/error :network-error
-                                   (str "连接失败: " err)
-                                   {:provider :dashscope})))
-    (let [status (:status response)
-          body-str (:body response)]
-      ;; HTTP 4xx/5xx：DashScope 错误体形如 {:code "InvalidApiKey" :message ... :request_id ...}，
-      ;; 没有 :error 键，绝不能当正常响应返回（否则鉴权/参数错误会静默变成空响应）。
-      (when (>= status 400)
-        (let [parsed (try (json/parse-string body-str true) (catch Exception _ nil))]
-          ;; 用 canonical 的 http-response->error 分类（401/403→auth 不可重试；429→限流；5xx→可重试），
-          ;; DashScope 的 :code/:message/:request_id 并入 :context 供排查。
-          (errors/throw!
-            (-> (errors/http-response->error {:status status :body (or parsed body-str)} :dashscope)
-                (assoc :context {:code (:code parsed)
-                                 :request-id (:request_id parsed)
-                                 :body (or parsed body-str)})))))
-      (try
-        (json/parse-string body-str true)
-        (catch Exception e
+    ;; D5：失败一律抛 canonical error（连接级/4xx/5xx 分类统一见 http.client/response->error）。
+    ;; DashScope 错误体形如 {:code "InvalidApiKey" :message ... :request_id ...}，没有 :error 键，
+    ;; 绝不能当正常响应返回；其 :code/:request_id 并入 :context 供排查。
+    (if (:success? response)
+      (let [parsed (:body response)]
+        (when-not (map? parsed)
           (errors/throw! (errors/error :parse-error
-                                       (str "DashScope 响应 JSON 解析失败: " (.getMessage e))
-                                       {:provider :dashscope :cause e})))))))
+                                       "DashScope 响应 JSON 解析失败"
+                                       {:provider :dashscope
+                                        :context {:body parsed}})))
+        parsed)
+      (let [parsed (:body response)]
+        (errors/throw!
+          (-> (http/response->error response :dashscope)
+              (update :context merge (when (map? parsed)
+                                       {:code (:code parsed)
+                                        :request-id (:request_id parsed)}))))))))
 
 ;;; ============================================================
 ;;; 同步 API 调用
@@ -233,34 +227,20 @@
   (let [api-key (get-api-key opts)
         url     (or (:base-url opts) default-base-url)
         body    (build-stream-request config messages tools)
-        timeout (or (:timeout opts) 300000)
-        result  (promise)
-        err     (promise)
-        {:keys [future cancel]}
-        (stream-client/post-stream-async
-          url
-          {:headers {"Authorization"   (str "Bearer " api-key)
-                     "Content-Type"    "application/json"
-                     "X-DashScope-SSE" "enable"}
-           :body body :timeout timeout
-           :parse-fn   dstream/parse-sse-line
-           :process-fn dstream/process-event
-           :initial-state (dstream/make-initial-state)
-           :on-token on-token
-           :on-complete (fn [state] (deliver result (dstream/build-response state)))
-           :on-error (fn [e] (deliver err e))
-           :provider :dashscope})
-        cancelled? (atom false)
-        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
-    (try @future
-         (catch Throwable _ nil))
-    (cond
-      @cancelled?        (dstream/build-response (dstream/make-initial-state))
-      (realized? err)    (errors/throw! @err)
-      (realized? result) @result
-      :else (errors/throw! (errors/error :provider-error
-                                         "流式响应未产出结果"
-                                         {:provider :dashscope})))))
+        timeout (or (:timeout opts) 300000)]
+    ;; 同步编排（promise/cancel/分派）统一在 post-stream-sync。
+    (stream-client/post-stream-sync
+      url
+      {:headers {"Authorization"   (str "Bearer " api-key)
+                 "Content-Type"    "application/json"
+                 "X-DashScope-SSE" "enable"}
+       :body body :timeout timeout
+       :parse-fn   dstream/parse-sse-line
+       :process-fn dstream/process-event
+       :make-initial-state dstream/make-initial-state
+       :build-response dstream/build-response
+       :on-token on-token
+       :provider :dashscope})))
 
 ;;; ============================================================
 ;;; Provider Record
