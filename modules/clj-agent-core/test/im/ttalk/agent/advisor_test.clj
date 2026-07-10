@@ -151,3 +151,77 @@
     (let [terminal (fn [req] {:echo (:req req)})
           out ((flt/build-chain '() terminal) {:req 42})]
       (is (= {:echo 42} out)))))
+
+;;; ============================================================
+;;; 内置 filter：timeout / approval（此前无覆盖）
+;;; ============================================================
+
+(defn- run-tool-chain
+  "把单个 tool filter 与 terminal 折成链并执行请求。"
+  [filter-map terminal req]
+  ((flt/build-chain [(:tool filter-map)] terminal) req))
+
+(deftest timeout-filter-test
+  (testing "下游超时 → 返回超时结果（不抛异常），context 保留"
+    (let [slow (fn [_req] (Thread/sleep 60000) {:result "never" :context :c})
+          resp (run-tool-chain (flt/timeout-filter 100) slow
+                               {:function {:name :slow} :args {} :context {:k 1}})]
+      (is (clojure.string/includes? (:result resp) "超时"))
+      (is (= {:k 1} (:context resp)))))
+
+  (testing "下游按时完成 → 原样透传"
+    (let [fast (fn [req] {:result "ok" :context (:context req)})
+          resp (run-tool-chain (flt/timeout-filter 5000) fast
+                               {:function {:name :fast} :args {} :context :ctx})]
+      (is (= "ok" (:result resp)))
+      (is (= :ctx (:context resp)))))
+
+  (testing "超时后后台任务被中断（future-cancel 生效）"
+    (let [interrupted? (promise)
+          slow (fn [_]
+                 (try (Thread/sleep 60000)
+                      (catch InterruptedException _ (deliver interrupted? true)))
+                 {:result "never"})]
+      (run-tool-chain (flt/timeout-filter 100) slow
+                      {:function {:name :slow} :args {} :context nil})
+      (is (true? (deref interrupted? 2000 :timeout))
+          "慢工具线程应收到中断，不泄漏工作线程"))))
+
+(deftest approval-filter-test
+  (testing "敏感工具 + 批准 → 执行下游"
+    (let [asked (atom nil)
+          f (flt/approval-filter (fn [n args] (reset! asked [n args]) true))
+          resp (run-tool-chain f (fn [_] {:result "done" :context nil})
+                               {:function {:name :rm-rf :sensitive true}
+                                :args {:path "/tmp/x"} :context nil})]
+      (is (= "done" (:result resp)))
+      (is (= [:rm-rf {:path "/tmp/x"}] @asked) "审批函数收到工具名与参数")))
+
+  (testing "敏感工具 + 拒绝 → 短路，不调下游"
+    (let [called (atom false)
+          f (flt/approval-filter (fn [_ _] false))
+          resp (run-tool-chain f (fn [_] (reset! called true) {:result "done"})
+                               {:function {:name :rm-rf :sensitive true}
+                                :args {} :context :ctx})]
+      (is (clojure.string/includes? (:result resp) "拒绝"))
+      (is (= :ctx (:context resp)))
+      (is (false? @called) "下游不应被调用")))
+
+  (testing "非敏感工具 → 不问审批直接放行"
+    (let [asked (atom false)
+          f (flt/approval-filter (fn [_ _] (reset! asked true) false))
+          resp (run-tool-chain f (fn [_] {:result "ok"})
+                               {:function {:name :safe :sensitive false} :args {} :context nil})]
+      (is (= "ok" (:result resp)))
+      (is (false? @asked))))
+
+  (testing "默认审批走标准输入（y 批准 / 其他拒绝）"
+    (let [f (flt/approval-filter)
+          req {:function {:name :danger :sensitive true} :args {} :context nil}
+          terminal (fn [_] {:result "executed"})]
+      (binding [*out* (java.io.StringWriter.)]   ;; 吞掉审批提示输出
+        (with-in-str "y\n"
+          (is (= "executed" (:result (run-tool-chain f terminal req)))))
+        (with-in-str "n\n"
+          (is (clojure.string/includes?
+                (:result (run-tool-chain f terminal req)) "拒绝")))))))
