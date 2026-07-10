@@ -80,3 +80,54 @@
   - [x] 响应归一化从「4 份」收敛为 2 份活路径（同步 service + 流式 stream，输入不同，合理分工）。
   - [~] **剩余：双消息体系统一**（`model/types.clj` vs `model/message.clj`）——改动整条消息数据流、高风险、无正确性 bug、转换边界正常工作，建议 v0.2 破坏性版本专项。
 - [ ] **测试盲区（增量）**：流式整链路（call-api-stream / process-sse-stream / 断流 / 非 2xx）、并发、timeout/approval filter、provider record 端到端 mock、工厂 env 配置。
+
+## P3 — 2026-07-10 优化轮
+
+> 来源：全库四路并行分析（重复 / 死代码 / 架构债 / 性能）。
+> 基线：209 tests / 841 assertions / 0 failures（httpbin flake 时 838，见下 A3）。
+
+### ✅ 已完成（已提交 2e4c44b..25ee70a）
+
+- [x] **流式 O(n²)**：stream/{openai,anthropic,dashscope} 累积器全改 StringBuilder 原地 append；
+  on-token 契约移除 `:accumulated`（破坏性，仓库内零消费者）。
+- [x] **死代码清理**：16 个零引用函数（tool/kernel/error/common/converter 门面）；
+  修复 examples/test_glm_providers.clj 对已删 `call-with-tools` 的引用。
+- [x] **反射清零（热路径）**：http/{client,retry,stream_client} + stream/* 开
+  `*warn-on-reflection*` + 类型提示；顺带修 **`.PATCH` 方法不存在**的潜在运行时崩溃
+  （HttpRequest.Builder 须走 `.method "PATCH"`）。
+- [x] **HTTP/流式收敛**：三处逐字重复的流式同步编排 → `stream_client/post-stream-sync`；
+  `response->error` 三份 → `http/client.clj` 一份；HttpClient 双实例 → 共享单例；
+  修复 **dashscope 同步路径 JSON 双重解析**（成功响应 100% 误抛 :parse-error，bdbefd3 引入）
+  + 回归测试 dashscope_sync_test.clj。
+- [x] **设计文档对齐**：memory-filter-refactor（→已完成）/ onion-filter（→机制层已实施、
+  下沉未做的逐决策状态表）/ streaming-async-design（→全部落地 + 本轮补记）。
+
+### ✅ 快赢（A 组，2026-07-10 完成，未提交）
+
+> 测试：209 → 211 tests / 847 assertions / 0 failures（httpbin flake 已根除）。
+
+- [x] **A1 DashScope 复用 common + 修 input_schema 缺口**：删手写
+  tool->dashscope-schema / extract-tool-calls / extract-text / build-tool-result，
+  复用 schema.openai / response-parser / openai-compat。顺带修复 **deftool 工具
+  （:input_schema）在 DashScope 下参数被静默丢成空对象**。回归测试
+  `deftool-input-schema-not-dropped-test`（本地服务捕获出站请求体断言）。
+- [x] **A2 tools->schemas 缓存**：新增 `common/memo.clj` `bounded`（有界、超限清空）；
+  schema.{openai,anthropic} 的 tools->schemas 按 tools 列表缓存——ReAct 循环
+  每轮 LLM 调用不再重转不变的工具列表。
+- [x] **A3 httpbin 测试本地化**：client_test 两个外网用例改本地
+  com.sun.net.httpserver 回显服务（模拟 httpbin 形状），删跳过逻辑；
+  **顺带补 PATCH 回归测试**（覆盖本轮修复的 HttpRequest.Builder 无 .PATCH 崩溃）。
+- [x] **A4 子 agent 虚拟线程**：subagent/manager spawn-worker! 从 clojure `future`
+  （无界平台线程池）改为共享 `newVirtualThreadPerTaskExecutor` 的 `.submit`
+  （仍返 j.u.c.Future，kill!/future-cancel 中断语义不变）。已验证 worker
+  跑在虚拟线程 + kill 可中断。
+
+### 📋 后续候选（B/C 组，按需启动）
+
+- [ ] **B1 流式建链重试**：maybe-with-retry 仅覆盖非流式；编排已收敛到 post-stream-sync
+  单点，建链阶段（429/5xx）重试只需改一处。
+- [ ] **B2 `*warn-on-reflection*` 全项目推广**（目前仅热路径 6 ns）。
+- [ ] **B3 converter/prompt 子系统去留决策**：两子系统无 runtime 消费者、仅测试存活
+  （~2600 行）——定位是对外库 API 则补 README+examples，否则删除。**需拍板**。
+- [ ] **C1 双消息体系统一**（types.clj vs message.clj，v0.2 破坏性专项，见 D7 剩余项）。
+- [ ] **C2 onion-filter 模块下沉收尾**（或修订设计目标，见 design/onion-filter.md 状态表）。
