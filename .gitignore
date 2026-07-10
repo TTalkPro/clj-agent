@@ -32,6 +32,9 @@ checkouts/
 .clj-kondo/
 .lsp/
 
+# OpenCode / Sisyphus internal
+.sisyphus/
+
 # Environment & secrets
 .env
 .env.*
