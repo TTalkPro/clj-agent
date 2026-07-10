@@ -555,3 +555,34 @@
       (with-open [s (sqlite/sqlite-store path)]
         (memory/mem-add s "c1" [(msg/user "x")])
         (is (= 1 (count (memory/mem-get s "c1"))))))))
+
+(deftest sqlite-concurrent-writes-test
+  (testing "共享 store 并发写（locking conn 串行化）：无异常、消息不丢不重"
+    (let [path (temp-db)
+          s (sqlite/sqlite-store path)
+          n-threads 8
+          per-thread 25
+          workers (mapv (fn [t]
+                          (future
+                            (dotimes [i per-thread]
+                              (memory/mem-add s (str "conv-" (mod t 2))
+                                              [(msg/user (str "t" t "-m" i))]))))
+                        (range n-threads))]
+      (doseq [w workers] @w)   ;; 全部完成（异常会在 deref 时抛出）
+      (let [c0 (memory/mem-get s "conv-0")
+            c1 (memory/mem-get s "conv-1")]
+        (is (= (* n-threads per-thread) (+ (count c0) (count c1)))
+            "总消息数 = 线程数 × 每线程写入数")
+        (is (= (count c0) (count (distinct (map :content c0)))) "conv-0 无重复")
+        (is (= (count c1) (count (distinct (map :content c1)))) "conv-1 无重复")))))
+
+(deftest in-memory-concurrent-writes-test
+  (testing "InMemoryStore 并发写（swap! 原子）：不丢不重"
+    (let [s (memory/in-memory-store)
+          workers (mapv (fn [t]
+                          (future
+                            (dotimes [i 50]
+                              (memory/mem-add s "c" [(msg/user (str t "-" i))]))))
+                        (range 8))]
+      (doseq [w workers] @w)
+      (is (= 400 (count (memory/mem-get s "c")))))))
