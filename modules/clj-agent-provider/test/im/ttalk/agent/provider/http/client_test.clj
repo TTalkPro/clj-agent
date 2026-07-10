@@ -1,8 +1,38 @@
 (ns im.ttalk.agent.provider.http.client-test
-  "HTTP 客户端模块测试"
+  "HTTP 客户端模块测试
+
+   集成用例走本地 com.sun.net.httpserver（零依赖、不联网）——
+   曾用 httpbin.org，外网超时会导致 assertion 数波动（CI flake）。"
   (:require [clojure.test :refer [deftest testing is are]]
             [clojure.string :as str]
-            [im.ttalk.agent.provider.http.client :as http]))
+            [cheshire.core :as json]
+            [im.ttalk.agent.provider.http.client :as http])
+  (:import [com.sun.net.httpserver HttpServer HttpHandler]
+           [java.net InetSocketAddress]))
+
+;; ============================================================
+;; 本地测试服务器
+;; ============================================================
+
+(defn- start-echo-server
+  "起本地 HTTP 服务：记录请求方法/body，响应 200 + {:json <请求体解析结果>}
+   （模拟 httpbin.org/post 的回显形状）。返回 {:server :port :captured}。"
+  []
+  (let [captured (atom nil)
+        server (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
+    (.createContext server "/"
+      (reify HttpHandler
+        (handle [_ exchange]
+          (let [req-body (slurp (.getRequestBody exchange))
+                parsed (when (seq req-body)
+                         (try (json/parse-string req-body true) (catch Exception _ nil)))]
+            (reset! captured {:method (.getRequestMethod exchange) :body parsed})
+            (let [b (.getBytes (json/generate-string {:json parsed :ok true}) "UTF-8")]
+              (.add (.getResponseHeaders exchange) "Content-Type" "application/json")
+              (.sendResponseHeaders exchange 200 (count b))
+              (with-open [os (.getResponseBody exchange)] (.write os b)))))))
+    (.start server)
+    {:server server :port (.getPort (.getAddress server)) :captured captured}))
 
 ;; ============================================================
 ;; URL 工具函数测试
@@ -70,42 +100,44 @@
     (is (contains? http/*default-headers* "Content-Type"))))
 
 ;; ============================================================
-;; 集成测试（可选，需要网络）
+;; 集成测试（本地服务，不联网）
 ;; ============================================================
 
-;; 注意：以下测试需要网络连接，可能会被跳过
-;; 使用 httpbin.org 作为测试服务
-
-;; 注意：http-kit 网络失败不抛异常而是返回 {:status 0 :error ...}，
-;; 因此跳过逻辑须判断 :error 而非 catch。
-
-(deftest ^:integration get-request-test
-  (testing "GET 请求到 httpbin"
-    (let [response (http/get "https://httpbin.org/get"
-                             :timeout 10000)]
-      (if (:error response)
-        (do (println "Skipping integration test - network unavailable:" (:error response))
-            (is true "skipped - network unavailable"))
-        (do
+(deftest get-request-test
+  (testing "GET 请求（本地回显服务）"
+    (let [{:keys [server port]} (start-echo-server)]
+      (try
+        (let [response (http/get (str "http://127.0.0.1:" port "/get") :timeout 5000)]
           (is (map? response))
-          (is (contains? response :status))
-          (is (contains? response :body))
-          (when (:success? response)
-            (is (= 200 (:status response)))))))))
+          (is (= 200 (:status response)))
+          (is (true? (:success? response)))
+          (is (true? (get-in response [:body :ok]))))
+        (finally (.stop server 0))))))
 
-(deftest ^:integration post-json-test
-  (testing "POST JSON 请求到 httpbin"
-    (let [response (http/post-json "https://httpbin.org/post"
-                                   {:name "test" :value 123}
-                                   {:timeout 10000})]
-      (if (:error response)
-        (do (println "Skipping integration test - network unavailable:" (:error response))
-            (is true "skipped - network unavailable"))
-        (do
+(deftest post-json-test
+  (testing "POST JSON 请求（本地回显服务，模拟 httpbin 形状）"
+    (let [{:keys [server port captured]} (start-echo-server)]
+      (try
+        (let [response (http/post-json (str "http://127.0.0.1:" port "/post")
+                                       {:name "test" :value 123}
+                                       {:timeout 5000})]
           (is (map? response))
-          (when (:success? response)
-            (is (= 200 (:status response)))
-            (is (= "test" (get-in response [:body :json :name])))))))))
+          (is (= 200 (:status response)))
+          (is (= "test" (get-in response [:body :json :name])))
+          (is (= {:name "test" :value 123} (:body @captured))))
+        (finally (.stop server 0))))))
+
+(deftest patch-request-test
+  (testing "PATCH 走通用 .method（回归：HttpRequest.Builder 无 .PATCH 方法，曾必然运行时崩溃）"
+    (let [{:keys [server port captured]} (start-echo-server)]
+      (try
+        (let [response (http/patch (str "http://127.0.0.1:" port "/patch")
+                                   :body {:op "replace"}
+                                   :timeout 5000)]
+          (is (= 200 (:status response)))
+          (is (= "PATCH" (:method @captured)))
+          (is (= {:op "replace"} (:body @captured))))
+        (finally (.stop server 0))))))
 
 ;; ============================================================
 ;; 模拟请求测试（不需要网络）
