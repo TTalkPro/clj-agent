@@ -13,6 +13,8 @@
   (:require [clojure.string :as str]
             [im.ttalk.agent.provider.common.base :as base]))
 
+(set! *warn-on-reflection* true)
+
 (defn create-provider
   "创建通用 OpenAI 兼容 provider 实例。
 

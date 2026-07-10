@@ -7,6 +7,8 @@
    (def provider (mistral/create-provider {:api-key \"...\"}))"
   (:require [im.ttalk.agent.provider.common.base :as base]))
 
+(set! *warn-on-reflection* true)
+
 (base/defprovider mistral
   :base-url "https://api.mistral.ai/v1"
   :env-key "MISTRAL_API_KEY"

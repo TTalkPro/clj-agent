@@ -20,6 +20,8 @@
    (schema/tools->schemas tools)"
   (:require [im.ttalk.agent.provider.common.memo :as memo]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; Schema 转换
 ;;; ============================================================

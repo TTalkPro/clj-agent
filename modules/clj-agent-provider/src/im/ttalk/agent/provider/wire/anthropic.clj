@@ -17,6 +17,8 @@
   (:require [clojure.string :as str]
             [im.ttalk.agent.model.message :as msg]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 中立 → Anthropic wire
 ;;; ============================================================

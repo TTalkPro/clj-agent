@@ -7,6 +7,8 @@
             [im.ttalk.agent.provider.factory.config :as config]
             [taoensso.timbre :as log]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 初始化 Provider 注册（延迟，避免循环依赖）
 ;;; ============================================================

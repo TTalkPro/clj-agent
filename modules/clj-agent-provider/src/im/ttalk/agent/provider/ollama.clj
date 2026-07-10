@@ -10,6 +10,8 @@
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.common.base :as base]))
 
+(set! *warn-on-reflection* true)
+
 (base/defprovider ollama
   :base-url "http://localhost:11434/v1"
   :env-key "OLLAMA_API_KEY"

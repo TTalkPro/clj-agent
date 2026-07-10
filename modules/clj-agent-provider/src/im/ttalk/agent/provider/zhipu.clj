@@ -41,6 +41,8 @@
             [im.ttalk.agent.provider.common.openai-compat :as compat]
             [im.ttalk.agent.provider.http.client :as http]))
 
+(set! *warn-on-reflection* true)
+
 (def default-model "glm-4.7")
 
 ;;; ============================================================

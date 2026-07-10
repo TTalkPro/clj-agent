@@ -32,6 +32,8 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; Provider 创建
 ;;; ============================================================

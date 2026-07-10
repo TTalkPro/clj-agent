@@ -14,6 +14,8 @@
   (:require [cheshire.core :as json]
             [im.ttalk.agent.model.message :as msg]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 中立 → OpenAI wire
 ;;; ============================================================

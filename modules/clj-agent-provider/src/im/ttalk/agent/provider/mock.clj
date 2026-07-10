@@ -16,6 +16,8 @@
    (mock/set-mock-response provider \"Hello from Mock!\")"
   (:require [im.ttalk.agent.model :as proto]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 辅助函数
 ;;; ============================================================

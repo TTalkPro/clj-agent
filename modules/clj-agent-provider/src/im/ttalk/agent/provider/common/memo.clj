@@ -4,6 +4,8 @@
    与 clojure.core/memoize 的区别：容量有界（超限整体清空重建），
    不会随参数多样性无限增长——适合做库代码里的转换缓存。")
 
+(set! *warn-on-reflection* true)
+
 (defn bounded
   "把单参纯函数 f 包装为带有界缓存的版本。
 

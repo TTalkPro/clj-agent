@@ -36,6 +36,8 @@
             [im.ttalk.agent.provider.common.base :as base]
             [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
+(set! *warn-on-reflection* true)
+
 (base/defprovider deepseek
   :base-url "https://api.deepseek.com"
   :env-key "DEEPSEEK_API_KEY"

@@ -28,6 +28,8 @@
    (def provider (openai/create-provider {:api-key \"sk-...\"}))"
   (:require [im.ttalk.agent.provider.common.base :as base]))
 
+(set! *warn-on-reflection* true)
+
 (base/defprovider openai
   :base-url "https://api.openai.com/v1"
   :env-key "OPENAI_API_KEY"

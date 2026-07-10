@@ -21,6 +21,8 @@
   (:require [clojure.string :as str]
             [im.ttalk.agent.provider.anthropic :as anthropic]))
 
+(set! *warn-on-reflection* true)
+
 (def default-model "MiniMax-M2.7")
 
 (def ^:private minimax-endpoint

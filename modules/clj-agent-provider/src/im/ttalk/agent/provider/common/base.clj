@@ -28,6 +28,8 @@
             [im.ttalk.agent.provider.wire.openai :as wire]
             [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 配置构建
 ;;; ============================================================

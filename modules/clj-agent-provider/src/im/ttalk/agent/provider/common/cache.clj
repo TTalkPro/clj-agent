@@ -34,6 +34,8 @@
    用法见 apply-anthropic-cache。"
   (:require [clojure.string :as str]))
 
+(set! *warn-on-reflection* true)
+
 (def max-breakpoints
   "Anthropic 单请求 cache_control breakpoint 上限"
   4)

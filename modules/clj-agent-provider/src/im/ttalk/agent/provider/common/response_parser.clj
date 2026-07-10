@@ -20,6 +20,8 @@
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 响应访问器
 ;;; ============================================================
