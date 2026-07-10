@@ -52,12 +52,22 @@
 ;;; 环境变量读取
 ;;; ============================================================
 
+(defn- getenv
+  "读环境变量（独立出来便于测试 with-redefs 注入）"
+  [^String env-name]
+  (System/getenv env-name))
+
 (defn- get-env-var
-  "获取环境变量，如 (get-env-var :openai :api-key) => OPENAI_API_KEY"
+  "获取环境变量，如 (get-env-var :openai :api-key) => OPENAI_API_KEY
+
+   注意 key 里的连字符必须转下划线：曾直接 upper-case 生成 OPENAI_API-KEY，
+   POSIX 环境变量名不允许连字符 → :api-key/:base-url 的 env 读取从未生效。"
   [provider key]
   (when-let [prefix (get @env-var-mappings provider)]
-    (let [env-name (str prefix "_" (str/upper-case (name key)))]
-      (System/getenv env-name))))
+    (let [env-name (str prefix "_" (-> (name key)
+                                       (str/upper-case)
+                                       (str/replace "-" "_")))]
+      (getenv env-name))))
 
 (defn load-config-from-env
   "从环境变量加载配置（合并默认配置和环境变量）"
