@@ -77,6 +77,10 @@ v0.2 是一次**破坏性**版本：统一消息/tool-call 词汇、模块重组
   step 私有 state / 共享 context 双层状态；支持线性/Fan-out/Fan-in/循环/
   pause-resume/error-handler/on-quiescent 快照/快照恢复。V2（core.async 并行化）
   另行排期。
+- **Timeline / Snapshot（`clj-agent-process` 内）**：通用版本链管理
+  （时间旅行 go-back/go-forward/goto、分支实验、血缘、prune；in-memory + SQLite
+  两个 store）+ Process 快照适配（`checkpointer` 挂 on-quiescent 自动存档、
+  `resume-checkpoint` 跨进程重启续跑暂停的流程、分支时间线互不污染）。
 - **流式建链重试（opt-in）**：`post-stream-sync` 支持 `:retry`（约定同
   `http.retry/maybe-with-retry`：`true`=默认配置 / map=合并），仅当错误可重试
   **且尚未流出任何 token** 时指数退避重试；provider config 传 `:retry` 即启用。

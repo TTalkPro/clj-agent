@@ -1,8 +1,15 @@
 # Timeline / Snapshot 设计方案
 
-> **状态：📐 设计稿，尚未实现（截至 2026-06）。** 文档引用的 `clj-agent-memory`
-> 模块和 TimelineManager / Snapshot 实现当前不在仓库中（现有模块仅 `clj-agent-core`
-> 与 `clj-agent-provider`）。本文为规划方案，供后续实现参考。
+> **状态：✅ 已实现（2026-07-10），落地位置与本文规划不同。**
+> 实际落点：`modules/clj-agent-process/`（而非规划的 `clj-agent-memory` 模块）——
+> `im.ttalk.agent.timeline`（通用层：版本链/时间旅行/分支/血缘/prune，
+> TimelineStore 协议 + in-memory）、`im.ttalk.agent.timeline.sqlite`（EDN 持久化）、
+> `im.ttalk.agent.process.snapshot`（框架层适配：checkpointer 挂 on-quiescent 自动存档、
+> resume-checkpoint 跨重启续跑、branch! 分支实验）。
+> 与本文差异：无 ITimelineEntry 协议（entry 为纯 map）；无独立 SnapshotManager/
+> Adapter 类（函数式适配层）；Redis/Postgres store 未做（按需后补）；
+> §五「实现现状」表格的路径为早期规划，作废。语义补充：goto!/switch-branch! 改变
+> 当前分支，go-back!/go-forward! 只移位置不切分支（保证退过分叉点再前进的对称性）。
 
 ## 一、设计背景
 

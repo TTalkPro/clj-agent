@@ -188,8 +188,15 @@
   fan-out 真并行（router/worker go-loop + in-flight 计数）、外部事件
   （ProcessHandle/send-event/wait-for-completion）、单步与全局超时。
   core.async 依赖只进 process 模块；event/step/builder 层直接复用。
-- [ ] **Timeline / Snapshot**（方案见 `design/timeline-snapshot-checkpoint.md`）：
-  时间旅行/分支实验；依赖 Process 快照（V1 的 on-quiescent 已提供保存时机）。
+- [x] **Timeline / Snapshot**（2026-07-10，方案见 `design/timeline-snapshot-checkpoint.md`）：
+  落地 clj-agent-process 模块。通用层 `timeline`（版本链 save!/load-latest、
+  时间旅行 goto!/go-back!/go-forward!（back/forward 不切分支保证对称性）、
+  分支 create-branch!/switch-branch!、血缘 get-lineage、prune!；TimelineStore
+  协议 + in-memory + SQLite(EDN) 两个 store）+ 框架层 `process.snapshot`
+  （checkpointer 挂 on-quiescent 自动存档并剥 :kernel、resume-checkpoint 跨进程
+  重启续跑、branch! 分支实验、restore-opts）；runtime 新增 resume-from-snapshot。
+  14 个测试：链/旅行/分支对称性/血缘/prune/SQLite 跨实例持久化/暂停点跨重启
+  续跑/分支实验互不污染。
 
 ### 📋 历史账本
 

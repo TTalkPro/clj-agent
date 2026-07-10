@@ -52,16 +52,50 @@ V2（core.async 并行化：fan-out 真并行、外部事件、ProcessHandle）�
 `:on-quiescent` 在安全时机（一批 step 执行完 / 暂停）给出快照；恢复时把
 `:step-states` + `:context` 传回 `run-process`，用 `:initial-events` 驱动后续步骤。
 
+## Timeline / Snapshot（存档 + 时间旅行）
+
+`on-quiescent` 的快照可交给 Timeline 管理——版本链 / 时间旅行 / 分支实验 / 跨重启续跑：
+
+```clojure
+(require '[im.ttalk.agent.timeline :as tl]
+         '[im.ttalk.agent.timeline.sqlite :as tls]
+         '[im.ttalk.agent.process.snapshot :as snap])
+
+(def mgr (tl/manager (tls/sqlite-store "timeline.db")))   ;; 或 (tl/in-memory-store)
+
+;; 自动存档：每个静止点/暂停点落一版
+(rt/run-process spec {:on-quiescent (snap/checkpointer mgr "session-1")})
+
+;; 断点续跑（跨进程重启；context 里的 :kernel 存档时自动剥离，恢复时注回）
+(let [cp (snap/latest-checkpoint mgr "session-1")]
+  (when (snap/paused-checkpoint? cp)
+    (snap/resume-checkpoint spec cp "approved" {:context-extras {:kernel k}})))
+
+;; 时间旅行 / 分支实验
+(tl/go-back! mgr "session-1" 2)
+(snap/branch! mgr "session-1" (:id cp) "exp")
+(rt/run-process spec (merge (snap/restore-opts cp)
+                            {:initial-events [{:name :add :data 100}]
+                             :on-quiescent (snap/checkpointer mgr "session-1")}))
+(tl/switch-branch! mgr "session-1" "main")   ;; main 时间线不受实验污染
+```
+
+已知约定：快照不含事件队列（暂停点续跑完全由 `on-resume` 产出的事件驱动）；
+SQLite store 走 EDN，context 须可序列化（`:kernel` 由 checkpointer 缺省剥离）。
+
 ## 命名空间
 
 | 命名空间 | 职责 |
 |---------|------|
 | `im.ttalk.agent.process.builder` | Builder API + build 时校验 |
-| `im.ttalk.agent.process.runtime` | 同步事件循环引擎（run-process / resume） |
+| `im.ttalk.agent.process.runtime` | 同步事件循环引擎（run-process / resume / resume-from-snapshot） |
 | `im.ttalk.agent.process.event` | 事件创建与路由 |
 | `im.ttalk.agent.process.step` | step 状态与激活判定 |
+| `im.ttalk.agent.process.snapshot` | Process × Timeline 适配（checkpointer / 恢复 / 分支） |
+| `im.ttalk.agent.timeline` | 通用版本链 / 时间旅行 / 分支管理 |
+| `im.ttalk.agent.timeline.sqlite` | Timeline 的 SQLite store（按需加载） |
 
-依赖：仅 `clj-agent-core`（ToolContext / kernel 原语）。
+依赖：`clj-agent-core`（ToolContext / kernel 原语）；next.jdbc + sqlite-jdbc（timeline.sqlite，按需）。
 
 ## 测试
 
