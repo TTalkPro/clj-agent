@@ -71,6 +71,12 @@ v0.2 是一次**破坏性**版本：统一消息/tool-call 词汇、模块重组
 
 ### ✨ 新增
 
+- **Process Framework V1（新模块 `im.ttalk/clj-agent-process`）**：事件驱动的
+  步骤编排引擎（≈ SK Process / beamai process）。纯函数式同步 runtime（零外部
+  依赖、确定性执行）：builder 校验 + 事件路由 + required-inputs 激活模型 +
+  step 私有 state / 共享 context 双层状态；支持线性/Fan-out/Fan-in/循环/
+  pause-resume/error-handler/on-quiescent 快照/快照恢复。V2（core.async 并行化）
+  另行排期。
 - **流式建链重试（opt-in）**：`post-stream-sync` 支持 `:retry`（约定同
   `http.retry/maybe-with-retry`：`true`=默认配置 / map=合并），仅当错误可重试
   **且尚未流出任何 token** 时指数退避重试；provider config 传 `:retry` 即启用。

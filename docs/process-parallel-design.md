@@ -1,8 +1,9 @@
 # Process Framework 并行化设计
 
-> **状态：📐 设计稿，尚未实现（截至 2026-06）。** 选定的 core.async 方案尚未落地：
-> 仓库 deps.edn 未引入 `org.clojure/core.async`，也无 Process Framework 实现。
-> 依赖于 [Process Framework 设计](./process-framework-design.md)（同为设计稿）。
+> **状态：📐 V2 设计稿，待实施。** V1（纯函数式同步 runtime）已于 2026-07-10 落地
+> `modules/clj-agent-process/`；本文选定的方案 B（core.async 完全重写 runtime，
+> fan-out 真并行 + 外部事件 + ProcessHandle）尚未开始——届时 core.async 依赖
+> 只进 clj-agent-process 模块。event/step/builder 三个纯函数层 V2 直接复用。
 
 ## V1 回顾
 

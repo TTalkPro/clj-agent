@@ -9,6 +9,7 @@ clj-agent/
 ├── modules/
 │   ├── clj-agent-core/      # 协议(端口) + kernel 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
+│   ├── clj-agent-process/   # Process 框架(事件驱动步骤编排),依赖 core
 │   └── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
 ├── scripts/
 └── deps.edn                 # 根配置(开发/测试一次性加载全部模块)
@@ -53,6 +54,18 @@ clj-agent/
 - `im.ttalk.agent.common` - 共享 Kernel 构建
 
 **依赖**: `clj-agent-core`; timbre, next.jdbc, sqlite-jdbc
+
+---
+
+### 1.6 clj-agent-process — Process 框架
+
+**职责**: 事件驱动的步骤编排（≈ SK Process / beamai process）。V1 纯函数式同步 runtime。
+
+- `im.ttalk.agent.process.builder` - Builder API + 校验
+- `im.ttalk.agent.process.runtime` - 事件循环引擎（run-process / resume / on-quiescent）
+- `im.ttalk.agent.process.{event,step}` - 事件路由 / 激活判定
+
+**依赖**: `clj-agent-core`（零外部依赖）
 
 ---
 

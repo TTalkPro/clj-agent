@@ -174,6 +174,23 @@
   **验收成立：`grep ChatMemory` 在 clj-agent-core 内零命中**。
   设计文档 onion-filter.md / response-path-consolidation.md 状态已对齐。
 
-### 📋 后续候选（按需启动）
+## P4 — 新功能（2026-07-10 启动）
 
-（暂无——2026-06 审查与 2026-07 优化轮的全部条目已清空。）
+- [x] **Process Framework V1**（方案见 `docs/process-framework-design.md`）：
+  新模块 `clj-agent-process`（仅依赖 core，零外部依赖）。纯函数式同步事件循环：
+  builder（build 时校验）+ runtime（run-process/resume/paused?）+ event/step 纯函数层。
+  覆盖：线性 / Fan-out / Fan-in / 循环（自环 + :terminate）/ can-activate? 守卫 /
+  pause-resume（可对同一暂停快照多次 resume）/ error-handler（:error 事件隐式路由）/
+  on-quiescent 静止点快照 / 快照恢复（step-states+context+initial-events 续驱）/
+  on-terminate 清理（异常互不影响）/ max-events 保险丝 / kernel 经 context 注入。
+  18 tests / 67 assertions 钉住设计文档全部模式。
+- [ ] **Process Framework V2**（方案见 `docs/process-parallel-design.md`，选定 core.async）：
+  fan-out 真并行（router/worker go-loop + in-flight 计数）、外部事件
+  （ProcessHandle/send-event/wait-for-completion）、单步与全局超时。
+  core.async 依赖只进 process 模块；event/step/builder 层直接复用。
+- [ ] **Timeline / Snapshot**（方案见 `design/timeline-snapshot-checkpoint.md`）：
+  时间旅行/分支实验；依赖 Process 快照（V1 的 on-quiescent 已提供保存时机）。
+
+### 📋 历史账本
+
+2026-06 审查（P0/P1/P2 + 测试盲区）与 2026-07 优化轮（P3 + A/B/C 组）全部清零。

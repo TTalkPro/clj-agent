@@ -99,6 +99,7 @@ clj-agent/
 ├── modules/
 │   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + kernel 原语(kernel/tool/advisor)；零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent)，依赖 core
+│   ├── clj-agent-process/   # Process 框架(事件驱动步骤编排)，依赖 core
 │   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
 ├── examples/              # 使用示例
 ├── docs/                  # 设计文档
