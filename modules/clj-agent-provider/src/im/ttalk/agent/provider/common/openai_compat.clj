@@ -21,8 +21,7 @@
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]
-            [im.ttalk.agent.model.error :as errors]
-            [im.ttalk.agent.streaming :as streaming]))
+            [im.ttalk.agent.model.error :as errors]))
 
 ;;; ============================================================
 ;;; 参数构建
@@ -145,19 +144,9 @@
 ;;; 错误归一化
 ;;; ============================================================
 
-(defn- response->error
-  "把失败的 HTTP 响应转为 canonical error（D5：抛出的 ex-info data 即 canonical error map，
-   保留 body/headers/request-id 于 :context 供排查）。"
-  [response provider]
-  (let [status (or (:status response) 0)
-        base (if (and (zero? status) (:error response))
-               ;; 连接级失败（无 HTTP 状态码）：网络错误，可重试
-               (errors/error :network-error
-                             (str "连接失败: " (:error response))
-                             {:provider provider})
-               ;; HTTP 4xx/5xx：按状态码分类（401/403→auth 不可重试；429→限流；5xx→provider 可重试）
-               (errors/http-response->error response provider))]
-    (assoc base :context (select-keys response [:body :headers :request-id :error]))))
+(def ^:private response->error
+  "D5 错误归一化——统一实现见 http.client/response->error。"
+  http/response->error)
 
 ;;; ============================================================
 ;;; 同步调用
@@ -234,37 +223,20 @@
         headers (merge {"Authorization" (str "Bearer " api-key)}
                        (:extra-headers config)
                        (:extra-headers opts))
-        {:keys [process-fn get-id get-model]} (stream/make-stream-processor)
-        result (promise)
-        err    (promise)
-        ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发（不再是 http-kit 伪流式）
-        {:keys [future cancel]}
-        (stream-client/post-stream-async
-          api-url
-          {:headers headers :body params :timeout timeout
-           :parse-fn stream/parse-sse-line
-           :process-fn process-fn
-           :initial-state (stream/make-initial-state)
-           :on-token on-token
-           :on-complete (fn [state]
-                          (deliver result (stream/build-response state
-                                                                 :id (get-id)
-                                                                 :model (get-model))))
-           :on-error (fn [e] (deliver err e))
-           :provider (:provider-name config)})
-        cancelled? (atom false)
-        ;; 包装的 cancel：先标记本地 cancelled? 再取消上游；取消时 @future 各种异常都吞，
-        ;; cond 里 cancelled? 优先于 err（取消会触发 onError 网络异常）。
-        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
-    (try @future                         ;; 阻塞直到流结束（保持同步签名）
-         (catch Throwable _ nil))
-    (cond
-      @cancelled?        (stream/build-response (stream/make-initial-state))  ;; 取消：空响应（token 已流出），不抛错
-      (realized? err)    (errors/throw! @err)
-      (realized? result) @result
-      :else (errors/throw! (errors/error :provider-error
-                                         "流式响应未产出结果"
-                                         {:provider (:provider-name config)})))))
+        {:keys [process-fn get-id get-model]} (stream/make-stream-processor)]
+    ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发；
+    ;; 同步编排（promise/cancel/分派）统一在 post-stream-sync。
+    (stream-client/post-stream-sync
+      api-url
+      {:headers headers :body params :timeout timeout
+       :parse-fn stream/parse-sse-line
+       :process-fn process-fn
+       :make-initial-state stream/make-initial-state
+       :build-response (fn [state] (stream/build-response state
+                                                          :id (get-id)
+                                                          :model (get-model)))
+       :on-token on-token
+       :provider (:provider-name config)})))
 
 ;;; ============================================================
 ;;; 异步调用

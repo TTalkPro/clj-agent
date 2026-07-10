@@ -73,7 +73,6 @@
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]
-            [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.common.cache :as cache]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
             [im.ttalk.agent.provider.wire.anthropic :as wire]
@@ -378,16 +377,9 @@
 ;;; 错误归一化
 ;;; ============================================================
 
-(defn- response->error
-  "把失败的 HTTP 响应转为 canonical error（D5：ex-info data 即 canonical error map）。"
-  [response provider]
-  (let [status (or (:status response) 0)
-        base (if (and (zero? status) (:error response))
-               (errors/error :network-error
-                             (str "连接失败: " (:error response))
-                             {:provider provider})
-               (errors/http-response->error response provider))]
-    (assoc base :context (select-keys response [:body :headers :request-id :error]))))
+(def ^:private response->error
+  "D5 错误归一化——统一实现见 http.client/response->error。"
+  http/response->error)
 
 ;;; ============================================================
 ;;; 同步 API 调用
@@ -480,35 +472,18 @@
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))
         ;; 真流式：长生成给足超时（java.net.http 的 timeout 是 total）
-        timeout (or (:timeout config) 300000)
-        result (promise)
-        err    (promise)
-        ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发（不再是 http-kit 伪流式）
-        {:keys [future cancel]}
-        (stream-client/post-stream-async
-          api-url
-          {:headers headers :body params :timeout timeout
-           :parse-fn stream/parse-sse-line
-           :process-fn stream/process-event
-           :initial-state (stream/make-initial-state)
-           :on-token on-token
-           :on-complete (fn [state] (deliver result (stream/build-response state)))
-           :on-error (fn [e] (deliver err e))
-           :provider (:provider-name config :anthropic)})
-        cancelled? (atom false)
-        ;; 登记「包装的 cancel」：被调用时先标记本地 cancelled?，再取消上游。
-        ;; 取消会让 java.net.http 触发 onError（连接中止的网络异常）或让 future 抛
-        ;; CancellationException——故 @future 宽 catch，且 cond 里 cancelled? 优先于 err。
-        _ (streaming/register-cancel! (fn [] (reset! cancelled? true) (when cancel (cancel))))]
-    (try @future                         ;; 阻塞直到流结束（保持同步签名）
-         (catch Throwable _ nil))
-    (cond
-      @cancelled?        (stream/build-response (stream/make-initial-state))  ;; 取消：空响应（token 已流出），不抛错
-      (realized? err)    (errors/throw! @err)
-      (realized? result) @result
-      :else (errors/throw! (errors/error :provider-error
-                                         "流式响应未产出结果"
-                                         {:provider (:provider-name config :anthropic)})))))
+        timeout (or (:timeout config) 300000)]
+    ;; java.net.http 真增量传输：on-token 随每行 SSE 实时触发；
+    ;; 同步编排（promise/cancel/分派）统一在 post-stream-sync。
+    (stream-client/post-stream-sync
+      api-url
+      {:headers headers :body params :timeout timeout
+       :parse-fn stream/parse-sse-line
+       :process-fn stream/process-event
+       :make-initial-state stream/make-initial-state
+       :build-response stream/build-response
+       :on-token on-token
+       :provider (:provider-name config :anthropic)})))
 
 (defn call-anthropic-stream-async
   "异步流式调用 Anthropic API（非阻塞）
