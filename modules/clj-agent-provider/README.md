@@ -230,7 +230,6 @@ LLM Provider 和 Service 工厂模块
                                           :required ["name"]}}}}
 ```
 
-可用 core 的 `converter.json-schema/to-openai-response-format` 从 clj-agent schema 直接生成上面的 `response_format`。
 
 ### 缓存控制（Anthropic prompt caching）
 

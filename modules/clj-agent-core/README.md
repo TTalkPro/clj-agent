@@ -15,7 +15,6 @@
 - **Advisor**：洋葱式 around 中间件（对标 Spring AI Advisor），含记忆 advisor
 - **Memory**：ChatMemory（in-memory / windowed / SQLite）
 - **Context**：请求级共享状态
-- **converter / prompt**：结构化输出解析（OutputConverter）与提示词模板（PromptTemplate），provider 无关
 
 ## 依赖
 
@@ -27,7 +26,6 @@
 内部依赖：无（core 定义协议/契约 + Agent 运行时；provider 反过来依赖 core）
 
 外部依赖：
-- cheshire/cheshire 5.12.0（converter）
 - com.taoensso/timbre 6.3.0（日志）
 - com.github.seancorfield/next.jdbc 1.3.939（memory/sqlite，按需）
 - org.xerial/sqlite-jdbc 3.45.1.0（memory/sqlite，按需）
@@ -51,8 +49,6 @@
 | `im.ttalk.agent.advisor` | Advisor 洋葱链创建和内置 Advisor |
 | `im.ttalk.agent.advisor.memory` | 按 conversation-id 串历史的记忆 advisor |
 | `im.ttalk.agent.context` | Context 状态管理 |
-| `im.ttalk.agent.converter.*` | 结构化输出解析（OutputConverter） |
-| `im.ttalk.agent.prompt.*` | 提示词模板（PromptTemplate） |
 | `im.ttalk.agent.memory` / `.memory.sqlite` | ChatMemory store |
 | `im.ttalk.agent.react` | ReAct 工具调用循环 |
 | `im.ttalk.agent.client` | 高级 Agent API（create-agent / chat / resume） |
@@ -207,13 +203,6 @@ filters/logging-filter
 ;; => {:chat-fn ... :build-result-msgs ...}
 ```
 
-### 结构化输出 / 提示词模板（provider 无关库）
-
-```clojure
-(require '[im.ttalk.agent.converter.api :as conv]   ;; OutputConverter：defparser/json-parser/parse/...
-         '[im.ttalk.agent.prompt.api :as prompt])   ;; PromptTemplate：template/chat-template/render/...
-```
-
 ---
 
 <a name="english"></a>
@@ -231,7 +220,6 @@ filters/logging-filter
 - **Advisor**: Onion-style around middleware (mirrors Spring AI Advisor), incl. memory advisor
 - **Memory**: ChatMemory (in-memory / windowed / SQLite)
 - **Context**: Per-request shared state
-- **converter / prompt**: Structured output (OutputConverter) and prompt templates (PromptTemplate), provider-agnostic
 
 ### Key APIs
 

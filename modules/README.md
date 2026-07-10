@@ -33,7 +33,6 @@ clj-agent/
 - `im.ttalk.agent.tool` - deftool 宏（≈ `ToolCallback`）
 - `im.ttalk.agent.advisor` / `.advisor.memory` - Advisor 洋葱链 / 记忆 advisor（≈ `CallAdvisorChain` / `MessageChatMemoryAdvisor`）
 - `im.ttalk.agent.context` - 请求级上下文
-- `im.ttalk.agent.converter.*` / `.prompt.*` - 结构化输出 / 提示词模板（≈ `OutputConverter` / `PromptTemplate`）
 - `im.ttalk.agent.memory` / `.memory.sqlite` - ChatMemory
 - `im.ttalk.agent.react` - ReAct 工具调用循环
 - `im.ttalk.agent.client` - 高级 Agent API（≈ `ChatClient`）

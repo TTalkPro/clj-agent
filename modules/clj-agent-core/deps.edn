@@ -7,9 +7,6 @@
 
         ;; 无内部依赖：core 定义 protocol/契约（im.ttalk.agent.model.*）+ Agent 运行时
 
-        ;; JSON（converter/json.clj、converter/json_schema.clj）
-        cheshire/cheshire {:mvn/version "5.12.0"}
-
         ;; 日志
         com.taoensso/timbre {:mvn/version "6.3.0"}
 
