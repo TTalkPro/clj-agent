@@ -1,0 +1,25 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+            "clojars" {:url "https://repo.clojars.org/"}}
+
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        ;; 内部依赖 - Core（ToolContext；kernel 经 context 注入使用）
+        im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}}
+
+ ;; V1 纯函数式同步 runtime，零外部依赖；V2（core.async 并行化）落地时在此引入。
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]
+        :extra-deps {nrepl/nrepl {:mvn/version "1.0.0"}
+                     cider/cider-nrepl {:mvn/version "0.30.0"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}
+                      lambdaisland/kaocha-cloverage {:mvn/version "1.1.89"}}
+         :main-opts ["-m" "kaocha.runner"]}
+
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}}}
