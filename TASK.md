@@ -79,7 +79,15 @@
   - [x] 删死响应字段 `response-assistant-msg`/`:assistant-msg`（恒 nil，无读取方）+ openai_compat 独立死函数 `build-assistant-message`。
   - [x] 响应归一化从「4 份」收敛为 2 份活路径（同步 service + 流式 stream，输入不同，合理分工）。
   - [~] **剩余：双消息体系统一**（`model/types.clj` vs `model/message.clj`）——改动整条消息数据流、高风险、无正确性 bug、转换边界正常工作，建议 v0.2 破坏性版本专项。
-- [ ] **测试盲区（增量）**：流式整链路（call-api-stream / process-sse-stream / 断流 / 非 2xx）、并发、timeout/approval filter、provider record 端到端 mock、工厂 env 配置。
+- [x] **测试盲区（增量）**（2026-07-10 收尾）：
+  - 流式整链路：已由 stream_client_test（7 个，含建链重试/非 2xx/cancel）+ dashscope_sync_test 覆盖。
+  - timeout/approval filter：advisor_test 新增 2 个 deftest——超时返回/按时透传/**后台中断不泄漏线程**；
+    审批的批准/拒绝短路/非敏感直通/默认 stdin 路径（with-in-str）。
+  - 工厂 env 配置：新增 factory/config_test.clj（env 名规范/三级合并优先级/validate 各分支）。
+    **顺带修真 bug**：get-env-var 曾生成 `OPENAI_API-KEY`（连字符，POSIX 不可设置）→
+    :api-key/:base-url 的 env 读取从未生效；已改连字符转下划线 + 回归测试。
+  - 并发：client_test 新增 SQLite 并发写（8 线程 ×25，locking 串行化不丢不重）+ InMemory 并发写。
+  - provider record 端到端 mock：providers_test 既有覆盖，判定足够。
 
 ## P3 — 2026-07-10 优化轮
 
