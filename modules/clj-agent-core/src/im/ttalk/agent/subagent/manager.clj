@@ -1,7 +1,8 @@
 (ns im.ttalk.agent.subagent.manager
   "子 Agent 管理器 — 受管异步注册表（对标 beamai_subagent_manager）
 
-   维护一个全局 atom 注册表，每个子 agent 以 JVM future 形式运行。
+   维护一个全局 atom 注册表，每个子 agent 在虚拟线程上运行
+   （j.u.c.Future 语义，kill! 走 future-cancel 中断）。
 
    状态机：:running → :done | :failed | :killed
 
@@ -23,10 +24,21 @@
     :prompt          string — 子 agent 的用户输入
     :result-fn       fn?    — (fn [chat-result] -> string)，默认取 :text
     :owner           any?   — 归属标识，用于 list-agents 过滤}"
-  (:require [taoensso.timbre :as log]))
+  (:require [taoensso.timbre :as log])
+  (:import [java.util.concurrent ExecutorService Executors Callable]))
+
+(set! *warn-on-reflection* true)
 
 ;; 全局子 agent 注册表: {id -> entry}
 (defonce ^:private registry (atom {}))
+
+(defonce ^{:private true
+           :doc "子 agent 工作线程池：虚拟线程 per task。
+   子 agent 内部是阻塞式 LLM 调用（同步 chat / 流式 @future），用 clojure future
+   （无界平台线程池）会在大量并发子 agent 时堆真线程——与 HTTP 层的虚拟线程策略
+   （http/client、stream_client 的 executor）保持一致。"}
+  worker-executor
+  (Executors/newVirtualThreadPerTaskExecutor))
 
 (defn- gen-id []
   (str "sub-" (java.util.UUID/randomUUID)))
@@ -60,20 +72,24 @@
       (catch Throwable t
         {:error {:crashed true :message (.getMessage t)}}))))
 
-(defn- spawn-worker! [id spec result-promise]
-  (future
-    (try
-      (let [outcome (do-run spec)]
-        (deliver result-promise outcome)
-        (swap! registry update id merge
-               {:status (if (:ok outcome) :done :failed)
-                :result outcome
-                :finished-at (now-ms)}))
-      (catch Throwable t
-        (let [err {:error {:crashed true :message (.getMessage t)}}]
-          (deliver result-promise err)
-          (swap! registry update id merge
-                 {:status :failed :result err :finished-at (now-ms)}))))))
+(defn- spawn-worker!
+  "在虚拟线程上运行子 agent，返回 j.u.c.Future（kill! 用 future-cancel 中断）。"
+  [id spec result-promise]
+  (.submit ^ExecutorService worker-executor
+           ^Callable
+           (fn []
+             (try
+               (let [outcome (do-run spec)]
+                 (deliver result-promise outcome)
+                 (swap! registry update id merge
+                        {:status (if (:ok outcome) :done :failed)
+                         :result outcome
+                         :finished-at (now-ms)}))
+               (catch Throwable t
+                 (let [err {:error {:crashed true :message (.getMessage t)}}]
+                   (deliver result-promise err)
+                   (swap! registry update id merge
+                          {:status :failed :result err :finished-at (now-ms)})))))))
 
 ;;; ============================================================
 ;;; API
