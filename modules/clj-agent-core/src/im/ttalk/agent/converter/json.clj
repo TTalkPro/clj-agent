@@ -323,30 +323,3 @@
   (cond-> {:type :object}
     required (assoc :required true)
     description (assoc :description description)))
-
-;; ============================================================
-;; 便捷工厂函数
-;; ============================================================
-
-(defn from-response-schema
-  "从响应字段列表创建 StructuredOutputParser
-
-   参数:
-   - fields: 字段定义列表
-     [{:name \"field1\" :type :string :required true :description \"...\"}]
-
-   返回: StructuredOutputParser 实例
-
-   示例:
-   (from-response-schema
-     [{:name \"summary\" :type :string :required true}
-      {:name \"keywords\" :type :array}])"
-  [fields]
-  (let [schema (into {}
-                     (map (fn [{:keys [name type required description]}]
-                            [(keyword name)
-                             (cond-> {:type (or type :any)}
-                               required (assoc :required true)
-                               description (assoc :description description))])
-                          fields))]
-    (create-structured-parser schema)))

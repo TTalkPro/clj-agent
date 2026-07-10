@@ -83,21 +83,6 @@
   ([schema] (json-impl/create-structured-parser schema))
   ([schema opts] (json-impl/create-structured-parser schema opts)))
 
-(defn from-fields
-  "从字段定义列表创建结构化解析器
-
-   参数:
-   - fields: 字段定义列表
-
-   返回: StructuredOutputParser 实例
-
-   示例:
-   (from-fields
-     [{:name \"summary\" :type :string :required true}
-      {:name \"keywords\" :type :array}])"
-  [fields]
-  (json-impl/from-response-schema fields))
-
 ;; ============================================================
 ;; Schema 字段构建器
 ;; ============================================================
@@ -262,72 +247,9 @@
     (proto/to-response-format parser provider-type name)
     (throw (ex-info "解析器不支持 Provider 格式" {:parser (type parser)}))))
 
-(defn build-llm-config
-  "从解析器构建 LLM 调用配置
-
-   将结构化输出格式合并到 LLM 配置中，便于直接调用 LLM。
-
-   参数:
-   - parser: INativeSchemaParser 实现
-   - provider-type: Provider 类型 (:openai, :anthropic, :zhipu, :gemini)
-   - name: Schema/Tool 名称
-   - base-config: 基础 LLM 配置 {:model \"...\" :max-tokens ...}
-
-   返回: 合并了结构化输出的完整配置
-
-   示例:
-   (def config (build-llm-config parser :openai \"Person\"
-                                 {:model \"gpt-4o\" :max-tokens 1000}))
-   (llm/call-llm provider config messages [])"
-  [parser provider-type name base-config]
-  (let [format-config (to-response-format parser provider-type name)]
-    (merge base-config format-config)))
-
 ;; ============================================================
 ;; 直接 Schema 操作（无需解析器）
 ;; ============================================================
-
-(defn schema->json-schema
-  "从 clj-agent schema 直接生成 JSON Schema
-
-   参数:
-   - schema: clj-agent schema 定义
-   - name: Schema 名称（可选）
-   - opts: 可选配置 {:strict true :additional-properties false}
-
-   返回: JSON Schema map
-
-   示例:
-   (schema->json-schema
-     {:name {:type :string :required true}
-      :age {:type :number}}
-     \"Person\")"
-  ([schema]
-   (js/to-json-schema schema))
-  ([schema name]
-   (js/to-json-schema schema name))
-  ([schema name opts]
-   (js/to-json-schema schema name opts)))
-
-(defn schema->provider-format
-  "从 clj-agent schema 直接生成 Provider 格式
-
-   参数:
-   - provider-type: Provider 类型
-   - schema: clj-agent schema 定义
-   - name: Schema/Tool 名称
-   - opts: 可选配置
-
-   返回: Provider 特定的配置 map
-
-   示例:
-   (schema->provider-format :openai
-     {:name {:type :string :required true}}
-     \"Person\")"
-  ([provider-type schema name]
-   (js/to-provider-format provider-type schema name))
-  ([provider-type schema name opts]
-   (js/to-provider-format provider-type schema name opts)))
 
 (defn validate-schema-definition
   "验证 schema 定义是否有效

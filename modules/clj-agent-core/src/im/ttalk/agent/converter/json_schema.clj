@@ -288,28 +288,6 @@
       {:valid false :errors @errors})))
 
 ;; ============================================================
-;; JSON 序列化
-;; ============================================================
-
-(defn schema->json-string
-  "将 schema 转换为 JSON 字符串
-
-   参数:
-   - schema: clj-agent schema 定义
-   - name: Schema 名称
-   - opts: 可选配置
-     - :pretty 是否格式化输出
-
-   返回: JSON 字符串"
-  ([schema name]
-   (schema->json-string schema name {}))
-  ([schema name opts]
-   (let [json-schema (to-json-schema schema name opts)]
-     (if (:pretty opts)
-       (json/generate-string json-schema {:pretty true})
-       (json/generate-string json-schema)))))
-
-;; ============================================================
 ;; 从 JSON Schema 反向转换
 ;; ============================================================
 
