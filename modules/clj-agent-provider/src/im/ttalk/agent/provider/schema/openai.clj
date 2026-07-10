@@ -13,7 +13,8 @@
                          :parameters {...}})
 
    ;; 批量转换
-   (schema/tools->schemas tools)")
+   (schema/tools->schemas tools)"
+  (:require [im.ttalk.agent.provider.common.memo :as memo]))
 
 ;;; ============================================================
 ;;; Schema 转换
@@ -73,6 +74,11 @@
   [tool]
   (and (map? tool) (contains? tool :type)))
 
+(def ^:private convert-tools
+  (memo/bounded
+    (fn [tools] (mapv (fn [t] (if (wire-tool? t) t (tool->schema t))) tools))
+    32))
+
 (defn tools->schemas
   "批量转换工具定义为 OpenAI schemas
 
@@ -83,10 +89,13 @@
    参数：
    - tools: 工具定义列表
 
+   转换结果按 tools 列表有界缓存：kernel 常驻的工具列表在 ReAct 循环
+   每轮 LLM 调用时重复转换，缓存后同一列表只转一次。
+
    返回：
    OpenAI schema 列表"
   [tools]
-  (mapv (fn [t] (if (wire-tool? t) t (tool->schema t))) tools))
+  (convert-tools tools))
 
 (defn schemas->tools
   "批量转换 OpenAI schemas 为工具定义

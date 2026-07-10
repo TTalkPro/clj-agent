@@ -17,7 +17,8 @@
                          :parameters {...}})
 
    ;; 批量转换
-   (schema/tools->schemas tools)")
+   (schema/tools->schemas tools)"
+  (:require [im.ttalk.agent.provider.common.memo :as memo]))
 
 ;;; ============================================================
 ;;; Schema 转换
@@ -71,6 +72,11 @@
        (or (contains? tool :type)
            (contains? tool :input_schema))))
 
+(def ^:private convert-tools
+  (memo/bounded
+    (fn [tools] (mapv (fn [t] (if (wire-tool? t) t (tool->schema t))) tools))
+    32))
+
 (defn tools->schemas
   "批量转换工具定义为 Anthropic schemas
 
@@ -80,10 +86,12 @@
    参数：
    - tools: 工具定义列表
 
+   转换结果按 tools 列表有界缓存（同 schema.openai：ReAct 循环每轮免重转）。
+
    返回：
    Anthropic schema 列表"
   [tools]
-  (mapv (fn [t] (if (wire-tool? t) t (tool->schema t))) tools))
+  (convert-tools tools))
 
 (defn schemas->tools
   "批量转换 Anthropic schemas 为工具定义
