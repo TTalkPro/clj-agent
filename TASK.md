@@ -147,7 +147,25 @@
   测试 218 → 196 / 798 assertions / 0 failures（减少的即被删子系统自身测试）。
   如未来需要结构化输出，provider 侧 `json_schema`/`response_format` 原生能力仍在。
 
+### ✅ C 组 — v0.2 破坏性专项（2026-07-10 完成，未提交）
+
+> 测试：196 tests / 798 assertions / 0 failures（root + core/client 各模块独立均绿）。
+
+- [x] **C1 双消息体系统一**：tool-call 全库统一为 **`{:id :name(字符串) :args}`**
+  （与中立消息同构；以「历史唯一真相」为准——字符串 name 经 SQLite/JSON 序列化往返
+  不变形）。删除 `model/types.clj` 整个 ns（make-tool-call + 4 个字符串-role 消息
+  构造器）；providers 改用 `msg/tool-call`；react/client `:input`→`:args`；
+  `response->neutral` 桥退化为形状复位；provider/api 的消息 re-export 重指向中立
+  构造器。**破坏性**：on-tool-call 回调收到的 name 为字符串（client 边界对偏差
+  provider 做 keyword→字符串规范化兜底）。
+- [x] **C2 agent 运行时下沉 `clj-agent-client`**（onion-filter 设计收尾，ns 不变）：
+  client/common/react/callbacks/memory/memory.sqlite/advisor.memory/subagent 8 个 ns
+  + 6 个测试文件迁至新模块；timbre/next.jdbc/sqlite 依赖随迁——**core 现为零依赖纯
+  Clojure**（协议 + kernel 原语）。新模块含 deps.edn/build.clj（override-deps 发布
+  模式同 provider）/tests.edn/README；root deps/tests.edn/CI matrix 同步三模块。
+  **验收成立：`grep ChatMemory` 在 clj-agent-core 内零命中**。
+  设计文档 onion-filter.md / response-path-consolidation.md 状态已对齐。
+
 ### 📋 后续候选（按需启动）
 
-- [ ] **C1 双消息体系统一**（types.clj vs message.clj，v0.2 破坏性专项，见 D7 剩余项）。
-- [ ] **C2 onion-filter 模块下沉收尾**（或修订设计目标，见 design/onion-filter.md 状态表）。
+（暂无——2026-06 审查与 2026-07 优化轮的全部条目已清空。）
