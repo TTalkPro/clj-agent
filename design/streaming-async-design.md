@@ -1,6 +1,15 @@
 # BUG2 真流式 + 异步框架整合方案
 
-> 状态：🚧 传输层已落地并对真实端点验证（2026-06-10）；anthropic 路径已迁移；openai_compat + kernel 接入待续。
+> 状态：✅ **全部落地**（2026-07-10 核对：传输层、anthropic + openai_compat 两条路径、
+> kernel/client `chat-stream` 接入均完成，见下方「已落地」清单；唯一待续项为按需的
+> Undertow WebSocket 示例）。
+>
+> **2026-07-10 优化轮补记**：
+> - 三处流式同步编排（openai_compat / anthropic / dashscope 各自手写 promise 对 + cancel
+>   包装 + cond 分派）统一收敛为 `stream_client/post-stream-sync`。
+> - stream 处理器累积改 StringBuilder（消除逐 token O(n²)）；on-token 契约移除
+>   `:accumulated`，只发增量。
+> - stream_client 与 http/client 共享同一 HttpClient 实例（消除双连接池）。
 >
 > **已落地**：
 > - `provider/http/stream_client.clj` —— java.net.http `BodyHandlers/fromLineSubscriber` 真流式传输，

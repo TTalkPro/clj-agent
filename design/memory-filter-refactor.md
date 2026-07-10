@@ -1,8 +1,16 @@
 # 重构设计：消除 Context、转向 Memory Filter + 中立消息
 
-> 状态：实施中
-> 分支：`refactor/memory-filter-neutral-messages`
+> 状态：✅ **已完成并合入 main**（2026-07-10 核对：P0-P7 全部落地，见 §5 与「实施结果」）。
 > 目标：把"显式 thread Context"的状态模型，替换为 Spring AI 式的"无状态调用 + 按 conversation-id 的 Memory store（经 Memory Filter 自管）"，并消除消息的双重记账。
+>
+> **落地核对（2026-07-10）**：`context.clj` 已是扁平 ToolContext（无 :messages/:history/:trace）；
+> `advisor/memory.clj` 以 around-chat filter 自管历史；`react.clj` 的 run-tool-loop 以 delta+store
+> 驱动，无 conv-msgs 影子账——store 是唯一对话来源。
+>
+> **路径对照**（本文写作期的规划命名 → 实际落地命名）：
+> `core/llm/message.clj` → `model/message.clj`；`llm/wire/*` → `provider/wire/*`；
+> `core/memory.clj` → `memory.clj`；`core/kernel/memory_filter.clj` → `advisor/memory.clj`；
+> `core/kernel/context.clj` → `context.clj`；`simpleagent/*` → `client.clj`（后续 unified-invoke-agent 合并）。
 
 ## 1. 背景与动机
 
