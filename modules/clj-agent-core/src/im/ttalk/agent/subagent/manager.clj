@@ -72,6 +72,18 @@
       (catch Throwable t
         {:error {:crashed true :message (.getMessage t)}}))))
 
+(defn- finish!
+  "worker 终结登记：仅当 entry 仍属于本次运行（同一 promise）且仍 :running 时生效。
+   守卫两类竞态：kill! 已标 :killed 后被中断的 worker 不得覆盖成 :failed；
+   restart! 换代后旧 worker 不得践踏新一代的状态。"
+  [id result-promise status result]
+  (swap! registry update id
+         (fn [entry]
+           (if (and (identical? result-promise (:promise entry))
+                    (= :running (:status entry)))
+             (merge entry {:status status :result result :finished-at (now-ms)})
+             entry))))
+
 (defn- spawn-worker!
   "在虚拟线程上运行子 agent，返回 j.u.c.Future（kill! 用 future-cancel 中断）。"
   [id spec result-promise]
@@ -81,15 +93,11 @@
              (try
                (let [outcome (do-run spec)]
                  (deliver result-promise outcome)
-                 (swap! registry update id merge
-                        {:status (if (:ok outcome) :done :failed)
-                         :result outcome
-                         :finished-at (now-ms)}))
+                 (finish! id result-promise (if (:ok outcome) :done :failed) outcome))
                (catch Throwable t
                  (let [err {:error {:crashed true :message (.getMessage t)}}]
                    (deliver result-promise err)
-                   (swap! registry update id merge
-                          {:status :failed :result err :finished-at (now-ms)})))))))
+                   (finish! id result-promise :failed err)))))))
 
 ;;; ============================================================
 ;;; API
@@ -102,16 +110,19 @@
   [spec]
   (let [id (gen-id)
         p  (promise)]
+    ;; 先登记条目、后启动 worker：worker 若秒完成，finish! 需要条目已存在，
+    ;; 否则终结登记会被随后的注册覆盖，状态永远卡在 :running（真实竞态，测试曾复现）。
     (swap! registry assoc id
            {:id          id
             :promise     p
-            :future      (spawn-worker! id spec p)
+            :future      nil
             :status      :running
             :result      nil
             :spec        spec
             :owner       (:owner spec)
             :started-at  (now-ms)
             :finished-at nil})
+    (swap! registry update id assoc :future (spawn-worker! id spec p))
     {:ok id}))
 
 (defn await!
@@ -145,15 +156,19 @@
        true  (mapv #(select-keys % [:id :status :owner :started-at :finished-at]))))))
 
 (defn kill!
-  "Kill 指定子 agent（cancel future + deliver error）。"
+  "Kill 指定子 agent（cancel future + deliver error）。
+
+   :result 同步写入 {:error :killed}——kill 后 await!/result 返回明确错误而非 nil；
+   被中断的 worker 随后的 finish! 因状态已终结而 no-op，不会把 :killed 覆盖成 :failed。"
   [id]
   (when-let [entry (get @registry id)]
     (when (= :running (:status entry))
-      (future-cancel (:future entry))
+      ;; :future 可能尚未落账（spawn! 两步注册的间隙）——nil 时只标记状态即可
+      (when-let [f (:future entry)] (future-cancel f))
       ;; 安全 deliver：已 deliver 时 no-op
       (deliver (:promise entry) {:error :killed})
       (swap! registry update id merge
-             {:status :killed :finished-at (now-ms)})))
+             {:status :killed :result {:error :killed} :finished-at (now-ms)})))
   nil)
 
 (defn restart!
@@ -163,13 +178,15 @@
     (let [spec (:spec entry)]
       (kill! id)
       (let [p (promise)]
+        ;; 同 spawn!：先换代（promise/status），后启动 worker
         (swap! registry update id merge
                {:promise     p
-                :future      (spawn-worker! id spec p)
+                :future      nil
                 :status      :running
                 :result      nil
                 :started-at  (now-ms)
-                :finished-at nil}))
+                :finished-at nil})
+        (swap! registry update id assoc :future (spawn-worker! id spec p)))
       {:ok id})
     {:error :not-found}))
 
