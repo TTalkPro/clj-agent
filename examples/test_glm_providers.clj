@@ -26,9 +26,9 @@
 (println "\n[测试 1] Anthropic 兼容协议  open.bigmodel.cn/api/anthropic")
 (def pa (zhipu/create-anthropic-provider {}))
 (try
-  (let [r (model/call-with-tools pa {:model glm-model :max-tokens 1024}
-                                 [{:role :user :content "用一句话介绍你自己。"}]
-                                 [])]
+  (let [r (model/call-llm pa {:model glm-model :max-tokens 1024}
+                          [{:role :user :content "用一句话介绍你自己。"}]
+                          [])]
     (println "TEXT:" (resp/response-text r))
     (println "REASONING 字符数:" (count (or (resp/response-reasoning r) "")))
     (println "USAGE:" (resp/response-usage r))
@@ -43,10 +43,10 @@
 (println "\n[测试 2] OpenAI 兼容协议  open.bigmodel.cn/api/paas/v4（thinking enabled）")
 (def po (zhipu/create-provider {}))
 (try
-  (let [r (model/call-with-tools po {:model glm-model :max-tokens 1024
-                                     :thinking {:type "enabled"}}
-                                 [{:role :user :content "9.11 和 9.9 哪个大？只答一个数。"}]
-                                 [])]
+  (let [r (model/call-llm po {:model glm-model :max-tokens 1024
+                              :thinking {:type "enabled"}}
+                          [{:role :user :content "9.11 和 9.9 哪个大？只答一个数。"}]
+                          [])]
     (println "TEXT:" (resp/response-text r))
     (println "REASONING 字符数:" (count (or (resp/response-reasoning r) "")))
     (println "USAGE:" (resp/response-usage r))
