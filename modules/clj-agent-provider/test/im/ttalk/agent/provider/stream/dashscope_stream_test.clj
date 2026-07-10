@@ -54,7 +54,7 @@
       ;; 逐 token（增量）
       (is (= ["杭州" "是浙江" "的省会。"] @tokens))
       ;; 累积全文
-      (is (= "杭州是浙江的省会。" (:accumulated final)))
+      (is (= "杭州是浙江的省会。" (str (:accumulated final))))
       ;; finish_reason 生成中的 "null" 不记，结束的 "stop" 记下
       (is (= "stop" (:finish-reason final)))
       ;; build-response 是 OpenAI 兼容形态，extract-text 读得到

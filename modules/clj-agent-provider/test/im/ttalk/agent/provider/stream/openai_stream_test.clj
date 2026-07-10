@@ -37,7 +37,7 @@
                           {:choices [{:delta {:content "你"}}]}
                           {:choices [{:delta {:content "好"}}]}
                           {:choices [{:delta {} :finish_reason "stop"}]}])]
-      (is (= "你好" (:accumulated state)))
+      (is (= "你好" (str (:accumulated state))))
       (is (= ["你" "好"] (mapv :token toks)))
       (is (= "stop" (:finish-reason state)))
       (is (= "你好" (get-in (stream/build-response state) [:choices 0 :message :content]))))))
@@ -76,7 +76,7 @@
                                               :tool_calls [{:index 0 :id "c1"
                                                             :function {:name "search" :arguments "{}"}}]}}]}])
           resp (stream/build-response state)]
-      (is (= "稍等" (:accumulated state)))               ;; content 累积
+      (is (= "稍等" (str (:accumulated state))))         ;; content 累积
       (is (= ["稍等"] (mapv :token toks)))                ;; content 仍下发 token
       (is (= "c1" (-> resp (get-in [:choices 0 :message :tool_calls]) first :id))))))  ;; tool_call 未丢
 
@@ -92,8 +92,8 @@
                           {:choices [{:delta {:content "答案"}}]}])
           rtoks (filter :reasoning? toks)
           ctoks (remove :reasoning? toks)]
-      (is (= "让我想想…" (:reasoning-accumulated state)))
-      (is (= "答案" (:accumulated state)))
+      (is (= "让我想想…" (str (:reasoning-accumulated state))))
+      (is (= "答案" (str (:accumulated state))))
       (is (= ["让我想" "想…"] (mapv :reasoning-token rtoks)))
       (is (= ["答案"] (mapv :token ctoks)))
       ;; normalize-response 把 reasoning 与 text 分离

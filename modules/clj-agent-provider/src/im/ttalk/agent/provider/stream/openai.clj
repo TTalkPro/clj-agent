@@ -20,18 +20,24 @@
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 状态管理
 ;;; ============================================================
+
+;; 累积器用 StringBuilder 而非字符串拼接：逐 token `(str acc t)` 对长度 n 的回复
+;; 是 O(n²)（每个 token 重建整段），长回复下 CPU/GC 二次膨胀。SSE 行由
+;; Flow.Subscriber 串行投递（onNext 不并发、state 走 reset! 无重试），原地 append 安全。
 
 (defn make-initial-state
   "创建流式处理的初始状态
 
    返回：
-   状态 map {:accumulated \"\" :index 0 :tool-calls-acc {} :role nil}"
+   状态 map {:accumulated StringBuilder :index 0 :tool-calls-acc {} :role nil}"
   []
-  {:accumulated ""
-   :reasoning-accumulated ""
+  {:accumulated (StringBuilder.)
+   :reasoning-accumulated (StringBuilder.)
    :index 0
    :tool-calls-acc {}
    :role nil})
@@ -81,7 +87,7 @@
    [更新后的状态, token-data 或 nil]
 
    token-data 格式：
-   {:token \"...\" :index n :accumulated \"...\"}
+   {:token \"...\" :index n}
 
    示例：
    (let [[new-state token] (process-chunk chunk state)]
@@ -97,6 +103,8 @@
                 (:finish_reason choice)  (assoc :finish-reason (:finish_reason choice))
                 (:role delta)            (assoc :role (:role delta)))
         ;; 工具调用增量：始终独立累积——即使同一 chunk 同时携带 content，也不丢工具调用。
+        ;; :arguments 用 StringBuilder 原地 append（长 JSON 参数同样避免 O(n²)），
+        ;; build/normalize 时再物化为字符串。
         state (if-let [tool-calls (:tool_calls delta)]
                 (assoc state :tool-calls-acc
                        (reduce
@@ -105,15 +113,18 @@
                            ;; 退回 :id，再退回当前序号——避免多工具碎片全部并到 nil 一个 key 下串味。
                            (let [idx (or (:index tc) (:id tc) (count acc))
                                  existing (get acc idx {:id nil
-                                                        :function {:name "" :arguments ""}})]
+                                                        :function {:name ""
+                                                                   :arguments (StringBuilder.)}})
+                                 ^StringBuilder args-sb (get-in existing [:function :arguments])]
+                             (when-let [a (get-in tc [:function :arguments])]
+                               (.append args-sb ^String a))
                              (assoc acc idx
                                     {:id (or (:id tc) (:id existing))
                                      :type "function"
                                      :function
                                      {:name (str (get-in existing [:function :name])
                                                  (get-in tc [:function :name] ""))
-                                      :arguments (str (get-in existing [:function :arguments])
-                                                      (get-in tc [:function :arguments] ""))}})))
+                                      :arguments args-sb}})))
                          (:tool-calls-acc state)
                          tool-calls))
                 state)]
@@ -121,24 +132,20 @@
       ;; 推理增量（deepseek-reasoner 等：reasoning_content 在 content 之前流式返回）
       ;; 单独 emit :reasoning-token，不混入 :token，保持答案流干净
       (:reasoning_content delta)
-      (let [rtext (:reasoning_content delta)
-            new-reasoning (str (:reasoning-accumulated state) rtext)]
-        [(assoc state :reasoning-accumulated new-reasoning)
+      (let [rtext (:reasoning_content delta)]
+        (.append ^StringBuilder (:reasoning-accumulated state) ^String rtext)
+        [state
          {:reasoning-token rtext
-          :reasoning? true
-          :reasoning-accumulated new-reasoning}])
+          :reasoning? true}])
 
       ;; 文本增量
       (:content delta)
       (let [text (:content delta)
-            new-accumulated (str (:accumulated state) text)
             new-index (inc (:index state))]
-        [(assoc state
-                :accumulated new-accumulated
-                :index new-index)
+        (.append ^StringBuilder (:accumulated state) ^String text)
+        [(assoc state :index new-index)
          {:token text
-          :index new-index
-          :accumulated new-accumulated}])
+          :index new-index}])
 
       ;; 仅工具调用 / 仅角色 / 其他：状态已在上面更新，无 token 下发
       :else
@@ -166,12 +173,13 @@
   (let [tool-calls (when (seq (:tool-calls-acc state))
                      (->> (:tool-calls-acc state)
                           (sort-by first)
-                          (mapv second)))
-        reasoning (:reasoning-accumulated state)]
+                          ;; 物化累积期的 StringBuilder → String
+                          (mapv #(update-in (second %) [:function :arguments] str))))
+        reasoning (str (:reasoning-accumulated state))]
     (cond-> {:id id
              :model model
              :choices [{:message (cond-> {:role (or (:role state) "assistant")
-                                          :content (:accumulated state)}
+                                          :content (str (:accumulated state))}
                                    (seq reasoning)   (assoc :reasoning_content reasoning)
                                    (seq tool-calls)  (assoc :tool_calls tool-calls))
                         ;; 优先用流中捕获的真实 finish_reason
@@ -204,12 +212,12 @@
                          (->> (:tool-calls-acc state)
                               (sort-by first)
                               (mapv second)))
-        ;; 转换为统一的 tool-call 格式
+        ;; 转换为统一的 tool-call 格式（:arguments 累积期为 StringBuilder，str 物化）
         tool-calls (when (seq tool-calls-raw)
                      (mapv (fn [tc]
                              (let [args (try
                                           (json/parse-string
-                                            (get-in tc [:function :arguments]) true)
+                                            (str (get-in tc [:function :arguments])) true)
                                           (catch Exception _ {}))]
                                (types/make-tool-call
                                  (:id tc)
@@ -219,9 +227,9 @@
     (response/make-response
       :id id
       :model model
-      :text (let [text (:accumulated state)]
+      :text (let [text (str (:accumulated state))]
               (when (seq text) text))
-      :reasoning (let [r (:reasoning-accumulated state)]
+      :reasoning (let [r (str (:reasoning-accumulated state))]
                    (when (seq r) r))
       :tool-calls tool-calls
       :finish-reason (or (:finish-reason state)

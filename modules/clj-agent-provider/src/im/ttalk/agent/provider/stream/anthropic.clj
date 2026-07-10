@@ -29,21 +29,50 @@
             [im.ttalk.agent.model.types :as types]
             [im.ttalk.agent.model.response :as response]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 状态管理
 ;;; ============================================================
+
+;; 累积器（顶层 :accumulated/:reasoning-accumulated 与块内 :text/:thinking/:input）
+;; 用 StringBuilder 而非字符串拼接：逐 token `(str acc t)` 对长度 n 的回复是 O(n²)。
+;; SSE 行由 Flow.Subscriber 串行投递（onNext 不并发、state 走 reset! 无重试），
+;; 原地 append 安全；build/normalize 时统一物化为 String。
 
 (defn make-initial-state
   "创建流式处理的初始状态
 
    返回：
-   状态 map {:accumulated \"\" :index 0 :content-blocks {} :message nil}"
+   状态 map {:accumulated StringBuilder :index 0 :content-blocks {} :message nil}"
   []
-  {:accumulated ""
-   :reasoning-accumulated ""
+  {:accumulated (StringBuilder.)
+   :reasoning-accumulated (StringBuilder.)
    :index 0
    :content-blocks {}
    :message nil})
+
+(defn- append-str
+  "向（可能尚不存在的）StringBuilder 累积器追加一段文本，返回该 StringBuilder。
+   已有字符串（如 content_block_start 自带 :text \"\"）转为累积器并保留内容；
+   非字符串占位（如 tool_use 块自带 :input {}）一律换新累积器起步。"
+  ^StringBuilder [existing ^String s]
+  (let [^StringBuilder sb (cond
+                            (instance? StringBuilder existing) existing
+                            (string? existing) (StringBuilder. ^String existing)
+                            :else (StringBuilder.))]
+    (when s (.append sb s))
+    sb))
+
+(defn- materialize-block
+  "把内容块里累积用的 StringBuilder 字段物化为 String（幂等；非累积器字段原样保留）。"
+  [block]
+  (reduce (fn [b k]
+            (if (instance? StringBuilder (get b k))
+              (update b k str)
+              b))
+          block
+          [:text :thinking :input]))
 
 ;;; ============================================================
 ;;; SSE 解析
@@ -89,7 +118,7 @@
    [更新后的状态, token-data 或 nil]
 
    token-data 格式：
-   {:token \"...\" :index n :accumulated \"...\"}
+   {:token \"...\" :index n}
 
    示例：
    (let [[new-state token] (process-event event state)]
@@ -118,40 +147,34 @@
           (= delta-type "text_delta")
           (let [text (:text delta)
                 block-index (:index event)
-                new-accumulated (str (:accumulated state) text)
                 new-index (inc (:index state))]
+            (.append ^StringBuilder (:accumulated state) ^String text)
             [(-> state
-                 (assoc :accumulated new-accumulated :index new-index)
-                 (update-in [:content-blocks block-index :text] (fnil str "") text))
+                 (assoc :index new-index)
+                 (update-in [:content-blocks block-index :text] append-str text))
              {:token text
-              :index new-index
-              :accumulated new-accumulated}])
+              :index new-index}])
 
           ;; 工具输入增量（JSON 片段）
           ;; 注意：content_block_start 的 tool_use 块自带 :input {}（空 map），
-          ;; 不能直接 (str {} partial-json) 否则会拼成 "{}{...}" 致 cheshire 只解析出 {}，
-          ;; 工具参数整体丢失。非字符串累加器一律视作空串起步。
+          ;; 不能直接向其追加否则会拼成 "{}{...}" 致 cheshire 只解析出 {}，
+          ;; 工具参数整体丢失。append-str 对非 StringBuilder 占位一律换新累积器起步。
           (= delta-type "input_json_delta")
           (let [block-index (:index event)
-                partial-json (:partial_json delta)
-                existing (get-in state [:content-blocks block-index :input])
-                existing (if (string? existing) existing "")]
-            [(assoc-in state [:content-blocks block-index :input]
-                       (str existing partial-json))
+                partial-json (:partial_json delta)]
+            [(update-in state [:content-blocks block-index :input]
+                        append-str partial-json)
              nil])
 
           ;; 思考/推理增量（extended thinking）：累积到块 :thinking 与顶层 :reasoning-accumulated，
           ;; 通过 :reasoning-token 单独 emit（不放进 :token，避免污染答案流）
           (= delta-type "thinking_delta")
           (let [thinking (:thinking delta)
-                block-index (:index event)
-                new-reasoning (str (:reasoning-accumulated state) thinking)]
-            [(-> state
-                 (assoc :reasoning-accumulated new-reasoning)
-                 (update-in [:content-blocks block-index :thinking] (fnil str "") thinking))
+                block-index (:index event)]
+            (.append ^StringBuilder (:reasoning-accumulated state) ^String thinking)
+            [(update-in state [:content-blocks block-index :thinking] append-str thinking)
              {:reasoning-token thinking
-              :reasoning? true
-              :reasoning-accumulated new-reasoning}])
+              :reasoning? true}])
 
           ;; 思考块签名增量：挂到对应块（便于多轮 thinking 回传）
           (= delta-type "signature_delta")
@@ -168,10 +191,10 @@
       (let [block-index (:index event)
             block (get-in state [:content-blocks block-index])]
         (if (and (= (:type block) "tool_use")
-                 (string? (:input block)))
-          ;; 解析累积的 JSON 字符串
+                 (instance? StringBuilder (:input block)))
+          ;; 物化并解析累积的 JSON 字符串
           (let [parsed-input (try
-                               (json/parse-string (:input block) true)
+                               (json/parse-string (str (:input block)) true)
                                (catch Exception _ {}))]
             [(assoc-in state [:content-blocks block-index :input] parsed-input)
              nil])
@@ -217,16 +240,16 @@
     (throw (ex-info "Anthropic streaming error"
                     {:error err :provider :anthropic :stream? true})))
   (let [message (:message state)
-        accumulated (:accumulated state)
+        accumulated (str (:accumulated state))
         content-blocks (:content-blocks state)]
     ;; 构建与同步调用返回格式兼容的响应
     (-> message
         (assoc :content
                (if (seq content-blocks)
-                 ;; 有内容块时，按索引排序后返回
+                 ;; 有内容块时，按索引排序后返回（物化累积期的 StringBuilder 字段）
                  (->> content-blocks
                       (sort-by first)
-                      (mapv second))
+                      (mapv (comp materialize-block second)))
                  ;; 只有累积文本时，构造文本块
                  [{:type "text" :text accumulated}])))))
 
@@ -274,11 +297,11 @@
    ;     :provider :anthropic}"
   [state]
   (let [message (:message state)
-        accumulated (:accumulated state)
-        content-blocks (:content-blocks state)
+        accumulated (str (:accumulated state))
+        content-blocks (update-vals (:content-blocks state) materialize-block)
         text (extract-text-from-blocks content-blocks accumulated)
         tool-calls (extract-tool-calls-from-blocks content-blocks)
-        reasoning (:reasoning-accumulated state)]
+        reasoning (str (:reasoning-accumulated state))]
     (response/make-response
       :id (:id message)
       :model (:model message)

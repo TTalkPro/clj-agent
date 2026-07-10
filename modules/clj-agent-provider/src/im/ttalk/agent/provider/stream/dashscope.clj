@@ -13,8 +13,12 @@
             [clojure.string :as str]
             [taoensso.timbre :as log]))
 
+(set! *warn-on-reflection* true)
+
+;; :accumulated 用 StringBuilder：逐 token `(str acc delta)` 是 O(n²)；
+;; SSE 行由 Flow.Subscriber 串行投递，原地 append 安全，build-response 时物化。
 (defn make-initial-state []
-  {:accumulated "" :tool-calls nil :id nil :model nil :finish-reason nil :usage nil})
+  {:accumulated (StringBuilder.) :tool-calls nil :id nil :model nil :finish-reason nil :usage nil})
 
 (defn parse-sse-line
   "取 DashScope SSE 的 data 行（兼容 \"data:\" 有无空格），跳过 id:/event:/:HTTP_STATUS 等。"
@@ -32,7 +36,7 @@
 
 (defn process-event
   "处理一个 DashScope SSE 事件。返回 [new-state token-data|nil]。
-   content 增量 → emit {:token delta :accumulated ...}；tool_calls / usage / finish_reason 累积到 state。"
+   content 增量 → emit {:token delta}；tool_calls / usage / finish_reason 累积到 state。"
   [event state]
   (let [choice (first (get-in event [:output :choices]))
         msg    (:message choice)
@@ -49,15 +53,14 @@
                  ;; finish_reason 生成中为 "null"/null，仅在真正结束时记录
                  (and fr (not= fr "null")) (assoc :finish-reason fr))]
     (if (and delta (seq delta))
-      (let [acc (str (:accumulated state) delta)]
-        [(assoc state :accumulated acc)
-         {:token delta :accumulated acc}])
+      (do (.append ^StringBuilder (:accumulated state) ^String delta)
+          [state {:token delta}])
       [state nil])))
 
 (defn build-response
   "从最终状态构建与同步 parse-response 同形的 OpenAI 兼容响应。"
   [state]
-  {:choices [{:message (cond-> {:role "assistant" :content (:accumulated state)}
+  {:choices [{:message (cond-> {:role "assistant" :content (str (:accumulated state))}
                          (:tool-calls state) (assoc :tool_calls (:tool-calls state)))
               :finish_reason (:finish-reason state)}]
    :usage (:usage state)

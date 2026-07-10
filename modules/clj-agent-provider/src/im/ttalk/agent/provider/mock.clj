@@ -64,8 +64,7 @@
           text (:text response)]
       (doseq [[i ch] (map-indexed vector text)]
         (on-token {:token (str ch)
-                   :index i
-                   :accumulated (subs text 0 (inc i))}))
+                   :index i}))
       response))
 
   (extract-tool-calls [_ _response] [])
