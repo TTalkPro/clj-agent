@@ -1,9 +1,9 @@
 (ns build
   (:require [clojure.tools.build.api :as b]
-            [deps-deploy.deploy-deps :as dd]))
+            [deps-deploy.deps-deploy :as dd]))
 
 (def lib 'im.ttalk/clj-agent-core)
-(def version (format "0.1.%s" (b/git-count-revs nil)))
+(def version (format "0.2.%s" (b/git-count-revs nil)))
 (def class-dir "target/classes")
 (def basis (b/create-basis {:project "deps.edn"}))
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
@@ -39,11 +39,12 @@
           :jar-file jar-file}))
 
 (defn install [_]
+  ;; 注：b/install 必填 :class-dir（曾误传 :src-dirs → assert-required 报错，install 从未跑通）
   (b/install {:basis basis
               :lib lib
               :version version
               :jar-file jar-file
-              :src-dirs src-dirs}))
+              :class-dir class-dir}))
 
 (defn deploy [opts]
   (dd/deploy (merge {:installer :remote
