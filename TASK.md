@@ -122,12 +122,32 @@
   （仍返 j.u.c.Future，kill!/future-cancel 中断语义不变）。已验证 worker
   跑在虚拟线程 + kill 可中断。
 
-### 📋 后续候选（B/C 组，按需启动）
+### ✅ B 组（2026-07-10 完成，未提交）
 
-- [ ] **B1 流式建链重试**：maybe-with-retry 仅覆盖非流式；编排已收敛到 post-stream-sync
-  单点，建链阶段（429/5xx）重试只需改一处。
-- [ ] **B2 `*warn-on-reflection*` 全项目推广**（目前仅热路径 6 ns）。
-- [ ] **B3 converter/prompt 子系统去留决策**：两子系统无 runtime 消费者、仅测试存活
-  （~2600 行）——定位是对外库 API 则补 README+examples，否则删除。**需拍板**。
+> 测试：211 → 218 tests / 863 assertions / 0 failures。
+
+- [x] **B1 流式建链重试**：`post-stream-sync` 加 `:retry` opt-in（同 maybe-with-retry
+  约定：true=默认配置 / map=合并）；**仅当错误 retryable 且尚未流出任何 token** 时
+  指数退避重试（token 已出则重试会重复内容，按原样抛错）；取消不重试。三 provider
+  流式调用点透传 `(:retry config)`。3 个回归测试（503→成功 / 401 不重试 / 默认不重试）。
+- [x] **B2 `*warn-on-reflection*` 全项目推广**：60 个 src ns 全部开启（脚本注入 53 个）；
+  全量加载仅暴露 3 处告警并修复——`error.clj` `.getMessage` 无提示、`sqlite.clj`
+  `.close` 无提示、`selector.clj` loop 自动装箱。现在任何新反射在编译期即告警。
+- [x] **B4 子 agent kill!/终态语义**：kill! 同步写 `:result {:error :killed}`
+  （此前 await!/result 返回 nil）；新增 `finish!` 终态守卫（同 promise + 仍 :running
+  才落账）——被中断 worker 不再把 :killed 覆盖成 :failed、restart! 换代后旧 worker
+  不践踏新状态。**顺带修复原有竞态**：spawn!/restart! 曾在注册表条目写入前启动
+  worker，秒完成的 worker 状态永远卡 :running；改为先登记后启动。
+  新增 `subagent/manager_test.clj`（4 tests，含虚拟线程断言）。
+
+- [x] **B3 converter/prompt 子系统删除**（2026-07-10 用户拍板「全部删除」）：
+  两子系统无任何 runtime 消费者（kernel/client/react/provider 零引用），仅自身测试存活。
+  删除 `converter/*`（5 ns）+ `prompt/*`（5 ns）+ 对应测试目录；core 的 cheshire 依赖
+  随 converter 移除（core src 已零 JSON 使用）；清理 4 处 README 引用。
+  测试 218 → 196 / 798 assertions / 0 failures（减少的即被删子系统自身测试）。
+  如未来需要结构化输出，provider 侧 `json_schema`/`response_format` 原生能力仍在。
+
+### 📋 后续候选（按需启动）
+
 - [ ] **C1 双消息体系统一**（types.clj vs message.clj，v0.2 破坏性专项，见 D7 剩余项）。
 - [ ] **C2 onion-filter 模块下沉收尾**（或修订设计目标，见 design/onion-filter.md 状态表）。
