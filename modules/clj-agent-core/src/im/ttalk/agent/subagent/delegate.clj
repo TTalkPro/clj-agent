@@ -18,6 +18,8 @@
   (:require [im.ttalk.agent.subagent.manager :as mgr]
             [clojure.string]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 内部辅助
 ;;; ============================================================

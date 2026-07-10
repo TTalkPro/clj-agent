@@ -39,6 +39,8 @@
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.tool :as tool]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; Kernel Record
 ;;; ============================================================

@@ -18,6 +18,8 @@
   (:require [im.ttalk.agent.model :as provider]
             [im.ttalk.agent.model.response :as response]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 辅助函数
 ;;; ============================================================

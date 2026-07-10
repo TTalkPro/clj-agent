@@ -18,6 +18,8 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.message :as msg]))
 
+(set! *warn-on-reflection* true)
+
 (defn- ensure-schema! [ds]
   (jdbc/execute! ds
     ["CREATE TABLE IF NOT EXISTS chat_messages (
@@ -60,7 +62,7 @@
     nil)
 
   java.io.Closeable
-  (close [_] (.close conn)))
+  (close [_] (.close ^java.sql.Connection conn)))
 
 (defn sqlite-store
   "创建 SQLite 后端的 ChatMemory。

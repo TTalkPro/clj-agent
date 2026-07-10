@@ -17,6 +17,8 @@
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as resp]))
 
+(set! *warn-on-reflection* true)
+
 (defn response->neutral
   "把归一化响应(ILLMResponse)转成中立 assistant 消息。
     归一化响应里 text / tool-calls 已是 provider 无关形态。"

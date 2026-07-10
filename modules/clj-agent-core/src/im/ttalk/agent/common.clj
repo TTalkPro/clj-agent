@@ -8,6 +8,8 @@
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.advisor.memory :as memory-filter]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; Kernel 构建
 ;;; ============================================================

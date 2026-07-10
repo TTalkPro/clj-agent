@@ -17,6 +17,8 @@
    stream_client 的 cancel 后登记之——**无需改协议 / config 签名**。整条同步调用链同线程，
    动态 var 可见；request-cancel! 直接操作令牌（可跨线程）。")
 
+(set! *warn-on-reflection* true)
+
 (defn make-cancel-token
   "创建取消令牌。"
   []

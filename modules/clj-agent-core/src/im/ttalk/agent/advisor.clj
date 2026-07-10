@@ -26,6 +26,8 @@
                    :filters [memory-filter retry-filter logging-filter]})"
   (:require [clojure.string]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; Filter 创建
 ;;; ============================================================

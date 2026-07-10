@@ -14,6 +14,8 @@
      (extract-text [_ response] ...)
      (build-tool-result [_ tool-id content] ...))")
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; LLM Provider 协议
 ;;; ============================================================

@@ -22,6 +22,8 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.streaming :as streaming]))
 
+(set! *warn-on-reflection* true)
+
 (def ^:private default-max-iterations
   "工具调用循环默认最大次数"
   10)

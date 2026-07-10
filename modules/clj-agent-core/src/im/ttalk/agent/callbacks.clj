@@ -22,6 +22,8 @@
      - kernel filter  洋葱式 around 拦截，可改写请求/响应，适合 memory/retry/cache
      - callback       轻量事件通知，适合日志/监控/审计/告警/中断控制")
 
+(set! *warn-on-reflection* true)
+
 (defn invoke
   "安全调用回调函数。
 

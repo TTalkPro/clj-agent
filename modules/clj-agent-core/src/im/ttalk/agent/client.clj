@@ -53,6 +53,8 @@
             [im.ttalk.agent.streaming :as streaming]
             [taoensso.timbre :as log]))
 
+(set! *warn-on-reflection* true)
+
 ;; 便捷再导出：取消令牌（亦可直接 require im.ttalk.agent.streaming）
 (def make-cancel-token
   "创建取消令牌，传给 chat-stream 的 opts :cancel-token。见 im.ttalk.agent.streaming。"

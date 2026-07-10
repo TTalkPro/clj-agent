@@ -27,6 +27,8 @@
   (:require [clojure.string :as str])
   (:import [java.io IOException]))
 
+(set! *warn-on-reflection* true)
+
 ;;; ============================================================
 ;;; 错误分类
 ;;; ============================================================
@@ -140,7 +142,7 @@
   ([e]
    (exception->error e nil))
   ([e context]
-   (let [msg (or (.getMessage e) (str (class e)))
+   (let [msg (or (.getMessage ^Throwable e) (str (class e)))
          base-opts (cond-> {:cause e}
                      context (assoc :context context))]
      (cond
