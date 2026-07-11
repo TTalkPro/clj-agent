@@ -225,11 +225,17 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 (let [result (ka/chat agent "删除 /tmp/test.txt")]
   (when (= :paused (:status result))
     (println "待审批工具:" (get-in result [:pending-tool :name]))
-    ;; 审批通过
-    (ka/resume agent "approved")
-    ;; 或拒绝: (ka/resume agent "rejected")
+    (ka/resume agent "approved")                                ;; 批准
+    ;; (ka/resume agent "rejected")                             ;; 拒绝
+    ;; (ka/resume agent "rejected" {:message "先退款再删"})     ;; 拒绝带理由（模型直接拿到）
+    ;; (ka/resume agent "approved" {:args {:path "/tmp/b"}})    ;; 编辑参数后批准
+    ;; (ka/resume agent "reply" {:message "选 B 方案"})         ;; 答复即工具结果（ask-user）
     ))
 ```
+
+**ask-user 模式**：定义一个 body 永不执行的提问工具，`:on-tool-call` 拦截暂停，
+用户答案经 `(ka/resume agent "reply" {:message 答案})` 直接作为工具结果回模型
+——模型侧看到的就是一次普通的工具往返。
 
 **跨进程重启的 HITL**：配置 `:pause-store`（配合 SQLite ChatMemory），暂停快照自动持久化；
 重启后用同一 conversation-id + 同一 store 重建 agent，`paused?`/`resume` 透明恢复
@@ -249,6 +255,24 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 
 环境类工具失败（如凭证失效，`{:error-class :environment}`）的暂停同样支持：
 `(ka/resume agent "retry")` 表示环境已修复、重跑失败工具。
+
+**Timeline 与多分支**：对话日志即时间线，分支 = 前缀复制到新 conversation-id：
+
+```clojure
+(require '[im.ttalk.agent.timeline :as tl])
+
+(def deps {:memory mem :pause-store ps :lineage (tl/in-memory-lineage-store)})
+(tl/fork! deps "main" {:as "exp"})       ;; 全量分支（源暂停中则连带暂停快照——
+                                          ;;   两支可各自 resume 不同审批决策做对比）
+(tl/fork! deps "main" {:at 4})           ;; 在第 4 条消息处开分支（编辑重试：
+                                          ;;   fork 前缀 + 在分支上重发改写后的消息）
+(tl/rollback! deps "main" 4)             ;; 破坏性截断（"重新生成"）
+(tl/ancestry deps "exp")                 ;; 血缘回溯
+(tl/prune! deps "exp")                   ;; 删分支（有子分支拒绝）
+```
+
+合法 fork/rollback 点是 **turn 边界或暂停点**。工具的 `:writes` 会作为元数据
+随 tool-result 消息进历史（审计 + event-sourcing 伏笔），不会发给 LLM。
 
 ### 方式三：Kernel API（完全控制）
 

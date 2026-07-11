@@ -212,7 +212,24 @@
      resume context 缺口**（此前暂停前累积的 state slot 被裸 tctx 丢弃）+
      `create-agent` 透传 `:state-slots`。6 tests / 34 assertions，
      全套 223/932/0。设计记录见文档 §11。
-  4. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
+  4. [x] **Timeline 与多分支（2026-07-11 完成）**：判定 Agent 持久状态 =
+     对话历史（唯一真相，slots turn 级）→ 日志即 timeline，无需快照版本链。
+     新 ns `im.ttalk.agent.timeline`：fork-as-new-conversation（前缀复制 +
+     LineageStore 血缘，现有 ChatMemory 协议零改动）、rollback!/prune!/
+     ancestry；暂停点全量 fork 连带复制 PauseStore 快照 → HITL 决策分支
+     （两支各自 resume 不同决策）；编辑重试 = fork + 替换重发。
+     **writes 进历史**（event-sourcing 伏笔）：tool-result 中立消息带
+     `:writes` 元数据，只进存储、wire 层剥除（有测试钉住）。一致性不变量：
+     合法 fork/rollback 点 = turn 边界/暂停点。7 tests / 39 assertions，
+     全套 230/971/0。设计见文档 §12。
+  5. [x] **resume 带 payload（2026-07-11 完成）**：审批 phase 三种载荷——
+     拒绝带理由（结果「已拒绝执行：<理由>」）、批准改参（pending 工具替换
+     args 执行）、`"reply"` 答复即结果（ask-user 模式解锁：提问工具 body
+     永不执行，gate 拦截 + reply 送回答案）。决策词汇扩展进 execute-batch
+     gate 契约（`{:reject 理由}`/`{:reply 结果}`）；loop-state 加
+     :pending-id；env phase 显式拒收 reply。零破坏。6 tests / 27 assertions，
+     全套 236/998/0。设计见文档 §13。
+  6. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
      单 Agent 优先**；待单 Agent 能力收敛后另议（届时先答"要不要全局快照
      语义"：BSP 或 actor，不做双引擎）。
 

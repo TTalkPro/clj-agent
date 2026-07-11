@@ -49,6 +49,23 @@
   ——进程重启后同 conversation-id + 同 store 重建 agent 即可 resume
   （审批与 :env-retry 两种暂停均支持；对话历史配 SQLite ChatMemory）。
   `create-agent` 同时补透传 `:state-slots`。
+- **Timeline 与多分支（`im.ttalk.agent.timeline`）**：对话日志即时间线，
+  分支 = fork-as-new-conversation（前缀复制 + LineageStore 血缘记录，
+  现有 ChatMemory 协议零改动）。`fork!`（暂停点全量 fork 连带复制暂停快照
+  → HITL 决策分支：两支各自 resume 不同决策）/ `rollback!`（破坏性截断，
+  "重新生成"）/ `lineage`/`ancestry` / `prune!`（有子分支拒绝）。
+  合法 fork/rollback 点 = turn 边界 / 暂停点（一致性不变量）。
+- **`:writes` 进历史（event-sourcing 伏笔）**：tool-result 中立消息可携带
+  `:writes` 元数据（该工具对状态槽的写意图）——只进历史存储、不发给 LLM
+  （wire 层剥除有测试钉住）；失败/被拒调用无 writes（与事务性同真同假）。
+  立即价值为审计，为将来跨 turn 状态的 fold-from-history 留路。
+- **resume 带 payload（审批 phase，3-arity）**：
+  `(resume agent "rejected" {:message 理由})` 结果「已拒绝执行：<理由>」；
+  `(resume agent "approved" {:args 新参数})` pending 工具改参执行；
+  `(resume agent "reply" {:message 答复})` 工具不执行、答复即结果——
+  **ask-user 模式解锁**（提问工具 + gate 拦截 + reply 送回）。
+  gate 决策词汇同步扩展（`{:reject 理由}`/`{:reply 结果}`）；loop-state
+  新增 `:pending-id`；env 暂停显式拒收 reply。零破坏。
 
 ### 🐛 修复
 
@@ -62,8 +79,9 @@
 - 新语义测试：S1 批次 9 个（真并行证明、快照隔离、last-writer 按调用序而非
   完成序、失败 writes 丢弃、messages/records 原序、serial 整批退化、reject、
   reducer 折叠与跨轮累积）+ S2 分类/重试/环境暂停 5 组 + HITL 持久化 6 个
-  （EDN 往返、跨重启审批与 env-retry 恢复、context 恢复回归、清理时机）。
-  全套 223 tests / 932 assertions / 0 failures。
+  （EDN 往返、跨重启审批与 env-retry 恢复、context 恢复回归、清理时机）
+  + Timeline 7 个（writes 落历史与 wire 剥除、fork/血缘/rollback/prune、
+  HITL 决策分支、编辑重试）。全套 230 tests / 971 assertions / 0 failures。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 
