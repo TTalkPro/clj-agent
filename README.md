@@ -382,9 +382,15 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 ### Filter 中间件（洋葱式 around，对标 Spring AI Advisor）
 
 根抽象是 `around(req, chain)`：chain 是下游，由 filter 决定调不调、调几次、前后干什么
-（可短路 / 重试 / 计时）。一个 filter 通过 `:chat` / `:tool` 两个键分别挂到 chat 链与 tool
-链上，两者可并存。**执行顺序即 `:filters` 向量中的注册顺序**（无 `:order`/`:phase`）；
+（可短路 / 重试 / 计时）。一个 filter 通过 `:chat` / `:tool` / `:turn` 三个键挂到对应链上，
+可任意并存。**执行顺序即 `:filters` 向量中的注册顺序**（无 `:order`/`:phase`）；
 靠前的 filter 在最外层（最先看到 req、最后看到 resp）。
+
+三条链的粒度：`:chat` 包**单次 LLM 调用**（工具循环内每轮执行，memory 在此）；
+`:tool` 包**单次工具执行**（并行任务内各自生效）；`:turn` 包**整个工具循环**
+（每 turn 一次——RAG 注入、最终答案校验/guardrail、turn 级预算的正确位置；
+闭包链天然"仅下游"，turn filter 可多次 `(chain req)` 递归重入实现校验重试，
+但 `:paused`/`:cancelled`/`:error` 结果必须透传）。
 
 ```clojure
 ;; 自定义 filter —— create-filter 接受 name 后跟 :chat / :tool 关键字参数
@@ -404,8 +410,10 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 
 ;; 内置 filter
 filters/logging-filter        ;; 调用前后日志（:tool）
-(filters/timeout-filter 5000) ;; 超时控制（ms，around）
+(filters/timeout-filter 5000) ;; 超时控制（ms，around；超时标 :transient 可触发重试）
 (filters/approval-filter)     ;; 敏感工具审批（拒绝则短路）
+(filters/validation-turn-filter validate-fn :max-retries 2)
+                              ;; 最终答案校验（:turn）：不合格带反馈重入循环重试
 
 ;; 注册：filters 向量顺序即洋葱层序（越靠前越外层）
 (kernel/build-kernel {:service svc :tools tools :filters [my-filter both]})

@@ -233,9 +233,20 @@
      `docs/hitl-timeline-design.md`——暂停源（审批/环境失败）× resume 五种
      载荷 × 持久化跨重启 × 分支的权威参考（能力矩阵/一致性不变量/API 速查/
      已知边界），由 agent-loop-concurrency-design.md §5/§9–§13 整合而成。
-  7. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
-     单 Agent 优先**；待单 Agent 能力收敛后另议（届时先答"要不要全局快照
-     语义"：BSP 或 actor，不做双引擎）。
+  7. [x] **Turn 级 filter 链（2026-07-11 完成，Spring AI 2.0 advisor 吸收）**：
+     filter 第三钩子 `:turn` 包整个工具循环（每 turn 一次；`react/invoke`
+     以 run-tool-loop 为 terminal 组洋葱）。递归重入免费获得（闭包链天然
+     仅下游，Spring AI 的 chain.copy 我们不需要）；硬规则 :paused/:cancelled/
+     :error 透传。内置 `validation-turn-filter`（最终答案校验 + 反馈重入重试，
+     以 ~30 行取回已删 converter 的核心价值）。解锁：每 turn 一次的 RAG 注入/
+     guardrail/turn 级预算。零破坏。5 tests / 15 assertions，全套 241/1013/0。
+     实施记录见文档 §14；**三链体系权威参考 `docs/filter-chain-design.md`**。
+     resume 边界已补齐（同日）：resume 经 turn 链（:resume? 标记 + 终端
+     一次性分派），resume 完成的答案同样过校验。全套 243/1021/0。
+  8. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
+     单 Agent 优先**；多 agent 问题空间地图已在讨论中盘点（拓扑/通信/状态/
+     监督/HITL 冒泡/可观测/引擎三路线），用户判定太复杂暂弃；真有需求时按
+     决策阶梯走（委派工具够不够 → handoff → HITL 冒泡 → 才到 BSP/actor）。
 
 ### 📋 历史账本
 

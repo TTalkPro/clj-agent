@@ -59,6 +59,15 @@
   `:writes` 元数据（该工具对状态槽的写意图）——只进历史存储、不发给 LLM
   （wire 层剥除有测试钉住）；失败/被拒调用无 writes（与事务性同真同假）。
   立即价值为审计，为将来跨 turn 状态的 fold-from-history 留路。
+- **Turn 级 filter 链（`:turn` 钩子）**：filter 第三个钩子，包整个工具循环
+  （每 turn 一次），与 `:chat`（每轮 LLM 调用）/`:tool`（每次工具执行）并存。
+  可改写入口 `:messages`/`:context`、可多次 `(chain req)` 递归重入
+  （闭包洋葱天然"仅下游"）；`:paused`/`:cancelled`/`:error` 结果须透传。
+  解锁每 turn 一次的 RAG 注入、最终答案 guardrail、turn 级预算。
+  内置 `advisor/validation-turn-filter`（校验失败带反馈重入重试，
+  对标 Spring AI 2.0 StructuredOutputValidationAdvisor）。`resume` 同样经过
+  turn 链（TurnRequest 带 `:resume? true`；首调延续暂停 turn、递归重入走
+  全新循环）——resume 完成的最终答案同样被校验/guardrail。
 - **resume 带 payload（审批 phase，3-arity）**：
   `(resume agent "rejected" {:message 理由})` 结果「已拒绝执行：<理由>」；
   `(resume agent "approved" {:args 新参数})` pending 工具改参执行；
