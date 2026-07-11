@@ -2,9 +2,15 @@
 
 Process Framework —— 事件驱动的步骤编排引擎（对标 Semantic Kernel Process / beamai process）。
 
-**V1：纯函数式同步 runtime**（零外部依赖、确定性执行、易测试）。
-V2（core.async 并行化：fan-out 真并行、外部事件、ProcessHandle）见
-[并行化设计](../../docs/process-parallel-design.md)，尚未实施。
+两个引擎共用同一份 process-spec（event/step/builder 纯函数层完全复用）：
+
+- **V1 `process.runtime`**：纯函数式同步循环——零外部依赖、确定性执行、
+  可快照（on-quiescent / Timeline 时间旅行）
+- **V2 `process.parallel`**：core.async 并行循环——fan-out 真并行、外部事件注入
+  （ProcessHandle / send-event）、单步与全局超时（[设计](../../docs/process-parallel-design.md)）
+
+选型：需要确定性重放 / 快照存档 → V1；step 有真并发（并行 LLM 调用、
+I/O 密集）或需外部事件驱动的常驻 process → V2。
 
 ## 模型
 
@@ -52,6 +58,38 @@ V2（core.async 并行化：fan-out 真并行、外部事件、ProcessHandle）�
 `:on-quiescent` 在安全时机（一批 step 执行完 / 暂停）给出快照；恢复时把
 `:step-states` + `:context` 传回 `run-process`，用 `:initial-events` 驱动后续步骤。
 
+## V2 并行引擎（process.parallel）
+
+同一份 spec 换个 ns 即得并行执行 + 外部事件：
+
+```clojure
+(require '[im.ttalk.agent.process.parallel :as pp])
+
+;; 同步 API 与 V1 同构（fan-out 的多个 step 真并行执行）
+(pp/run-process spec {:context (ctx/create {:kernel k})
+                      :timeout-ms 60000})          ;; 全局超时（可选）
+;; => {:status :completed/:failed/:stopped/:paused ...}
+
+;; 异步：ProcessHandle + 外部事件驱动的常驻 process
+(def h (pp/start-process spec {:auto-complete? false}))  ;; 事件流干也不自动结束
+(pp/send-event h :user-reply "yes")     ;; 外部事件注入（终态后返回 false）
+(pp/get-status h)                       ;; :running | :paused | :completed | :failed | :stopped
+(pp/wait-for-completion h 5000)         ;; 终态结果；超时返回 nil
+(pp/stop-process h)                     ;; 主动停止（走 on-terminate 清理），幂等
+
+;; pause/resume 与 V1 同构（V2 是活运行时，同一暂停点只能 resume 一次）
+(let [paused (pp/run-process approval-spec)]
+  (when (pp/paused? paused)
+    (pp/resume paused "approved")))
+```
+
+step-spec 额外支持 `:timeout-ms`（单步超时，超时按 `:error {:reason :step-timeout}` 处理）。
+
+并发语义须知：同一 step 的激活串行（专属 worker），不同 step 并行；共享
+context 写回时只合并**相对执行前快照有变化**的 key（last-writer-wins）；
+暂停是尽力而为的屏障（已在执行中的 step 会跑完）；V2 不提供
+`on-quiescent`——需要快照/时间旅行用 V1。
+
 ## Timeline / Snapshot（存档 + 时间旅行）
 
 `on-quiescent` 的快照可交给 Timeline 管理——版本链 / 时间旅行 / 分支实验 / 跨重启续跑：
@@ -88,14 +126,16 @@ SQLite store 走 EDN，context 须可序列化（`:kernel` 由 checkpointer 缺�
 | 命名空间 | 职责 |
 |---------|------|
 | `im.ttalk.agent.process.builder` | Builder API + build 时校验 |
-| `im.ttalk.agent.process.runtime` | 同步事件循环引擎（run-process / resume / resume-from-snapshot） |
+| `im.ttalk.agent.process.runtime` | V1 同步事件循环引擎（run-process / resume / resume-from-snapshot） |
+| `im.ttalk.agent.process.parallel` | V2 core.async 并行引擎（ProcessHandle / send-event / 超时） |
 | `im.ttalk.agent.process.event` | 事件创建与路由 |
 | `im.ttalk.agent.process.step` | step 状态与激活判定 |
 | `im.ttalk.agent.process.snapshot` | Process × Timeline 适配（checkpointer / 恢复 / 分支） |
 | `im.ttalk.agent.timeline` | 通用版本链 / 时间旅行 / 分支管理 |
 | `im.ttalk.agent.timeline.sqlite` | Timeline 的 SQLite store（按需加载） |
 
-依赖：`clj-agent-core`（ToolContext / kernel 原语）；next.jdbc + sqlite-jdbc（timeline.sqlite，按需）。
+依赖：`clj-agent-core`（ToolContext / kernel 原语）；core.async（process.parallel）；
+next.jdbc + sqlite-jdbc（timeline.sqlite，按需）。
 
 ## 测试
 

@@ -1,9 +1,11 @@
 # Process Framework 并行化设计
 
-> **状态：📐 V2 设计稿，待实施。** V1（纯函数式同步 runtime）已于 2026-07-10 落地
-> `modules/clj-agent-process/`；本文选定的方案 B（core.async 完全重写 runtime，
-> fan-out 真并行 + 外部事件 + ProcessHandle）尚未开始——届时 core.async 依赖
-> 只进 clj-agent-process 模块。event/step/builder 三个纯函数层 V2 直接复用。
+> **状态：✅ V2 已落地（2026-07-11）**——`process/parallel.clj`，方案 B（core.async），
+> 与 V1 并存（同一 spec 两个引擎都能跑，event/step/builder 纯函数层直接复用）。
+> core.async 依赖只进 clj-agent-process 模块。13 个行为测试
+> （`parallel_test.clj`）覆盖 fan-out 真并行证明 / 外部事件 / 单步与全局超时 /
+> stop / pause-resume / error-handler / max-events。实施与设计的偏差见文末
+> [实施笔记](#实施笔记2026-07-11)。
 
 ## V1 回顾
 
@@ -239,3 +241,34 @@ V1 采用纯函数式同步循环，event-queue 是普通 vector，`execute-acti
 ```
 
 外部事件通过 `external-chan` 注入，与内部事件统一路由到目标 step。
+
+---
+
+## 实施笔记（2026-07-11）
+
+落地 `im.ttalk.agent.process.parallel`（同模块新 ns，V1 不动）。与上文设计稿的偏差与决策：
+
+1. **API 收敛为单一 handle**：`start-process` 直接返回 ProcessHandle（不再区分
+   「返回 result channel 的 start-process」与 `start-process-async` 两个入口）；
+   终态结果放 handle 内的 promise-chan，`wait-for-completion` 可重复取。
+   `send-event!`（带超时的阻塞版）未做——`send-event` 走 `put!` + in-flight 预记账已足够。
+2. **完成判定**：单一 in-flight 计数（事件入队 inc、每个投递 inc、路由完 dec、
+   worker 处理完 dec），子项先 inc 后父项 dec，计数不会假归零；无需「event-chan
+   空 + idle 检测」。归零且 `:running` 且无暂停 step → `:completed`。
+3. **新增 `:auto-complete?`（缺省 true）**：设计稿没回答「等外部事件的常驻
+   process 会在事件流干时被误判完成」——置 false 后只能由 `:terminate` /
+   `stop-process` / 全局超时结束。
+4. **Context 合并比设计稿更保守**：不是整包 deep-merge，而是只合并**相对该 step
+   执行前快照有变化**的 key（否则并行 step 会用旧快照值覆盖别人的并发写入）；
+   key 删除不传播。messages/history 不特判——V2 的 context 是扁平 ToolContext。
+5. **暂停语义**：暂停是尽力而为的屏障——router 停止消费新事件，但已在执行中的
+   step 会跑完（结果照常落账）。多 step 可同时暂停（`pause-info` 查全量，
+   resume 三参形式指定 step-id）。同一 `:paused` 结果只能 resume 一次
+   （活运行时，区别于 V1 的纯数据快照可反复 resume）。
+6. **单步超时不强杀线程**：超时按 `:error {:reason :step-timeout}` 处理进入
+   error-handler/失败流程；on-activate 的线程后台跑完但返回值被丢弃——step 只
+   拿快照执行、所有共享状态写入都在 worker 侧 apply，超时后天然写不进任何状态。
+7. **不提供 on-quiescent**：并行执行没有确定性静止点，快照/Timeline 仍走 V1。
+   `run-process` 同步入口与 V1 同构（阻塞到终态或暂停），保险丝 `:max-events` 保留。
+8. **control-chan 只承担两件事**：暂停时唤醒 router（`:resume`）与终态关闭退出；
+   pause 信号不走 control-chan（worker 直接置 status atom，router 每轮循环检查）。
