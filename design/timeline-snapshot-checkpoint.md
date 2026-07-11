@@ -1,6 +1,11 @@
 # Timeline / Snapshot 设计方案
 
-> **状态：✅ 已实现（2026-07-10），落地位置与本文规划不同。**
+> **状态：🗑️ 已废弃（2026-07-11）**——随 clj-agent-process 模块整体删除
+> （Process 设计重新思考，见 docs/process-parallel-design.md 头部说明；
+> Timeline 唯一消费者是 process 快照，一并撤下）。代码见 git 历史
+> 7bc5d64..764285c。以下为落地时的原状态记录，留档：
+>
+> **（原）状态：✅ 已实现（2026-07-10），落地位置与本文规划不同。**
 > 实际落点：`modules/clj-agent-process/`（而非规划的 `clj-agent-memory` 模块）——
 > `im.ttalk.agent.timeline`（通用层：版本链/时间旅行/分支/血缘/prune，
 > TimelineStore 协议 + in-memory）、`im.ttalk.agent.timeline.sqlite`（EDN 持久化）、

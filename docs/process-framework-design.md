@@ -1,12 +1,11 @@
 # Process Framework 设计文档
 
-> **状态：🚧 V1 已实现（2026-07-10）；外部事件/异步部分属 V2 未实施。**
-> 落地位置：`modules/clj-agent-process/`（`im.ttalk.agent.process.{builder,runtime,event,step}`，
-> 与本文 V1 文件清单的旧路径规划不同）。V1 覆盖：三层架构、step 生命周期
-> （init/can-activate?/on-activate/on-resume/on-terminate）、线性/Fan-out/Fan-in/循环/
-> pause-resume/error-handler/on-quiescent/快照恢复/`:terminate` 信号；18 个测试钉住语义。
-> **本文「外部事件支持」「ProcessHandle」「start-process-async/send-event」章节为 V2 规划**
-> （依赖 core.async，见 process-parallel-design.md），当前未实现。
+> **状态：🗑️ 已废弃（2026-07-11，留档作 rethink 输入）**。V1（2026-07-10）与
+> V2（2026-07-11，core.async 并行，见 process-parallel-design.md）曾完整落地
+> `modules/clj-agent-process/` 并全绿，当天用户判定设计有结构性问题、整模块
+> 删除（含 Timeline/Snapshot），待重新思考。代码见 git 历史
+> （V1/Timeline baf1994..764285c，V2 63dc926..fa13f2b）。
+> 删除动因与业界对照见 process-parallel-design.md 头部说明。
 
 ## 核心概念对照
 

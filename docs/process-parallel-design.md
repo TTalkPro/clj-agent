@@ -1,11 +1,17 @@
 # Process Framework 并行化设计
 
-> **状态：✅ V2 已落地（2026-07-11）**——`process/parallel.clj`，方案 B（core.async），
-> 与 V1 并存（同一 spec 两个引擎都能跑，event/step/builder 纯函数层直接复用）。
-> core.async 依赖只进 clj-agent-process 模块。13 个行为测试
-> （`parallel_test.clj`）覆盖 fan-out 真并行证明 / 外部事件 / 单步与全局超时 /
-> stop / pause-resume / error-handler / max-events。实施与设计的偏差见文末
-> [实施笔记](#实施笔记2026-07-11)。
+> **状态：🗑️ 已废弃（2026-07-11，留档作 rethink 输入）**。方案 B（core.async）
+> 曾完整落地为 `process/parallel.clj`（13 个行为测试全绿，实施偏差见文末
+> [实施笔记](#实施笔记2026-07-11)），当天与整个 clj-agent-process 模块一并删除
+> ——用户判定 Process 设计有结构性问题，需重新思考。代码见 git 历史
+> （V1/Timeline 见 baf1994..764285c，V2 见 63dc926..fa13f2b）。
+>
+> **删除动因（rethink 的起点）**：V2 自由并发没有确定性静止点（快照/Timeline
+> 与并行不可兼得，被迫 V1/V2 两引擎分裂）。对照业界：MS Agent Framework 用
+> BSP superstep（批内并行 + 屏障处 checkpoint、快照含在途消息，即本文
+> **方案 C** 的路线）证明了"既要并行又要快照"的中间点；SK Dapr runtime 则
+> per-step actor 持久化、彻底放弃全局快照。重新设计时应先回答：编排要不要
+> 全局快照语义——要则 BSP，不要则 actor，而不是两个引擎各占一头。
 
 ## V1 回顾
 
