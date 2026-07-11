@@ -184,10 +184,17 @@
   on-quiescent 静止点快照 / 快照恢复（step-states+context+initial-events 续驱）/
   on-terminate 清理（异常互不影响）/ max-events 保险丝 / kernel 经 context 注入。
   18 tests / 67 assertions 钉住设计文档全部模式。
-- [ ] **Process Framework V2**（方案见 `docs/process-parallel-design.md`，选定 core.async）：
-  fan-out 真并行（router/worker go-loop + in-flight 计数）、外部事件
-  （ProcessHandle/send-event/wait-for-completion）、单步与全局超时。
-  core.async 依赖只进 process 模块；event/step/builder 层直接复用。
+- [x] **Process Framework V2**（2026-07-11，方案见 `docs/process-parallel-design.md`）：
+  新 ns `process/parallel.clj`（V1 不动，同一 spec 两引擎都能跑；event/step/builder
+  直接复用）。router/worker go-loop + 单一 in-flight 计数完成判定（子项先 inc
+  后父项 dec，不假归零）；ProcessHandle（start-process/send-event/get-status/
+  wait-for-completion/stop-process）+ 同步 run-process/resume 与 V1 同构；
+  单步 `:timeout-ms`（超时线程不强杀，结果天然写不进共享状态）+ 全局 :timeout-ms；
+  新增 `:auto-complete?`（外部事件驱动的常驻 process 不被误判完成）；context
+  写回只合并相对快照有变化的 key（并行不互相覆盖）。core.async 依赖只进
+  process 模块（+root 聚合）。13 tests / 49 assertions（含 fan-out 真并行的
+  互等证明）。全套 249/1020/0。V2 无 on-quiescent（无确定性静止点），
+  快照/Timeline 仍走 V1；实施偏差记录见设计文档实施笔记。
 - [x] **Timeline / Snapshot**（2026-07-10，方案见 `design/timeline-snapshot-checkpoint.md`）：
   落地 clj-agent-process 模块。通用层 `timeline`（版本链 save!/load-latest、
   时间旅行 goto!/go-back!/go-forward!（back/forward 不切分支保证对称性）、
