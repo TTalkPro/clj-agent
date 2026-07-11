@@ -32,11 +32,12 @@
       {:chat-fn (fn [messages opts] -> {:text \"...\" :tool-calls [...]})}
 
     返回值格式:
-      invoke-tool: {:value v :context ctx}
+      invoke-tool: {:value v (:writes {k v})}   ;; context 只读，写意图经 :writes
       invoke-chat: {:response r :context ctx}
       invoke:      {:response r :context ctx :tool-calls-made [...]}"
   (:require [im.ttalk.agent.advisor :as filters]
             [im.ttalk.agent.context :as ctx]
+            [im.ttalk.agent.model.error :as err]
             [im.ttalk.agent.tool :as tool]))
 
 (set! *warn-on-reflection* true)
@@ -57,10 +58,12 @@
   "构建 Kernel 实例
 
     参数 opts map:
-    - :service   LLM Service map（必需）
-    - :tools     tool var 向量（如 [#'get-weather]）
-    - :filters   filter 向量（如 [memory-filter logging-filter]），注册顺序即执行顺序
-    - :settings  额外设置（可选），如 {:max-tool-iterations 10}
+    - :service     LLM Service map（必需）
+    - :tools       tool var 向量（如 [#'get-weather]）
+    - :filters     filter 向量（如 [memory-filter logging-filter]），注册顺序即执行顺序
+    - :settings    额外设置（可选），如 {:max-tool-iterations 10}
+    - :state-slots 状态槽声明（可选）{k {:init v0 :reduce (fn [old new] merged)}}——
+                   工具批次 :writes 的合并语义（未声明的槽默认 last-writer）
 
     返回:
     Kernel record
@@ -70,7 +73,7 @@
                    :tools [#'get-weather #'get-time]
                    :filters [memory-filter retry-filter]
                    :settings {:max-tool-iterations 10}})"
-  [{:keys [service tools tool-vars filters settings]
+  [{:keys [service tools tool-vars filters settings state-slots]
     :or {tools [] filters [] settings {}}}]
   (let [all-tools (vec (or tool-vars tools))
         ;; 内联工具：map 且含 :handler fn（由 delegate-tool 等动态构建）
@@ -91,7 +94,8 @@
               (into compiled-var-tools compiled-inline-tools)
               var-map
               inline-handler-map
-              settings)))
+              (cond-> settings
+                state-slots (assoc :state-slots state-slots)))))
 
 ;;; ============================================================
 ;;; Query API
@@ -119,6 +123,33 @@
   [kernel]
   (keys (:tool-vars kernel)))
 
+(defn serial-tool?
+  "工具是否声明 :serial（副作用工具；批内并行时整批退化为按序执行）。
+   var 工具查 :tool/serial 元数据；内联工具查 schema 的 :serial 键。"
+  [kernel fn-name]
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
+    (if-let [v (get (:tool-vars kernel) fn-key)]
+      (tool/serial-tool? v)
+      (boolean (some #(when (= fn-key (keyword (:name %))) (:serial %))
+                     (:tools kernel))))))
+
+(def ^:private default-retry-policy
+  {:max-retries 2 :initial-delay-ms 200})
+
+(defn retry-policy
+  "工具的 :retry 声明（归一化）。仅 :transient 类错误按此策略重试；
+   声明即承诺幂等（重试会重跑整条 tool filter 链）。
+
+   返回: nil（未声明，不重试）| {:max-retries n :initial-delay-ms ms}"
+  [kernel fn-name]
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))
+        spec (if-let [v (get (:tool-vars kernel) fn-key)]
+               (tool/retry-spec v)
+               (:retry (some #(when (= fn-key (keyword (:name %))) %)
+                             (:tools kernel))))]
+    (when spec
+      (merge default-retry-policy (when (map? spec) spec)))))
+
 ;;; ============================================================
 ;;; Invoke API - invoke-tool（函数调用，经过 Filter 管道）
 ;;; ============================================================
@@ -137,20 +168,24 @@
   "调用 Kernel 中注册的函数（经 tool filter 洋葱链）
 
     组装 ToolRequest {:function :args :context} → build-chain(:tool filters) 包裹
-    → terminal 执行函数。filter 可改写 args/context、短路(不调 chain，如审批拒绝/熔断/
-    限流/安全策略)、around(超时计时)。
+    → terminal 执行函数。filter 可改写 args、短路(不调 chain，如审批拒绝/熔断/
+    限流/安全策略)、around(超时计时)。**:context 是请求侧只读字段**：filter 与
+    工具都不改写它；工具的写意图经返回值 :writes 声明，由批次屏障处的
+    reducer 折叠（见 context/apply-writes）。
 
     参数:
     - kernel:  Kernel 实例
     - fn-name: 函数名（关键字或字符串）
     - args:    参数 map
-    - context: Context 对象
+    - context: Context 对象（只读快照）
 
     返回:
-    {:value result :context updated-ctx}
+    {:value result (:writes {k v}) (:error {:class :message})}
 
     错误:
-    抛 ex-info（仅函数未找到；执行异常被 terminal 捕获为错误结果字符串）"
+    抛 ex-info（仅函数未找到；执行异常被 terminal 捕获为错误结果字符串 +
+    :error 分类信息 {:class :semantic|:transient|:environment}，供屏障路由；
+    失败调用无 :writes——写意图不生效）"
   [kernel fn-name args context]
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
     (if-let [inline-handler (get (:inline-handlers kernel) fn-key)]
@@ -159,19 +194,22 @@
             terminal (fn [req]
                        (try
                          (let [raw (inline-handler (:args req) (:context req))
-                               [res ctx] (if (and (map? raw) (contains? raw :result))
-                                           [(:result raw) (or (:context raw) (:context req))]
-                                           [raw (:context req)])]
-                           {:result (if (string? res) res (pr-str res)) :context ctx})
+                               [res writes] (if (and (map? raw) (contains? raw :writes))
+                                              [(:result raw) (:writes raw)]
+                                              [raw nil])]
+                           (cond-> {:result (if (string? res) res (pr-str res))}
+                             (seq writes) (assoc :writes writes)))
                          (catch Exception e
-                           {:result (str "错误: " (or (not-empty (.getMessage e))
-                                                       (.getName (class e))))
-                            :context (:context req)})))
+                           (let [m (or (not-empty (.getMessage e)) (.getName (class e)))]
+                             {:result (str "错误: " m)
+                              :error  {:class (err/classify-exception e) :message m}}))))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
             out   (chain {:function func-def :args args :context context})]
-        {:value (:result out) :context (:context out)})
+        (cond-> {:value (:result out)}
+          (:writes out) (assoc :writes (:writes out))
+          (:error out)  (assoc :error (:error out))))
 
-      ;; 普通 var 工具（原有逻辑）
+      ;; 普通 var 工具
       (let [found (find-function kernel fn-key)
             _ (when-not found
                 (throw (ex-info (str "函数未找到: " fn-key)
@@ -184,14 +222,19 @@
                                        (catch Exception e
                                          {:success false
                                           :error (or (not-empty (.getMessage e))
-                                                     (.getName (class e)))}))
-                             value (if (:success exec)
-                                     (:result exec)
-                                     (str "错误: " (:error exec)))]
-                         {:result value :context (or (:context exec) (:context req))}))
+                                                     (.getName (class e)))
+                                          :error-class (err/classify-exception e)}))]
+                         (if (:success exec)
+                           (cond-> {:result (:result exec)}
+                             (:writes exec) (assoc :writes (:writes exec)))
+                           {:result (str "错误: " (:error exec))
+                            :error  {:class (or (:error-class exec) :semantic)
+                                     :message (:error exec)}})))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
             out   (chain {:function func-def :args args :context context})]
-        {:value (:result out) :context (:context out)}))))
+        (cond-> {:value (:result out)}
+          (:writes out) (assoc :writes (:writes out))
+          (:error out)  (assoc :error (:error out)))))))
 
 ;;; ============================================================
 ;;; Invoke API - invoke-chat（纯 LLM 调用，带 chat filter）

@@ -8,7 +8,14 @@
    参数声明使用向量格式: [名称 类型 描述]
    支持可选参数: [名称 类型 描述 :default 默认值]
    支持敏感标记: {:sensitive true}
-   支持 context: {:context true}
+   支持只读 context: {:context true}
+   支持串行标记: {:serial true}（副作用工具，批内并行时整批退化为按序执行）
+
+   状态读写（Tool 阶段 MapReduce 契约，见 docs/agent-loop-concurrency-design.md §9）：
+   - 读：{:context true} 工具收到只读的轮初 context 快照（ctx 变量自动绑定）
+   - 写：任意工具（无论是否声明 :context）返回 {:result r :writes {k v}}
+     声明写意图；批次屏障处按 tool-call 原始序经槽级 reducer 折叠进 context。
+     同批工具互相看不到对方的写（快照隔离）；失败/超时/拒绝的调用 writes 不生效。
 
    使用示例:
 
@@ -39,15 +46,15 @@
      {:tags [:weather :external-api :read-only]}
      (fetch-weather city))
 
-   ;; 需要 context 的工具
+   ;; 读 context（只读快照）+ 写状态（:writes 声明写意图）
    (deftool save-note
      \"保存笔记\"
      [[content :string \"内容\"]]
      {:context true}
-     ;; ctx 是自动绑定的 context 变量
-     (let [notes (context/get-var ctx :notes [])]
-       {:result (str \"已保存\")
-        :context (context/set-var ctx :notes (conj notes content))}))
+     ;; ctx 是自动绑定的只读 context 变量
+     (let [user (context/get-var ctx :user-id)]
+       {:result (str \"已保存（\" user \"）\")
+        :writes {:notes content}}))   ;; 槽 :notes 的 reducer 决定如何合并
 
    ;; 无参数函数
    (deftool get-time
@@ -55,7 +62,8 @@
      []
      (str (java.time.LocalDateTime/now)))"
   (:require [clojure.set]
-            [clojure.string]))
+            [clojure.string]
+            [im.ttalk.agent.model.error :as err]))
 
 (set! *warn-on-reflection* true)
 
@@ -180,16 +188,17 @@
    (deftool 函数名
      \"描述\"
      [[参数1 :类型 \"描述\"]]
-     {:context true}        ; 需要 context
-     ;; ctx 变量自动可用
-     {:result \"...\" :context (set-var ctx :key val)})
+     {:context true}        ; 需要只读 context
+     ;; ctx 变量自动可用（只读快照）；写状态用 :writes
+     {:result \"...\" :writes {:key val}})
 
    生成的 var 元数据:
    - :tool/schema    Anthropic 格式 tool schema
    - :tool/params    参数定义列表
    - :tool/sensitive 是否为敏感工具
+   - :tool/serial    是否串行工具（批内并行时整批退化）
    - :tool/category  工具分类
-   - :tool/context   是否需要 context
+   - :tool/context   是否需要（只读）context
    - :tool/tags      标签集合（用于过滤）
    - :tool/function  标记为 tool function"
   {:arglists '([name description params & body]
@@ -197,7 +206,7 @@
   [fn-name description params & body]
   (let [;; 分离选项 map 和函数体
         [opts body] (if (and (map? (first body))
-                             (some #{:sensitive :timeout :category :context :tags}
+                             (some #{:sensitive :timeout :category :context :tags :serial :retry}
                                    (keys (first body))))
                       [(first body) (rest body)]
                       [{} body])
@@ -228,6 +237,8 @@
            {:tool/schema    ~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
+            :tool/serial    ~(boolean (:serial opts))
+            :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   true
             :tool/tags      ~tags-set
@@ -239,6 +250,8 @@
            {:tool/schema    ~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
+            :tool/serial    ~(boolean (:serial opts))
+            :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   true
             :tool/tags      ~tags-set
@@ -252,6 +265,8 @@
            {:tool/schema    ~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
+            :tool/serial    ~(boolean (:serial opts))
+            :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   false
             :tool/tags      ~tags-set
@@ -263,6 +278,8 @@
            {:tool/schema    ~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
+            :tool/serial    ~(boolean (:serial opts))
+            :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   false
             :tool/tags      ~tags-set
@@ -295,7 +312,7 @@
   (:tool/schema (meta v)))
 
 (defn context-tool?
-  "检查 tool function 是否需要 context
+  "检查 tool function 是否需要（只读）context
 
    参数:
    - v: var 引用
@@ -303,6 +320,24 @@
    返回: boolean"
   [v]
   (boolean (:tool/context (meta v))))
+
+(defn serial-tool?
+  "检查 tool function 是否声明 :serial（副作用工具；
+   批内并行时含 serial 工具的整批退化为按序执行）
+
+   参数:
+   - v: var 引用
+
+   返回: boolean"
+  [v]
+  (boolean (:tool/serial (meta v))))
+
+(defn retry-spec
+  "读取 tool function 的 :retry 声明（deftool 选项，幂等工具 opt-in）。
+
+   返回: nil（未声明）| true | {:max-retries n :initial-delay-ms ms}"
+  [v]
+  (:tool/retry (meta v)))
 
 (defn get-tags
   "获取 tool function 的标签集合
@@ -357,11 +392,12 @@
    参数:
    - v:       tool function 的 var 引用
    - args:    参数 map
-   - context: (可选) Context 对象
+   - context: (可选) Context 对象（{:context true} 工具的只读快照）
 
    返回:
-   {:success bool :result any :error string :context ctx}
-   如果 tool 返回包含 :context 的 map，:context 会被提取到结果中。"
+   {:success bool :result any :error string (:writes {k v})}
+   工具返回含 :writes 的 map（{:result r :writes {k v}}）时拆出写意图，
+   由批次屏障处的 reducer 折叠进共享 context（工具本身不改 context）。"
   ([v args]
    (invoke v args nil))
   ([v args context]
@@ -376,18 +412,19 @@
                raw-result (if needs-ctx?
                             (f (or args {}) context)
                             (f (or args {})))
-               ;; context-aware tool 可能返回 {:result ... :context ...}
-               [result new-context] (if (and needs-ctx?
-                                             (map? raw-result)
-                                             (contains? raw-result :result))
-                                      [(:result raw-result) (:context raw-result)]
-                                      [raw-result context])]
+               ;; 任意工具可返回 {:result r :writes {k v}} 声明写意图（判据：含 :writes）
+               [result writes] (if (and (map? raw-result)
+                                        (contains? raw-result :writes))
+                                 [(:result raw-result) (:writes raw-result)]
+                                 [raw-result nil])]
            (cond-> {:success true
                     :result (if (string? result) result (pr-str result))}
-             new-context (assoc :context new-context)))
+             (seq writes) (assoc :writes writes)))
          (catch Exception e
            {:success false
             ;; NPE 等异常 getMessage 为 nil，直接用会喂给 LLM 空错误 "错误: "；
             ;; 回退异常类名，保证错误可读。
             :error (or (not-empty (.getMessage e))
-                       (.getName (class e)))}))))))
+                       (.getName (class e)))
+            ;; 故障类别（S2 屏障路由）：:semantic | :transient | :environment
+            :error-class (err/classify-exception e)}))))))

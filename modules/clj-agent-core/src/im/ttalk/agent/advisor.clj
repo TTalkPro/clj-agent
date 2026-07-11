@@ -98,9 +98,13 @@
                  r (deref f timeout-ms ::timeout)]
              (if (= r ::timeout)
                (do
-                 ;; 取消并尝试中断后台线程，释放资源
+                 ;; 取消并尝试中断后台线程，释放资源。
+                 ;; 超时结果不带 :writes——被超时调用的写意图不生效（事务性）。
+                 ;; 分类 :transient：声明了 :retry 的幂等工具可自动重试。
                  (future-cancel f)
-                 {:result (str "工具调用超时（" timeout-ms "ms）") :context (:context req)})
+                 {:result (str "工具调用超时（" timeout-ms "ms）")
+                  :error  {:class :transient
+                           :message (str "timeout " timeout-ms "ms")}})
                r)))})
 
 ;;; ============================================================
@@ -127,5 +131,5 @@
               (if (get-in req [:function :sensitive])
                 (if (approve (get-in req [:function :name]) (:args req))
                   (chain req)
-                  {:result "用户拒绝了此敏感工具调用" :context (:context req)})
+                  {:result "用户拒绝了此敏感工具调用"})
                 (chain req)))})))

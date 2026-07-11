@@ -162,19 +162,19 @@
   ((flt/build-chain [(:tool filter-map)] terminal) req))
 
 (deftest timeout-filter-test
-  (testing "下游超时 → 返回超时结果（不抛异常），context 保留"
-    (let [slow (fn [_req] (Thread/sleep 60000) {:result "never" :context :c})
+  (testing "下游超时 → 返回超时结果（不抛异常），且不带 :writes（写意图不生效）"
+    (let [slow (fn [_req] (Thread/sleep 60000) {:result "never" :writes {:x 1}})
           resp (run-tool-chain (flt/timeout-filter 100) slow
                                {:function {:name :slow} :args {} :context {:k 1}})]
       (is (clojure.string/includes? (:result resp) "超时"))
-      (is (= {:k 1} (:context resp)))))
+      (is (nil? (:writes resp)))))
 
-  (testing "下游按时完成 → 原样透传"
-    (let [fast (fn [req] {:result "ok" :context (:context req)})
+  (testing "下游按时完成 → 原样透传（含 :writes）"
+    (let [fast (fn [_req] {:result "ok" :writes {:x 1}})
           resp (run-tool-chain (flt/timeout-filter 5000) fast
                                {:function {:name :fast} :args {} :context :ctx})]
       (is (= "ok" (:result resp)))
-      (is (= :ctx (:context resp)))))
+      (is (= {:x 1} (:writes resp)))))
 
   (testing "超时后后台任务被中断（future-cancel 生效）"
     (let [interrupted? (promise)
@@ -204,7 +204,6 @@
                                {:function {:name :rm-rf :sensitive true}
                                 :args {} :context :ctx})]
       (is (clojure.string/includes? (:result resp) "拒绝"))
-      (is (= :ctx (:context resp)))
       (is (false? @called) "下游不应被调用")))
 
   (testing "非敏感工具 → 不问审批直接放行"

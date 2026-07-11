@@ -93,7 +93,7 @@
                                       :prompt          prompt
                                       :result-fn       result-fn
                                       :owner           (get ctx :conversation-id)}]
-                      {:result (run-sync spec timeout)}))}))
+                      (run-sync spec timeout)))}))
 
 (defn fanout-tool
   "构建并发 fan-out 委派工具。
@@ -121,7 +121,7 @@
                           seed       (seed-fn args ctx)
                           owner      (get ctx :conversation-id)]
                       (if (empty? tasks)
-                        {:result "错误：tasks 不能为空"}
+                        "错误：tasks 不能为空"
                         (let [;; 并发 spawn 所有子 agent
                               spawn-ids (mapv (fn [task]
                                                (let [spec {:subagent-config (subagent-fn (assoc args :task task) ctx)
@@ -142,7 +142,7 @@
                               entries   (mapv (fn [task outcome]
                                                (str "任务: " task "\n结果: " (safe-result-str outcome)))
                                              tasks outcomes)]
-                          {:result (clojure.string/join "\n\n---\n\n" entries)}))))}))
+                          (clojure.string/join "\n\n---\n\n" entries)))))}))
 
 (defn management-tools
   "返回一组异步管理工具（5 个内联工具 map），让 LLM 跨轮自主管理子 agent。
@@ -171,18 +171,18 @@
                              :result-fn       result-fn
                              :owner           (get ctx :conversation-id)}
                        spawn-id (:ok (mgr/spawn! spec))]
-                   {:result (str "子 Agent 已启动，id: " spawn-id)}))}
+                   (str "子 Agent 已启动，id: " spawn-id)))}
 
      {:name        "list_subagents"
       :description "列出本会话所有子 Agent 及其状态（running/done/failed/killed）。"
       :input_schema {:type "object" :properties {} :required []}
       :handler (fn [_args ctx]
                  (let [agents (mgr/list-agents (get ctx :conversation-id))]
-                   {:result (if (empty? agents)
-                              "无子 Agent"
-                              (->> agents
-                                   (mapv #(str "id: " (:id %) "  状态: " (name (:status %))))
-                                   (clojure.string/join "\n")))}))}
+                   (if (empty? agents)
+                     "无子 Agent"
+                     (->> agents
+                          (mapv #(str "id: " (:id %) "  状态: " (name (:status %))))
+                          (clojure.string/join "\n")))))}
 
      {:name        "subagent_result"
       :description "查询子 Agent 的结果（运行中返回 not_ready，完成返回结果）。"
@@ -192,11 +192,11 @@
       :handler (fn [args _ctx]
                  (let [qid (get-arg args :id)
                        ret (mgr/result qid)]
-                   {:result (cond
-                              (:ok ret)                         (str "结果: " (safe-result-str (:ok ret)))
-                              (= (:error ret) :not-ready)       "运行中，尚未完成"
-                              (= (:error ret) :not-found)       "未找到该子 Agent"
-                              :else                             (str "查询失败: " (pr-str ret)))}))}
+                   (cond
+                     (:ok ret)                   (str "结果: " (safe-result-str (:ok ret)))
+                     (= (:error ret) :not-ready) "运行中，尚未完成"
+                     (= (:error ret) :not-found) "未找到该子 Agent"
+                     :else                       (str "查询失败: " (pr-str ret)))))}
 
      {:name        "kill_subagent"
       :description "Kill 正在运行的子 Agent。"
@@ -205,7 +205,7 @@
                      :required   ["id"]}
       :handler (fn [args _ctx]
                  (mgr/kill! (get-arg args :id))
-                 {:result "已 Kill"})}
+                 "已 Kill")}
 
      {:name        "restart_subagent"
       :description "用原始 spec 重启子 Agent（同 id，状态回 running）。"
@@ -214,6 +214,6 @@
                      :required   ["id"]}
       :handler (fn [args _ctx]
                  (let [ret (mgr/restart! (get-arg args :id))]
-                   {:result (if (:ok ret)
-                              (str "已重启，id: " (:ok ret))
-                              (str "重启失败: " (pr-str ret)))}))}]))
+                   (if (:ok ret)
+                     (str "已重启，id: " (:ok ret))
+                     (str "重启失败: " (pr-str ret)))))}]))

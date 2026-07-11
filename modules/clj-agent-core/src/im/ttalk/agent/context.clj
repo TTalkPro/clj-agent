@@ -54,6 +54,41 @@
   (merge ctx vars-map))
 
 ;;; ============================================================
+;;; 批次写合并（Tool 阶段 MapReduce 的 reduce 半步）
+;;; ============================================================
+
+(defn apply-writes
+  "把一批工具的写意图按序折叠进 ctx（纯函数）。
+
+   参数:
+   - ctx:        轮初 context（工具执行时拿到的同一份快照）
+   - writes-seq: [{k v ...} ...] 每个元素是一个工具返回的 :writes map；
+                 序列顺序必须是 tool-call 原始序（合并确定性的来源）
+   - slots:      槽位声明 {k {:init v0 :reduce (fn [old new] merged)}}；
+                 未声明的槽默认 last-writer（后写覆盖，按序确定）
+
+   返回 {:context 新ctx :conflicts #{k ...}}
+   conflicts = 同批被写 ≥2 次且未声明 reducer 的 key（调用方决定是否告警）。"
+  [ctx writes-seq slots]
+  (let [write-counts (frequencies (mapcat keys writes-seq))
+        conflicts (into #{}
+                        (keep (fn [[k n]]
+                                (when (and (> n 1) (nil? (get-in slots [k :reduce])))
+                                  k)))
+                        write-counts)
+        new-ctx (reduce
+                  (fn [c writes]
+                    (reduce-kv
+                      (fn [c k v]
+                        (if-let [rf (get-in slots [k :reduce])]
+                          (assoc c k (rf (get c k (get-in slots [k :init])) v))
+                          (assoc c k v)))
+                      c writes))
+                  ctx
+                  writes-seq)]
+    {:context new-ctx :conflicts conflicts}))
+
+;;; ============================================================
 ;;; 会话 ID
 ;;; ============================================================
 
