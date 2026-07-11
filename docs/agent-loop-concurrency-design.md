@@ -466,3 +466,119 @@ context——**暂停前各轮累积的 state slot（S1 writes 折叠结果）�
 loop-state EDN 往返（审批 + :env-retry 两 phase）；PauseStore 双实现
 存/取/覆盖/清；跨"重启"端到端（新 agent 实例 + 共享 stores）：审批恢复、
 env-retry 修复后 retry；context 累积恢复回归；暂停态下开新 chat 清快照。
+
+---
+
+## 12. Timeline 与多分支（✅ 已实施，2026-07-11，全套 230/971/0）
+
+来源：process framework 删除后，Timeline 能力在"单 Agent 优先"定调下的转世。
+与旧 Timeline（黑盒快照版本链）的根本差异：**对象变了**——不再给运行时状态
+拍快照，而是直接把对话日志当 timeline。
+
+### 12.1 前提判定：Agent 的持久状态 = 对话历史（唯一真相）
+
+- 对话历史：ChatMemory 中 append-only 日志——**唯一持久状态**；
+- context 状态槽：**turn 级**草稿（用户拍板确认）。每次 chat 从裸 context
+  起步，turn 内跨轮累积（S1），暂停恢复是唯一跨越点（HITL 持久化已修）；
+- 暂停态：PauseStore，至多一份，resume 即消费。
+
+由此旧 timeline 的"快照版本链 + 独立 store"整套机制不再需要——日志本身
+就是版本序列，也避免了"历史与快照两处真相要同步"的旧痛点。
+
+### 12.2 一致性不变量（并发工具失败的封口）
+
+> **合法的 fork/rollback 点只有两种：turn 边界、暂停点。**
+> turn 进行中（批次执行到一半）不是合法分支点——屏障才是一致快照点。
+
+三种失败场景在该不变量下的走查：
+
+1. **批内语义失败**：collect-all 下成功结果 + 错误串全部进历史，失败工具
+   writes 被丢弃（S1 事务性）。turn 边界处历史完整、slots 已死——fork 后
+   分支与主线看到同一份历史，无不一致；
+2. **事务性保证"历史与状态同真同假"**：不存在"历史记成功但 writes 缺失"
+   或"writes 残留但历史记失败"的组合；
+3. **环境暂停（唯一 mid-turn 逃逸点）**：批次结果在暂停快照的
+   :batch-messages 里、尚未进历史，历史尾部有悬空 tool_use。约束：
+   **fork 暂停中的会话必须一并复制 PauseStore 快照**（fork! 自动做）；
+   不带快照硬 fork 后直接 chat 由 heal-dangling 兜底（"已取消"配平）。
+
+### 12.3 分支模型：fork-as-new-conversation（用户拍板）
+
+分支 = 前缀复制到新 conversation-id + 一条血缘记录：
+
+- `fork!` 用现有 ChatMemory 协议即可实现（mem-get 前缀 + mem-add 新 id），
+  SQLite/in-memory 实现零改动；
+- **所有既有组件自动兼容**：memory advisor / PauseStore / react 循环全部
+  按 conversation-id 工作，换分支 = 换 conv-id 建 agent，无组件感知"树"；
+- 血缘存 LineageStore（工程学同 PauseStore：协议 + in-memory + SQLite EDN）；
+- 对比树形 store（消息带 parent 指针）：表达力相同但要改 ChatMemory 契约；
+  本框架量级下前缀复制成本可忽略，简单性胜。
+
+操作集（对照旧 timeline，词汇减半）：
+
+| 操作 | 语义 |
+|------|------|
+| `fork!` | 前缀复制 + 血缘记录；全量 fork 且源处于暂停时**连带复制暂停快照**（部分前缀 fork 不带——暂停属于日志尖端） |
+| `rollback!` | 破坏性截断到前 n 条（"重新生成"用；clear+重写实现，无需协议扩展）；清除该会话暂停快照（尖端已变，未决暂停失效） |
+| `lineage` / `ancestry` | 查血缘记录 / 沿 parent 回溯到根 |
+| `prune!` | 删分支（历史 + 暂停快照 + 血缘）；有子分支时拒绝 |
+| ~~switch/goto/back/forward~~ | 不需要——没有"当前位置"这个可变状态，换分支就是换 conv-id |
+
+白送的两个场景：**HITL 决策分支**（暂停点 fork 两支，分别 resume
+approved/rejected 对比后果——旧 V1"同一暂停快照多次 resume"以更干净的
+形式回归）；**编辑重试**（fork at 消息 i + 替换 user 消息 + chat =
+ChatGPT 式 regenerate 分支）。
+
+### 12.4 writes 进历史（event-sourcing 伏笔，用户拍板：记）
+
+tool-result 中立消息新增可选 `:writes` 元数据（该工具对状态槽的写意图）：
+
+- **只进存储不进 LLM**：wire 层（openai/anthropic）显式构造 wire 消息，
+  多余 key 天然剥落（有测试钉住）；
+- 立即价值：审计——历史从"工具说了什么"升级为"+ 改了什么"；
+- 升级路径：将来若 slots 要跨 turn（session 状态），context 可定义为
+  fold(当前 reducers, 历史 writes)——历史仍唯一真相、时间旅行=截断重折。
+  现在不埋，旧会话的 writes 永久丢失、该路径即断；
+- v1 零消费（slots 维持 turn 级），纯伏笔。失败/超时/被拒的调用本就无
+  writes，历史中自然缺席（与 12.2 的同真同假一致）。
+
+### 12.5 实施轮廓
+
+- `model.message/tool-result` 4-arity 带 writes；execute-batch 落消息时附带；
+- 新 ns `im.ttalk.agent.timeline`（client 模块）：LineageStore 协议 +
+  in-memory/SQLite + fork!/rollback!/lineage/ancestry/prune!，deps 显式传入
+  `{:memory mem :pause-store ps :lineage ls}`（后两者可选）；
+- 测试：writes 落历史（错误工具无 writes）/ wire 剥除 / fork 前缀与血缘 /
+  暂停 fork 带快照 + 双分支各自 resume 不同决策 / rollback 截断清暂停 /
+  prune 拒绝有子 / ancestry。
+
+---
+
+## 13. resume 带 payload（✅ 已实施，2026-07-11，全套 236/998/0）
+
+来源：HITL 讨论——resume 此前只接受决策枚举，"用户答复是一段话"表达不了
+（旧 process 的 on-resume data 有此能力，删除后未补齐）。
+
+### 13.1 三种 payload（审批 phase）
+
+```clojure
+(resume agent "rejected" {:message "订单有未结算金额，先退款"})
+;;  → 结果「已拒绝执行：<理由>」——模型直接拿到原因，省一轮干猜
+(resume agent "approved" {:args {:id 42 :mode :soft-delete}})
+;;  → pending 工具以替换后的参数执行（Claude Code 式"编辑后批准"）
+(resume agent "reply" {:message "用户选择了 B 方案"})
+;;  → 工具不执行，答复直接作为其结果回模型（ask-user 语义）
+```
+
+### 13.2 实现要点
+
+- **决策词汇扩展**（execute-batch gate 契约）：`:proceed | :reject |
+  {:reject 理由} | {:reply 结果}`——gate 与 resume 共用同一词汇，
+  reply/reject 均不执行工具、不触发 on-tool-result、无 :writes；
+- loop-state 新增 `:pending-id`（暂停工具的 tool-call id），payload 的
+  :args 替换与 :reply 定位靠它；旧版暂停快照无此字段时 :reply 显式抛错；
+- **ask-user 模式解锁**：定义一个 body 永不执行的提问工具 + gate 拦截暂停，
+  `resume "reply"` 把用户答案送回——模型侧看到一次普通的工具往返；
+- 环境类暂停（:env-retry）不支持 :reply（显式拒收）；payload 与持久化
+  正交（resume 时才提供，快照无需任何改动，跨重启同样可用）；
+- 破坏面：零（3-arity 纯增量；on-resume 回调 meta 增加 :decision/:payload）。
