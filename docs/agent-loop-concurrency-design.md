@@ -421,3 +421,48 @@ timeout-filter 的超时结果也标 `:transient`（超时正是重试有意义�
 
 无。全部为增量：`:errors` 返回键、`:error` 响应键、`:retry`/`:on-env-error`
 选项、resume 新 phase（旧审批 phase 行为不变）。
+
+---
+
+## 11. HITL 持久化（✅ 已实施，2026-07-11，全套 223/932/0）
+
+来源：S3 讨论中的范围决策——只考虑单 Agent，多 Agent 编排是外层决策另议；
+先把 HITL 做扎实。HITL 持久化从编排层需求中拆出（它不需要 BSP/actor 决策）：
+S2 的 loop-state 本就是纯 EDN 数据，kernel/gate/callbacks 本就是 resume 时
+重新提供的。
+
+### 11.1 设计
+
+- **暂停快照**（纯数据，`:version 1`）：`conversation-id / paused-at /
+  pause-reason / pending-tool / loop-state / tool-context`。不存 kernel/
+  tools/callbacks/gate/system-prompt（代码侧重建）、不存对话历史
+  （ChatMemory 已管，跨重启配 SQLite store）。tool-context 存档前逐 key
+  校验 EDN 往返，不可序列化的（如 :kernel）剥离并 warn。
+- **PauseStore 协议**（`im.ttalk.agent.pause`，client 模块）：
+  `pause-save!/pause-load/pause-clear!`，每 conversation-id 至多一份
+  （再次暂停覆盖）。in-memory + SQLite（EDN 一列，locking 串行化，
+  工程学同 memory.sqlite；可与 ChatMemory 同库不同表）。
+- **Agent 集成（opt-in 全自动）**：`create-agent :pause-store`；暂停时
+  finalize 自动落库；任何终态（completed/error/cancelled）、`reset!`、
+  暂停态下开新 chat 均自动清除（store 始终镜像"是否有未决暂停"）；
+  `paused?`/`resume` 在 state-atom 无暂停态时**透明回落 store**——
+  跨重启的新 agent 实例 API 不变。
+- **明确出界**：批次执行中途的进程崩溃恢复（durable execution）不做，
+  只保证「暂停点」这个一致快照可跨进程存活。
+
+### 11.2 顺带修复的缺口
+
+`client/resume` 此前用裸 `(tctx agent)`（仅 conversation-id）作 resume
+context——**暂停前各轮累积的 state slot（S1 writes 折叠结果）被静默丢弃**
+（S1 之前 context 无内容故无感）。现 resume context 恢复自暂停态的
+`:tool-context`（本进程与跨重启两条路径同修），有回归测试钉住
+（暂停前 note-writer 的写，恢复后 note-reader 读得到）。
+
+另：`create-agent`/`common/build-kernel` 补透传 `:state-slots`
+（S1 的槽声明此前只能经预构建 kernel 传入）。
+
+### 11.3 测试
+
+loop-state EDN 往返（审批 + :env-retry 两 phase）；PauseStore 双实现
+存/取/覆盖/清；跨"重启"端到端（新 agent 实例 + 共享 stores）：审批恢复、
+env-retry 修复后 retry；context 累积恢复回归；暂停态下开新 chat 清快照。
