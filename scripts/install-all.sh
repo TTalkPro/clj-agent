@@ -9,7 +9,6 @@ echo "=========================================="
 MODULES=(
   "clj-agent-core"
   "clj-agent-client"
-  "clj-agent-process"
   "clj-agent-provider"
 )
 
