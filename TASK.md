@@ -188,11 +188,24 @@
   - 三份设计文档（`docs/process-framework-design.md`、
     `docs/process-parallel-design.md`、`design/timeline-snapshot-checkpoint.md`）
     保留并标注已废弃，作为 rethink 的输入。
-- [ ] **Process 能力 rethink**（待启动）：重新回答「编排该不该做、以什么形态做」。
-  已知输入：V1（确定性/快照）与 V2（自由并发）的语义撕裂；BSP superstep
-  （= 原设计文档方案 C，MS Agent Framework 已验证：批内并行 + 屏障处 checkpoint
-  且快照含在途消息）是"既要并行又要快照"的已验证中间点；SK Dapr actor 路线
-  （per-step 持久化、放弃全局快照）对标 beamai。
+- [ ] **Agent 并发模型 rethink**（讨论已定稿 → `docs/agent-loop-concurrency-design.md`，
+  2026-07-11）：核心结论——Agent loop 的并发只在 Tool 阶段（子 agent 也是工具）；
+  Tool 阶段自带零成本屏障，建模为 MapReduce（map on snapshot + writes 数据化 +
+  按原序纯折叠），竞态被执行模型消灭而非管理；合并语义用槽级 reducer；工具失败
+  按语义/瞬态/环境/策略四类分层路由。实施台阶：
+  1. [x] **execute-batch MapReduce 化（S1，2026-07-11 完成）**：同轮 tool-call
+     虚拟线程并行（`:serial` 整批退化）；ToolContext 只读 + `:writes` 声明写
+     + `:state-slots` 槽级 reducer 屏障折叠（`context/apply-writes`）；
+     tool filter 响应收窄 `{:result (:writes)}`；delegate 8 处返回值随迁。
+     破坏面见 CHANGELOG 0.3.0。新增 9 个语义测试，全套 213/870/0。
+  2. [x] **屏障策略钩子（S2，2026-07-11 完成）**：`classify-exception` 分类通道
+     （显式 :error-class > canonical retryable?/auth > 网络异常 > :semantic）；
+     `deftool {:retry ...}` 瞬态类指数退避重试（幂等 opt-in，timeout-filter 超时
+     也标 :transient）；环境类失败屏障处暂停（`:on-env-error :pause`，loop-state
+     :phase :env-retry），resume :retry 重跑失败调用并按 tool-call-id 替换消息 /
+     :proceed 交给模型；client HITL agent 自动 :pause、其余 :proceed。零破坏面
+     （纯增量）。新增 5 测试组，全套 217/898/0。设计记录见文档 §10。
+  3. [ ] 编排层是否立项另议（先答"要不要全局快照语义"：BSP 或 actor，不做双引擎）。
 
 ### 📋 历史账本
 

@@ -282,10 +282,23 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
    [param2 :int "可选参数" :default 10]
    [param3 :boolean "布尔参数"]]
   {:sensitive true    ;; 可选：标记为敏感操作（SimpleAgent 配置 :on-pause 时会暂停审批）
-   :context true}     ;; 可选：需要访问 Context（函数签名多一个 ctx 参数）
+   :context true      ;; 可选：读取 Context（函数签名多一个只读 ctx 参数）
+   :serial true       ;; 可选：副作用工具——同批含 serial 工具时整批退化为按序执行
+   :retry true}       ;; 可选：幂等工具 opt-in——:transient 类失败自动指数退避重试
+                      ;;（或 {:max-retries 2 :initial-delay-ms 200}）
   (body ...))
 
 ;; 支持的参数类型: :string :int :float :boolean :array :object
+
+;; 写共享状态：任意工具返回 {:result r :writes {k v}} 声明写意图（ctx 本身只读）；
+;; 同一轮的多个 tool-call 并行执行，屏障处按原始序经 :state-slots 的 reducer 折叠：
+(kernel/build-kernel {:tools [...] :state-slots {:notes {:init [] :reduce conj}}})
+;; 未声明的槽默认 last-writer；失败/超时/被拒的调用 writes 不生效（单工具事务性）
+
+;; 失败分层路由（缺省一切错误序列化为结果交给模型——errors are data）：
+(throw (ex-info "网络抖动" {:error-class :transient}))    ;; 声明 :retry 的工具自动重试
+(throw (ex-info "凭证失效" {:error-class :environment}))  ;; :on-env-error :pause 时屏障处暂停等人
+;; 工具内调 provider 的 canonical error（:retryable?/:auth-error）自动获得正确分类
 ```
 
 ### Kernel API
@@ -354,11 +367,17 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 ;; 注册：filters 向量顺序即洋葱层序（越靠前越外层）
 (kernel/build-kernel {:service svc :tools tools :filters [my-filter both]})
 ;; 链类型：:chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
+;; tool 链契约：请求 {:function :args :context(只读)}，响应 {:result (:writes)}——
+;; filter 可改写 :args、短路、around；无需（也不应）回传 :context。
+;; 注意：同一轮的多个 tool-call 并行执行，交互式审批请放 agent 的 :tool-gate（批前串行），
+;; 勿放 tool filter（会在并行任务中并发弹提示）。
 ```
 
-### Context（共享状态）
+### Context（请求级共享状态）
 
-Context 管理对话中的共享状态：
+Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversation-id、用户信息等），
+工具的写意图经返回值 `:writes` 声明、在每轮工具批次的屏障处统一折叠
+（并行安全、按调用序确定，见 `docs/agent-loop-concurrency-design.md`）：
 
 ```clojure
 (require '[im.ttalk.agent.context :as ctx])
@@ -366,10 +385,10 @@ Context 管理对话中的共享状态：
 (def my-ctx (ctx/create {:user-id "u123"}))    ;; 创建（可带初始变量）
 (ctx/context? my-ctx)                          ;; 谓词
 (ctx/get-var my-ctx :user-id)                  ;; 获取变量
-(ctx/set-var my-ctx :key "value")              ;; 设置单个变量（返回新 ctx）
-(ctx/set-vars my-ctx {:a 1 :b 2})              ;; 批量设置（返回新 ctx）
+(ctx/set-var my-ctx :key "value")              ;; 设置单个变量（返回新 ctx，调用方侧使用）
 (ctx/conversation-id my-ctx)                   ;; 取会话 id
 (ctx/with-conversation-id my-ctx "u1")         ;; 设会话 id（返回新 ctx）
+(ctx/apply-writes my-ctx [{:k 1}] slots)       ;; 批次写折叠（框架在屏障处调用）
 ```
 
 > 对话历史不在 Context 里，而是由 ChatMemory store 按 conversation-id 维护（见 `im.ttalk.agent.memory` / Memory Filter）。
