@@ -13,6 +13,7 @@
    在循环关键节点直接触发，不走 filter 链。gate 评估结果缓存，确保每个工具调用
    恰好触发一次观察回调（不重复）。"
   (:require [clojure.string]
+            [im.ttalk.agent.advisor :as filters]
             [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.context :as ctx]
@@ -344,12 +345,18 @@
         callbacks (or (:callbacks opts) {})
         _ (heal-dangling-tool-calls! store conv-id)]
     (try
-      (let [result (run-tool-loop kernel (mapv msg/normalize messages)
-                                  max-iter [] init-ctx
-                                  (:tool-gate opts)
-                                  (build-chat-opts kernel opts)
-                                  callbacks
-                                  {:on-env-error (or (:on-env-error opts) :proceed)})]
+      ;; turn 链：包整个工具循环（每 turn 一次；filter 可改写 :messages/:context、
+      ;; 递归重入——每次重入获得全新 max-iterations 预算）。设计见 §14。
+      (let [turn-terminal (fn [treq]
+                            (run-tool-loop kernel
+                                           (mapv msg/normalize (:messages treq))
+                                           max-iter [] (or (:context treq) init-ctx)
+                                           (:tool-gate opts)
+                                           (build-chat-opts kernel opts)
+                                           callbacks
+                                           {:on-env-error (or (:on-env-error opts) :proceed)}))
+            turn-chain (filters/build-chain (keep :turn (:filters kernel)) turn-terminal)
+            result (turn-chain {:messages messages :context init-ctx})]
         (when (and ephemeral? store (= :completed (:status result)))
           (memory/mem-clear store conv-id))
         result)
@@ -388,6 +395,8 @@
       (run-tool-loop kernel batch-messages remaining records tctx
                      gate chat-opts callbacks policy))))
 
+(declare ^:private resume-approval)
+
 (defn resume
   "从 paused 的 loop-state 继续工具循环。
 
@@ -410,41 +419,72 @@
    - opts:       同 invoke（须含带 conversation-id 的 :context 以接续历史；
                  可含 :payload）
 
+   turn 链语义：resume 同样经过 :turn 洋葱——首次进入终端执行「暂停 turn 的
+   延续」（消费 loop-state）；turn filter 的递归重入（如校验反馈）走全新
+   工具循环（新 delta，上下文由 memory 拼接）。TurnRequest 带 :resume? true
+   标记，请求侧改写类 filter（RAG 注入等）应据此跳过首次改写。
+
    返回: 同 invoke（:completed 或再次 :paused）"
   [kernel loop-state decision opts]
-  (if (= :env-retry (:phase loop-state))
-    (resume-env kernel loop-state decision opts)
-    (let [{:keys [tool-calls remaining records pending-id]} loop-state
-          payload (:payload opts)
-          _ (when (and (= :reply decision) (not (string? (:message payload))))
-              (throw (ex-info ":reply 需要 opts :payload {:message \"...\"}"
-                              {:payload payload})))
-          _ (when (and (= :reply decision) (nil? pending-id))
-              (throw (ex-info "loop-state 缺少 :pending-id（旧版本暂停态不支持 :reply）"
-                              {})))
-          ;; 编辑后批准：替换 pending 工具的参数
-          tool-calls (if-let [new-args (and (= :approved decision) (:args payload))]
-                       (mapv #(if (= pending-id (:id %)) (assoc % :args new-args) %)
-                             tool-calls)
-                       tool-calls)
-          tctx (or (:context opts) (ctx/create))
-          gate (:tool-gate opts)
-          callbacks (or (:callbacks opts) {})
-          on-tool-result (:on-tool-result callbacks)
-          resume-gate
-          (case decision
-            :approved (constantly :proceed)
-            :reply    (fn [tc] (if (= pending-id (:id tc))
-                                 {:reply (:message payload)}
-                                 :proceed))
-            ;; 缺省 :rejected：gate 判敏感的拒绝（可带理由）
-            (fn [tc] (if (and gate (= :pause (gate tc)))
-                       (if-let [m (:message payload)] {:reject m} :reject)
-                       :proceed)))
-          {:keys [messages records context]}
-          (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
-      (run-tool-loop kernel messages remaining records context
-                     gate
-                     (build-chat-opts kernel opts)
-                     callbacks
-                     {:on-env-error (or (:on-env-error opts) :proceed)}))))
+  (let [continuation
+        (fn []
+          (if (= :env-retry (:phase loop-state))
+            (resume-env kernel loop-state decision opts)
+            (resume-approval kernel loop-state decision opts)))
+        tctx (or (:context opts) (ctx/create))
+        max-iter (or (:max-iterations opts)
+                     (get-in kernel [:settings :max-tool-iterations])
+                     default-max-iterations)
+        consumed? (atom false)
+        ;; 终端一次性分派：首调 = 暂停延续；重入 = 常规循环（新 delta）
+        terminal (fn [treq]
+                   (if (compare-and-set! consumed? false true)
+                     (continuation)
+                     (run-tool-loop kernel
+                                    (mapv msg/normalize (:messages treq))
+                                    max-iter [] (or (:context treq) tctx)
+                                    (:tool-gate opts)
+                                    (build-chat-opts kernel opts)
+                                    (or (:callbacks opts) {})
+                                    {:on-env-error (or (:on-env-error opts) :proceed)})))
+        turn-chain (filters/build-chain (keep :turn (:filters kernel)) terminal)]
+    (turn-chain {:resume? true :messages nil :context tctx})))
+
+(defn- resume-approval
+  "审批暂停的延续（工具未执行）：按 decision/payload 组 resume-gate，
+   执行批次后继续循环。"
+  [kernel loop-state decision opts]
+  (let [{:keys [tool-calls remaining records pending-id]} loop-state
+        payload (:payload opts)
+        _ (when (and (= :reply decision) (not (string? (:message payload))))
+            (throw (ex-info ":reply 需要 opts :payload {:message \"...\"}"
+                            {:payload payload})))
+        _ (when (and (= :reply decision) (nil? pending-id))
+            (throw (ex-info "loop-state 缺少 :pending-id（旧版本暂停态不支持 :reply）"
+                            {})))
+        ;; 编辑后批准：替换 pending 工具的参数
+        tool-calls (if-let [new-args (and (= :approved decision) (:args payload))]
+                     (mapv #(if (= pending-id (:id %)) (assoc % :args new-args) %)
+                           tool-calls)
+                     tool-calls)
+        tctx (or (:context opts) (ctx/create))
+        gate (:tool-gate opts)
+        callbacks (or (:callbacks opts) {})
+        on-tool-result (:on-tool-result callbacks)
+        resume-gate
+        (case decision
+          :approved (constantly :proceed)
+          :reply    (fn [tc] (if (= pending-id (:id tc))
+                               {:reply (:message payload)}
+                               :proceed))
+          ;; 缺省 :rejected：gate 判敏感的拒绝（可带理由）
+          (fn [tc] (if (and gate (= :pause (gate tc)))
+                     (if-let [m (:message payload)] {:reject m} :reject)
+                     :proceed)))
+        {:keys [messages records context]}
+        (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
+    (run-tool-loop kernel messages remaining records context
+                   gate
+                   (build-chat-opts kernel opts)
+                   callbacks
+                   {:on-env-error (or (:on-env-error opts) :proceed)})))
