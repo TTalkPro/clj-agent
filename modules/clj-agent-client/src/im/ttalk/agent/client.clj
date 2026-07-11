@@ -48,6 +48,7 @@
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.memory :as memory]
+            [im.ttalk.agent.pause :as pause]
             [im.ttalk.agent.react :as agent-loop]
             [im.ttalk.agent.common :as common]
             [im.ttalk.agent.streaming :as streaming]
@@ -95,6 +96,9 @@
    - :system-prompt 系统提示词
    - :tools         tool var / inline-tool map 列表
    - :memory        ChatMemory store（可选，默认 in-memory；false → 无记忆）
+   - :pause-store   PauseStore（可选，见 im.ttalk.agent.pause）：暂停快照自动
+                    持久化，进程重启后同 conversation-id + 同 store 重建 agent
+                    即可 resume（跨重启 HITL；对话历史请配 SQLite ChatMemory）
    - :conversation-id 会话 ID（可选）
    - :max-iterations 最大工具循环次数（默认 10）
    - :callbacks     回调 map（:on-turn-start/:on-turn-end/:on-turn-error/:on-llm-call/
@@ -137,6 +141,7 @@
     {:id              (str "agent-" (java.util.UUID/randomUUID))
      :kernel          k
      :memory          store
+     :pause-store     (:pause-store opts)
      :conversation-id (or (:conversation-id opts)
                           (str "agent-" (java.util.UUID/randomUUID)))
      :callbacks       (or (:callbacks opts) {})
@@ -151,6 +156,34 @@
 
 (defn- tctx [agent]
   (ctx/with-conversation-id (ctx/create) (:conversation-id agent)))
+
+(defn- pause-save* [agent result]
+  (when-let [ps (:pause-store agent)]
+    (try (pause/pause-save! ps (:conversation-id agent)
+                            (pause/snapshot (:conversation-id agent) result))
+         (catch Throwable t
+           (log/warn "暂停快照持久化失败（resume 仅本进程内可用）:" (.getMessage t))))))
+
+(defn- pause-clear* [agent]
+  (when-let [ps (:pause-store agent)]
+    (try (pause/pause-clear! ps (:conversation-id agent))
+         (catch Throwable _ nil))))
+
+(defn- paused-state
+  "当前暂停态：优先本进程 state-atom；没有则回落 PauseStore
+   （跨重启恢复——重启后的新 agent 实例经此透明拿到快照）。"
+  [agent]
+  (or (:paused-state @(:state-atom agent))
+      (when-let [ps (:pause-store agent)]
+        (pause/pause-load ps (:conversation-id agent)))))
+
+(defn- resume-context
+  "resume 用的 ToolContext：恢复暂停快照中的累积 context（各轮 :writes 折叠
+   结果），再钉上 conversation-id。此前这里用裸 (tctx agent)，暂停前累积的
+   state slot 会被静默丢弃。"
+  [agent paused]
+  (ctx/with-conversation-id (or (:tool-context paused) (ctx/create))
+                            (:conversation-id agent)))
 
 (defn- build-meta
   "从 agent 当前状态构建回调元数据。"
@@ -190,11 +223,13 @@
       (if (gate-of agent) :pause :proceed)))
 
 (defn- cancel-pending!
-  "未-resume 保护：暂停态下开新对话时，只重置控制状态。
+  "未-resume 保护：暂停态下开新对话时，重置控制状态并清持久化快照。
    历史里悬空 tool_use 的配对由 loop/invoke 入口自愈完成。"
   [agent]
-  (when (= :paused (:status @(:state-atom agent)))
-    (swap! (:state-atom agent) assoc :status :idle :paused-state nil)))
+  (when (or (= :paused (:status @(:state-atom agent)))
+            (some? (paused-state agent)))
+    (swap! (:state-atom agent) assoc :status :idle :paused-state nil)
+    (pause-clear* agent)))
 
 (defn- finalize
   "把 loop/invoke|resume 的结果写入 state-atom 并标准化返回，同时触发 turn 级别回调。"
@@ -207,6 +242,7 @@
         (swap! (:state-atom agent) #(-> %
                                          (assoc :status :completed :paused-state nil :run-id nil)
                                          (update :turn-count (fnil inc 0))))
+        (pause-clear* agent)   ;; 循环已越过暂停点，持久化快照随之失效
         (cb/invoke callbacks :on-turn-end (build-meta agent))
         {:status :completed
          :text (get-in result [:response :text])
@@ -215,6 +251,7 @@
       :paused
       (do
         (swap! (:state-atom agent) assoc :status :paused :paused-state result :run-id nil)
+        (pause-save* agent result)   ;; 暂停快照自动持久化（配置 :pause-store 时）
         (cb/invoke callbacks :on-interrupt
                    {:pending-tool (:pending-tool result)
                     :reason (:pause-reason result)}
@@ -228,6 +265,7 @@
       :cancelled
       (do
         (swap! (:state-atom agent) assoc :status :idle :paused-state nil :run-id nil)
+        (pause-clear* agent)
         {:status :cancelled
          :text (get-in result [:response :text])
          :tool-calls-made (:tool-calls-made result)})
@@ -235,6 +273,7 @@
       :error
       (do
         (swap! (:state-atom agent) assoc :status :error :paused-state nil :run-id nil)
+        (pause-clear* agent)
         (cb/invoke callbacks :on-turn-error (:error result) meta)
         {:status :error
          :text nil
@@ -312,19 +351,25 @@
             (:cancel-token opts) (assoc :cancel-token (:cancel-token opts))))))))
 
 (defn paused?
+  "是否处于暂停态（本进程 state-atom 或 PauseStore 中的持久化快照）。"
   [agent]
-  (= :paused (:status @(:state-atom agent))))
+  (or (= :paused (:status @(:state-atom agent)))
+      (some? (paused-state agent))))
 
 (defn resume
-  "恢复暂停的 Agent。
+  "恢复暂停的 Agent（本进程暂停或跨重启的持久化暂停均可）。
 
    审批暂停：decision = \"approved\"/:approved 批准，其余拒绝。
    环境类暂停（:env-retry，工具环境失败）：decision = \"retry\"/:retry 或
-   \"approved\"/:approved 表示环境已修复、重跑失败工具；其余 → 错误结果交给模型。"
+   \"approved\"/:approved 表示环境已修复、重跑失败工具；其余 → 错误结果交给模型。
+
+   resume 的 ToolContext 恢复自暂停快照（各轮 :writes 的累积折叠结果保留）。"
   [agent decision]
-  (when-not (paused? agent)
-    (throw (ex-info "Agent 未处于暂停状态" {:status (:status @(:state-atom agent))})))
-  (let [ls (:loop-state (:paused-state @(:state-atom agent)))
+  (let [paused (paused-state agent)
+        _ (when-not paused
+            (throw (ex-info "Agent 未处于暂停状态"
+                            {:status (:status @(:state-atom agent))})))
+        ls (:loop-state paused)
         env? (= :env-retry (:phase ls))
         approved? (contains? #{"approved" :approved "retry" :retry} decision)
         loop-decision (if env?
@@ -337,17 +382,18 @@
     (cb/invoke callbacks :on-resume {:approved? approved?} meta)
     (run-loop agent
       #(agent-loop/resume (:kernel agent) ls loop-decision
-         (cond-> {:context (tctx agent)
+         (cond-> {:context (resume-context agent paused)
                   :tool-gate (gate-of agent)
                   :on-env-error (env-error-policy agent nil)
                   :callbacks (assoc callbacks :metadata meta)}
            (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil)))))))
 
 (defn reset!
-  "清空会话历史并重置控制状态"
+  "清空会话历史、持久化暂停快照并重置控制状态"
   [agent]
   (when-let [s (store agent)]
     (memory/mem-clear s (:conversation-id agent)))
+  (pause-clear* agent)
   (clojure.core/reset! (:state-atom agent) {:status :idle :paused-state nil :turn-count 0 :run-id nil})
   nil)
 
