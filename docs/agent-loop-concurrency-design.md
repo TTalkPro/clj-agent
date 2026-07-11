@@ -5,8 +5,9 @@
 > `process-parallel-design.md` 头部说明）之后的 rethink 系列讨论。
 > §0–§8 为讨论定稿的设计推导与业界对照；§9–§13 为各阶段实施记录
 > （S1 工具 MapReduce、S2 错误分层、HITL 持久化、Timeline、resume payload）。
-> **HITL 与 Timeline 的整合权威参考见 `hitl-timeline-design.md`**。
-> 未实施仅剩 §6 编排层（多 Agent）立项决策——用户定调单 Agent 优先，另议。
+> **HITL 与 Timeline 的整合权威参考见 `hitl-timeline-design.md`**；
+> **filter 三链体系（:tool/:chat/:turn）的整合权威参考见 `filter-chain-design.md`**。
+> 未实施仅剩 §6 编排层（多 Agent）——用户判定太复杂暂弃。
 
 ---
 
@@ -585,3 +586,48 @@ tool-result 中立消息新增可选 `:writes` 元数据（该工具对状态槽
 - 环境类暂停（:env-retry）不支持 :reply（显式拒收）；payload 与持久化
   正交（resume 时才提供，快照无需任何改动，跨重启同样可用）；
 - 破坏面：零（3-arity 纯增量；on-resume 回调 meta 增加 :decision/:payload）。
+
+---
+
+## 14. Turn 级 filter 链（:turn 钩子）——✅ 已实施（2026-07-11，全套 241/1013/0）
+
+> 来源：Spring AI 2.0 advisor 重构调研（ToolCallingAdvisor 循环进链 +
+> `chain.copy` 递归 advisor）。结论：递归能力我们的闭包洋葱**天然拥有**
+> （build-chain 折叠出的 chain 参数本就是"仅下游"，Spring AI 为此新造的
+> `chain.copy(this)` 我们免费获得）；memory 放循环内是刻意契约不跟；
+> **真缺口是 turn 级链**——用户无法在"整个 turn"外面包 around 逻辑。
+
+### 14.1 设计
+
+- filter 第三个钩子 `:turn`（与 `:chat`/`:tool` 并列，同一洋葱机制）：
+  `(fn [turn-req chain] -> turn-result)`；
+  TurnRequest `{:messages 本轮入口消息 :context 初始 ctx}`（可改写）；
+  TurnResult = react 循环结果 `{:status :response :tool-context ...}`。
+- `react/invoke` 把整个 run-tool-loop 作 terminal，`(keep :turn filters)`
+  包洋葱——循环本体不动（不学"循环变 advisor"的大搬家：我们的循环与
+  gate/HITL/暂停/持久化深度耦合，为优雅重构不值）。
+- **递归重入**：turn filter 可多次 `(chain req)`（evaluator-optimizer /
+  最终答案校验重试）。重入的 :messages 应是**新 delta**（如反馈消息）——
+  完整上下文由 memory filter 拼接，故递归类 turn filter 依赖 memory 在位。
+- **硬规则**：`:paused` / `:cancelled` / `:error` 结果必须透传，不得重入
+  （在暂停态上重试会破坏 HITL 语义）。
+- ~~边界：turn 链只包 invoke~~ **已补齐（2026-07-11，全套 243/1021/0）**：
+  resume 同样经过 turn 链——TurnRequest 带 `:resume? true`、`:messages` nil；
+  终端一次性分派（首调=暂停延续消费 loop-state，递归重入=全新循环）。
+  请求侧改写类 filter 应在 :resume? 时跳过。每次重入获得全新
+  max-iterations 预算。
+
+### 14.2 内置示范：validation-turn-filter
+
+`(validation-turn-filter validate-fn :max-retries 2)`——校验 `:completed`
+结果，不合格把原因作为反馈消息重入循环，耗尽后原样返回。以 ~30 行 +
+provider 原生 json_schema 取回已删 converter 子系统的核心价值
+（结构化输出校验重试），对标 Spring AI `StructuredOutputValidationAdvisor`。
+
+### 14.3 解锁的场景与明确不跟的
+
+解锁：每 turn 一次的 RAG 注入（此前只能 chat filter → 工具循环每轮重复
+检索）、最终答案 guardrail、turn 级预算/计时、episode 级 evaluator。
+不跟：RAG advisor 本体（需 vector store，超出定位，留挂点）、
+SafeGuardAdvisor（用户一个 chat filter 即可）、advisor context map
+（请求 map 透传已够）。零破坏（纯新增钩子）。

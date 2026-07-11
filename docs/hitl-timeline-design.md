@@ -1,6 +1,6 @@
 # HITL 与 Timeline 设计（单 Agent）
 
-> **状态：✅ 已全部实施（2026-07-11），全套 236 tests / 998 assertions / 0。**
+> **状态：✅ 已全部实施（2026-07-11），全套 243 tests / 1021 assertions / 0。**
 > 本文是 HITL（human-in-the-loop）与 Timeline/多分支能力的**整合权威参考**，
 > 由 `agent-loop-concurrency-design.md` §5 / §9–§13 的实施记录整合而成；
 > 循环执行模型（Tool 阶段 MapReduce、屏障、错误分层）的推导与业界对照见该文。
@@ -86,13 +86,36 @@ turn 边界 / 暂停点 ──► timeline/fork! ──► 分支会话（HITL �
 | 其他（拒绝） | `{:message 理由}` | 结果「已拒绝执行：<理由>」——模型直接拿到原因，省一轮干猜 |
 | `"reply"` | `{:message 答复}`（必填） | **答复即结果**：pending 工具不执行，答复直接作为其工具结果回模型 |
 
+**完整用法走查**（宿主应用视角，五种响应）：
+
+```clojure
+;; 1) 触发暂停，把待决信息呈给用户
+(let [r (chat agent "删除订单 42 并通知客户")]
+  (when (= :paused (:status r))
+    (:pause-reason r)                          ;; "需要审批: delete-order"
+    (get-in r [:pending-tool :name])           ;; "delete-order"
+    (get-in r [:pending-tool :args])))         ;; {:id 42}——呈给用户看/编辑
+
+;; 2) 按用户答复选择 resume 形态（返回值即最终结果，:completed + :text）
+(resume agent "approved")                              ;; 原样批准
+(resume agent "approved" {:args {:id 42 :mode :soft}}) ;; 用户编辑了参数后批准
+(resume agent "rejected")                              ;; 拒绝（模型收到"已拒绝执行"）
+(resume agent "rejected" {:message "该订单有未结算金额，先退款"})
+;;   → 工具结果「已拒绝执行：该订单有未结算金额，先退款」——模型直接
+;;     基于理由调整策略（如先调 refund 工具），不用追问
+(resume agent "reply" {:message "客户已电话确认，跳过通知"})
+;;   → pending 工具不执行，这句话就是它的"结果"——模型视角是一次普通工具往返
+```
+
 **ask-user 模式**（`"reply"` 解锁的能力）：定义一个 body 永不执行的提问工具，
-gate 拦截暂停，用户答案经 reply 送回——模型侧看到一次普通的工具往返：
+gate 拦截暂停，用户答案经 reply 送回：
 
 ```clojure
 (deftool ask-user "向用户提问" [[question :string "问题"]] "不会执行到")
 ;; callbacks {:on-tool-call (fn [n _] (when (= "ask-user" n) {:interrupt "等用户"}))}
-;; 暂停后：(resume agent "reply" {:message "用户选了 B"})
+(let [r (chat agent "帮我选方案")]                 ;; 模型调 ask-user("要 A 还是 B？")
+  (get-in r [:pending-tool :args :question]))     ;; 呈给用户的问题
+(resume agent "reply" {:message "B"})             ;; 答案即工具结果，循环继续
 ```
 
 自由文本答复的兜底路径（无需 payload）：`rejected` 后模型收到拒绝结果并回应，
@@ -115,7 +138,14 @@ gate 拦截暂停，用户答案经 reply 送回——模型侧看到一次普�
 - `loop-state :pending-id` 定位暂停工具（`:args` 替换与 reply 靠它）；
   旧版暂停态缺该字段时 `:reply` 显式抛错；
 - resume 的 ToolContext 恢复自暂停态 `:tool-context`——**暂停前各轮 writes
-  的累积折叠结果保留**（曾是缺口：裸 context 续跑会静默丢槽，已修）。
+  的累积折叠结果保留**（曾是缺口：裸 context 续跑会静默丢槽，已修）；
+- **payload 与持久化正交**：payload 在 resume 时才提供、不进暂停快照——
+  跨重启恢复的暂停同样可带任意 payload resume（`(resume 重建的agent
+  "reply" {:message ...})` 照常工作），快照格式零改动；
+- **payload 与 turn 链正交**：resume 同样经过 `:turn` filter 洋葱（一次性
+  分派终端）——无论用哪种 payload 恢复，turn 完成的最终答案都会经过
+  校验/guardrail 类 filter，可触发反馈重试。机制详见
+  `filter-chain-design.md` §2.4。
 
 ---
 
@@ -267,6 +297,8 @@ tool-result 中立消息携带可选 `:writes` 元数据（该工具对状态槽
 
 - `agent-loop-concurrency-design.md`——循环执行模型（MapReduce/屏障/错误分层）
   的推导、业界对照与各阶段实施记录（§9 S1、§10 S2、§11 持久化、§12 Timeline、
-  §13 resume payload）
+  §13 resume payload、§14 turn 链）
+- `filter-chain-design.md`——filter 三链体系（:tool/:chat/:turn 契约、
+  递归重入、resume × turn 链的一次性分派）
 - 已废弃留档：`process-framework-design.md`、`process-parallel-design.md`、
   `../design/timeline-snapshot-checkpoint.md`（旧 Timeline 的教训来源）
