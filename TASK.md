@@ -205,7 +205,16 @@
      :phase :env-retry），resume :retry 重跑失败调用并按 tool-call-id 替换消息 /
      :proceed 交给模型；client HITL agent 自动 :pause、其余 :proceed。零破坏面
      （纯增量）。新增 5 测试组，全套 217/898/0。设计记录见文档 §10。
-  3. [ ] 编排层是否立项另议（先答"要不要全局快照语义"：BSP 或 actor，不做双引擎）。
+  3. [x] **HITL 持久化（2026-07-11 完成，从 S3 拆出的独立小件）**：新 ns
+     `im.ttalk.agent.pause`（PauseStore 协议 + in-memory + SQLite EDN 实现）；
+     `create-agent :pause-store` 暂停自动落库、终态/reset!/新 chat 自动清、
+     `paused?`/`resume` 透明回落 store（跨重启恢复，API 不变）。**顺带修复
+     resume context 缺口**（此前暂停前累积的 state slot 被裸 tctx 丢弃）+
+     `create-agent` 透传 `:state-slots`。6 tests / 34 assertions，
+     全套 223/932/0。设计记录见文档 §11。
+  4. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
+     单 Agent 优先**；待单 Agent 能力收敛后另议（届时先答"要不要全局快照
+     语义"：BSP 或 actor，不做双引擎）。
 
 ### 📋 历史账本
 

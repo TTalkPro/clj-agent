@@ -43,9 +43,27 @@
   （重跑失败调用，结果按 tool-call-id 替换进原批次）| `:proceed`（错误交给
   模型）。client 层配置了 `:on-tool-call` 的 HITL agent 自动 `:pause`，
   `resume` 接受 `"retry"/"approved"` 表示环境已修复。
-- 新语义测试 9 个：批内真并行证明、快照隔离、last-writer 按调用序（非完成序）、
-  失败 writes 丢弃、messages/records 原序、serial 整批退化、reject 语义、
-  reducer 折叠与跨轮累积。全套 213 tests / 870 assertions / 0 failures。
+- **HITL 暂停态持久化（`im.ttalk.agent.pause`）**：PauseStore 协议 +
+  in-memory / SQLite（EDN）实现；`create-agent :pause-store` 暂停快照自动
+  落库、终态/`reset!`/新 chat 自动清除、`paused?`/`resume` 透明回落 store
+  ——进程重启后同 conversation-id + 同 store 重建 agent 即可 resume
+  （审批与 :env-retry 两种暂停均支持；对话历史配 SQLite ChatMemory）。
+  `create-agent` 同时补透传 `:state-slots`。
+
+### 🐛 修复
+
+- **resume 丢弃暂停前累积的 context 状态槽**：`client/resume` 此前用仅含
+  conversation-id 的裸 context 续跑，S1 的 `:writes` 折叠结果跨 resume 即失
+  （S1 之前 context 无内容故无感）。现 resume context 恢复自暂停态的
+  `:tool-context`（本进程与跨重启两路径同修）。
+
+### 🔧 内部 / 测试
+
+- 新语义测试：S1 批次 9 个（真并行证明、快照隔离、last-writer 按调用序而非
+  完成序、失败 writes 丢弃、messages/records 原序、serial 整批退化、reject、
+  reducer 折叠与跨轮累积）+ S2 分类/重试/环境暂停 5 组 + HITL 持久化 6 个
+  （EDN 往返、跨重启审批与 env-retry 恢复、context 恢复回归、清理时机）。
+  全套 223 tests / 932 assertions / 0 failures。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 

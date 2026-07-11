@@ -231,6 +231,25 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
     ))
 ```
 
+**跨进程重启的 HITL**：配置 `:pause-store`（配合 SQLite ChatMemory），暂停快照自动持久化；
+重启后用同一 conversation-id + 同一 store 重建 agent，`paused?`/`resume` 透明恢复
+（累积的 context 状态槽一并恢复）：
+
+```clojure
+(require '[im.ttalk.agent.pause :as pause]
+         '[im.ttalk.agent.memory.sqlite :as sqlite])
+
+(def agent (ka/create-agent {:provider provider :tools file-tools
+                             :memory (sqlite/sqlite-store "agent.db")
+                             :pause-store (pause/sqlite-pause-store "agent.db")
+                             :conversation-id "order-42"
+                             :callbacks {:on-tool-call ...}}))
+;; 暂停 → 进程退出 → 重启后同配置重建 → (ka/resume agent "approved")
+```
+
+环境类工具失败（如凭证失效，`{:error-class :environment}`）的暂停同样支持：
+`(ka/resume agent "retry")` 表示环境已修复、重跑失败工具。
+
 ### 方式三：Kernel API（完全控制）
 
 直接使用 Kernel 获取最大灵活性：
