@@ -74,7 +74,6 @@ clj-agent/
 ├── modules/
 │   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + kernel primitives; zero deps
 │   ├── clj-agent-client/    # Agent runtime (client/react/memory/subagent), depends on core
-│   ├── clj-agent-process/   # Process framework (event-driven step orchestration), depends on core
 │   └── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
 ├── examples/              # Usage Examples
 ├── docs/                  # Design Documents
