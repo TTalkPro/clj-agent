@@ -359,34 +359,51 @@
 (defn resume
   "恢复暂停的 Agent（本进程暂停或跨重启的持久化暂停均可）。
 
-   审批暂停：decision = \"approved\"/:approved 批准，其余拒绝。
-   环境类暂停（:env-retry，工具环境失败）：decision = \"retry\"/:retry 或
-   \"approved\"/:approved 表示环境已修复、重跑失败工具；其余 → 错误结果交给模型。
+   审批暂停：
+   - \"approved\"/:approved 批准；payload 可带 {:args 新参数}（编辑后批准，
+     pending 工具以替换后的参数执行）
+   - \"reply\"/:reply 答复即结果（ask-user 语义）：payload 必带 {:message 答复}，
+     pending 工具不执行、答复直接作为其结果回模型
+   - 其余 → 拒绝；payload 可带 {:message 理由}（结果「已拒绝执行：<理由>」，
+     模型直接拿到原因，省一轮干猜）
+
+   环境类暂停（:env-retry）：\"retry\"/:retry 或 \"approved\"/:approved 表示
+   环境已修复、重跑失败工具；其余 → 错误结果交给模型（不支持 :reply）。
 
    resume 的 ToolContext 恢复自暂停快照（各轮 :writes 的累积折叠结果保留）。"
-  [agent decision]
-  (let [paused (paused-state agent)
-        _ (when-not paused
-            (throw (ex-info "Agent 未处于暂停状态"
-                            {:status (:status @(:state-atom agent))})))
-        ls (:loop-state paused)
-        env? (= :env-retry (:phase ls))
-        approved? (contains? #{"approved" :approved "retry" :retry} decision)
-        loop-decision (if env?
-                        (if approved? :retry :proceed)
-                        (if approved? :approved :rejected))
-        run-id (str (java.util.UUID/randomUUID))
-        meta (build-meta agent run-id)
-        callbacks (:callbacks agent)]
-    (swap! (:state-atom agent) assoc :run-id run-id)
-    (cb/invoke callbacks :on-resume {:approved? approved?} meta)
-    (run-loop agent
-      #(agent-loop/resume (:kernel agent) ls loop-decision
-         (cond-> {:context (resume-context agent paused)
-                  :tool-gate (gate-of agent)
-                  :on-env-error (env-error-policy agent nil)
-                  :callbacks (assoc callbacks :metadata meta)}
-           (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil)))))))
+  ([agent decision] (resume agent decision nil))
+  ([agent decision payload]
+   (let [paused (paused-state agent)
+         _ (when-not paused
+             (throw (ex-info "Agent 未处于暂停状态"
+                             {:status (:status @(:state-atom agent))})))
+         ls (:loop-state paused)
+         env? (= :env-retry (:phase ls))
+         reply? (contains? #{"reply" :reply} decision)
+         _ (when (and env? reply?)
+             (throw (ex-info "环境类暂停不支持 :reply（用 \"retry\" 或 \"proceed\"）" {})))
+         approved? (contains? #{"approved" :approved "retry" :retry} decision)
+         loop-decision (cond
+                         env?    (if approved? :retry :proceed)
+                         reply?  :reply
+                         approved? :approved
+                         :else   :rejected)
+         run-id (str (java.util.UUID/randomUUID))
+         meta (build-meta agent run-id)
+         callbacks (:callbacks agent)]
+     (swap! (:state-atom agent) assoc :run-id run-id)
+     (cb/invoke callbacks :on-resume
+                (cond-> {:approved? approved? :decision loop-decision}
+                  payload (assoc :payload payload))
+                meta)
+     (run-loop agent
+       #(agent-loop/resume (:kernel agent) ls loop-decision
+          (cond-> {:context (resume-context agent paused)
+                   :tool-gate (gate-of agent)
+                   :on-env-error (env-error-policy agent nil)
+                   :callbacks (assoc callbacks :metadata meta)}
+            payload (assoc :payload payload)
+            (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil))))))))
 
 (defn reset!
   "清空会话历史、持久化暂停快照并重置控制状态"

@@ -88,8 +88,19 @@
    错误/拒绝的结果没有 :writes，reduce 时自动跳过（单工具事务性）；
    :error 携带故障类别，供屏障处策略路由（S2）。"
   [kernel tc decision tool-context on-tool-result]
-  (if (= :reject decision)
+  (cond
+    (= :reject decision)
     {:tc tc :value "已拒绝执行" :rejected? true}
+
+    ;; 拒绝带理由：模型直接拿到原因，省一轮干猜
+    (and (map? decision) (contains? decision :reject))
+    {:tc tc :value (str "已拒绝执行：" (:reject decision)) :rejected? true}
+
+    ;; 答复即结果（ask-user 语义）：不执行工具，载荷直接作为工具结果回模型
+    (and (map? decision) (contains? decision :reply))
+    {:tc tc :value (str (:reply decision)) :replied? true}
+
+    :else
     (let [fn-key (keyword (:name tc))
           {:keys [value writes error]}
           (try (invoke-with-retry kernel fn-key (:args tc) tool-context)
@@ -115,11 +126,15 @@
    :state-slots 的槽级 reducer 折叠进 context（未声明槽默认 last-writer；
    同批多工具写同一未声明槽记 warn）。messages/records 按原始序排回。
 
-   gate: (fn [tool-call] -> :proceed | :reject)，nil 视为全 :proceed；
-   批前串行预判（审批可交互，绝不并发）。:reject 填「已拒绝执行」结果。
+   gate: (fn [tool-call] -> 决策)，nil 视为全 :proceed；批前串行预判
+   （审批可交互，绝不并发）。决策词汇：
+   - :proceed          执行
+   - :reject           跳过，结果「已拒绝执行」
+   - {:reject 理由}    跳过，结果「已拒绝执行：<理由>」（模型直接拿到原因）
+   - {:reply 结果}     不执行，载荷即工具结果（ask-user 语义）
 
    on-tool-result: (fn [tool-name result-str])，每个实际执行的工具恰好触发
-   一次（:reject 不触发）；并行下批内触发顺序不确定。
+   一次（:reject / {:reply} 不触发）；并行下批内触发顺序不确定。
 
    返回: {:messages [...] :records [...] :context 新ctx
           :errors [{:id :name :class :message :tc} ...]}
@@ -150,9 +165,10 @@
      (when (seq conflicts)
        (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
                  conflicts))
-     ;; ⑥ messages/records 按原始序排回
-     {:messages (mapv (fn [{:keys [tc value]}]
-                        (msg/tool-result (:id tc) (:name tc) value))
+     ;; ⑥ messages/records 按原始序排回（:writes 随消息进历史——event-sourcing
+     ;; 元数据，wire 层不发给 LLM；失败/被拒调用无 writes，历史中自然缺席）
+     {:messages (mapv (fn [{:keys [tc value writes]}]
+                        (msg/tool-result (:id tc) (:name tc) value writes))
                       results)
       :records  (into init-records
                       (map (fn [{:keys [tc value rejected?]}]
@@ -273,7 +289,9 @@
                   (some? paused-call)
                   {:status :paused
                    :pause-reason (str "需要审批: " (:name paused-call))
-                   :loop-state {:tool-calls calls :remaining (dec remaining) :records records}
+                   :loop-state {:tool-calls calls :remaining (dec remaining)
+                                :records records
+                                :pending-id (:id paused-call)}   ;; resume payload 定位用
                    :pending-tool {:name (:name paused-call)
                                   :args (:args paused-call)
                                   :tool-call paused-call}
@@ -375,28 +393,54 @@
 
    两种暂停 phase：
    - 审批暂停（缺省，工具未执行）：decision :approved（强制全部执行）
-     | :rejected（gate 决定，敏感→拒绝）
+     | :rejected（gate 决定，敏感→拒绝）| :reply（不执行 pending 工具，
+     payload :message 直接作为其结果——ask-user 语义）
    - :env-retry（批已执行、环境类失败）：decision :retry（环境已修复，重跑
      失败调用）| :proceed（错误结果交给模型）
+
+   opts :payload（审批 phase 可选，携带用户答复）：
+   - :approved + {:args 新参数}   → pending 工具以替换后的参数执行（编辑后批准）
+   - :rejected + {:message 理由}  → 结果「已拒绝执行：<理由>」（模型直接拿到原因）
+   - :reply    + {:message 答复}  → 答复即 pending 工具的结果（必填）
 
    参数:
    - kernel:     Kernel 实例
    - loop-state: invoke 返回的 :loop-state
    - decision:   见上
-   - opts:       同 invoke（须含带 conversation-id 的 :context 以接续历史）
+   - opts:       同 invoke（须含带 conversation-id 的 :context 以接续历史；
+                 可含 :payload）
 
    返回: 同 invoke（:completed 或再次 :paused）"
   [kernel loop-state decision opts]
   (if (= :env-retry (:phase loop-state))
     (resume-env kernel loop-state decision opts)
-    (let [{:keys [tool-calls remaining records]} loop-state
+    (let [{:keys [tool-calls remaining records pending-id]} loop-state
+          payload (:payload opts)
+          _ (when (and (= :reply decision) (not (string? (:message payload))))
+              (throw (ex-info ":reply 需要 opts :payload {:message \"...\"}"
+                              {:payload payload})))
+          _ (when (and (= :reply decision) (nil? pending-id))
+              (throw (ex-info "loop-state 缺少 :pending-id（旧版本暂停态不支持 :reply）"
+                              {})))
+          ;; 编辑后批准：替换 pending 工具的参数
+          tool-calls (if-let [new-args (and (= :approved decision) (:args payload))]
+                       (mapv #(if (= pending-id (:id %)) (assoc % :args new-args) %)
+                             tool-calls)
+                       tool-calls)
           tctx (or (:context opts) (ctx/create))
           gate (:tool-gate opts)
           callbacks (or (:callbacks opts) {})
           on-tool-result (:on-tool-result callbacks)
-          resume-gate (if (= decision :approved)
-                        (constantly :proceed)
-                        (fn [tc] (if (and gate (= :pause (gate tc))) :reject :proceed)))
+          resume-gate
+          (case decision
+            :approved (constantly :proceed)
+            :reply    (fn [tc] (if (= pending-id (:id tc))
+                                 {:reply (:message payload)}
+                                 :proceed))
+            ;; 缺省 :rejected：gate 判敏感的拒绝（可带理由）
+            (fn [tc] (if (and gate (= :pause (gate tc)))
+                       (if-let [m (:message payload)] {:reject m} :reject)
+                       :proceed)))
           {:keys [messages records context]}
           (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
       (run-tool-loop kernel messages remaining records context
