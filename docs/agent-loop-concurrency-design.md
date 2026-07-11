@@ -1,9 +1,12 @@
 # Agent 并发模型设计：Tool 阶段 MapReduce 与编排层重新思考
 
-> **状态：📐 讨论定稿（2026-07-11），未实施。**
+> **状态：✅ 单 Agent 部分已全部实施（2026-07-11，全套 236/998/0）。**
 > 来源：process framework 整体删除（见 `process-framework-design.md` /
 > `process-parallel-design.md` 头部说明）之后的 rethink 系列讨论。
-> 本文固化讨论结论，作为后续实施与编排层立项的输入；实施前应整体评审一次。
+> §0–§8 为讨论定稿的设计推导与业界对照；§9–§13 为各阶段实施记录
+> （S1 工具 MapReduce、S2 错误分层、HITL 持久化、Timeline、resume payload）。
+> **HITL 与 Timeline 的整合权威参考见 `hitl-timeline-design.md`**。
+> 未实施仅剩 §6 编排层（多 Agent）立项决策——用户定调单 Agent 优先，另议。
 
 ---
 

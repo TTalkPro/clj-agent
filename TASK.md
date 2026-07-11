@@ -229,7 +229,11 @@
      gate 契约（`{:reject 理由}`/`{:reply 结果}`）；loop-state 加
      :pending-id；env phase 显式拒收 reply。零破坏。6 tests / 27 assertions，
      全套 236/998/0。设计见文档 §13。
-  6. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
+  6. [x] **HITL + Timeline 整合设计文档（2026-07-11）**：
+     `docs/hitl-timeline-design.md`——暂停源（审批/环境失败）× resume 五种
+     载荷 × 持久化跨重启 × 分支的权威参考（能力矩阵/一致性不变量/API 速查/
+     已知边界），由 agent-loop-concurrency-design.md §5/§9–§13 整合而成。
+  7. [ ] 编排层（多 Agent）是否立项——**用户已定调：多 Agent 是更外层的决策，
      单 Agent 优先**；待单 Agent 能力收敛后另议（届时先答"要不要全局快照
      语义"：BSP 或 actor，不做双引擎）。
 
