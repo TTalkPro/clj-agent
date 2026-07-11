@@ -20,7 +20,9 @@
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.memory :as memory]
-            [im.ttalk.agent.streaming :as streaming]))
+            [im.ttalk.agent.streaming :as streaming]
+            [taoensso.timbre :as log])
+  (:import [java.util.concurrent Callable ExecutorService Executors Future]))
 
 (set! *warn-on-reflection* true)
 
@@ -59,41 +61,115 @@
       (:on-token opts) (assoc :on-token (:on-token opts))
       (:cancel-token opts) (assoc :cancel-token (:cancel-token opts)))))
 
+(def ^:private tool-executor
+  "工具批次 map 阶段的共享虚拟线程 executor（与 subagent/manager 同款先例）。"
+  (delay (Executors/newVirtualThreadPerTaskExecutor)))
+
+(defn- invoke-with-retry
+  "调用 kernel/invoke-tool；仅当错误为 :transient 且工具声明 :retry 时
+   按策略指数退避重试（幂等前提；重试会重跑整条 tool filter 链）。"
+  [kernel fn-key args tool-context]
+  (let [policy (kernel/retry-policy kernel fn-key)
+        max-r  (long (or (:max-retries policy) 0))]
+    (loop [attempt 0]
+      (let [resp (kernel/invoke-tool kernel fn-key args tool-context)]
+        (if (and policy
+                 (= :transient (get-in resp [:error :class]))
+                 (< attempt max-r))
+          (do (Thread/sleep (long (* (:initial-delay-ms policy)
+                                     (Math/pow 2 attempt))))
+              (recur (inc attempt)))
+          resp)))))
+
+(defn- invoke-one
+  "执行单个 tool call（含 gate reject 分支）。异常折为错误结果，不逃逸。
+   返回 {:tc tc :value str (:writes {k v}) (:error {:class :message})
+         (:rejected? true)}——
+   错误/拒绝的结果没有 :writes，reduce 时自动跳过（单工具事务性）；
+   :error 携带故障类别，供屏障处策略路由（S2）。"
+  [kernel tc decision tool-context on-tool-result]
+  (if (= :reject decision)
+    {:tc tc :value "已拒绝执行" :rejected? true}
+    (let [fn-key (keyword (:name tc))
+          {:keys [value writes error]}
+          (try (invoke-with-retry kernel fn-key (:args tc) tool-context)
+               (catch Exception e
+                 (let [m (or (not-empty (.getMessage e)) (.getName (class e)))]
+                   {:value (str "错误: " m)
+                    :error {:class :semantic :message m}})))]
+      ;; 完成即触发（并行下批内顺序不确定；需确定顺序请读 :records）
+      (when on-tool-result
+        (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
+      (cond-> {:tc tc :value value}
+        (seq writes) (assoc :writes writes)
+        error        (assoc :error error)))))
+
 (defn execute-batch
-  "按 gate 决策执行一批工具调用，产出中立 tool 结果消息 + 记录 + 更新后的 ToolContext。
+  "MapReduce 执行一批工具调用（设计见 docs/agent-loop-concurrency-design.md §9）。
 
-   gate: (fn [tool-call] -> :proceed | :reject)，nil 视为全 :proceed。
-   - :proceed 调 kernel/invoke-tool（异常捕获为错误结果，不中断）
-   - :reject 跳过执行，填入「已拒绝执行」中立结果
+   map：每个调用在虚拟线程执行，全部拿同一份轮初 tool-context 快照
+   （同批工具互相看不到对方的写）。批内任一工具声明 :serial 时整批退化为
+   按序执行（副作用顺序可预期；状态语义不变，仍是快照 + 屏障折叠）。
 
-   on-tool-result: (fn [tool-name result-str])，nil 时不触发。在 execute-batch 内
-   对每个实际执行的工具恰好触发一次（:reject 的工具不触发）。
+   reduce：屏障收齐后，各工具的 :writes 按 tool-call 原始序经 kernel
+   :state-slots 的槽级 reducer 折叠进 context（未声明槽默认 last-writer；
+   同批多工具写同一未声明槽记 warn）。messages/records 按原始序排回。
 
-   返回: {:messages [...] :records [...] :context ...}"
+   gate: (fn [tool-call] -> :proceed | :reject)，nil 视为全 :proceed；
+   批前串行预判（审批可交互，绝不并发）。:reject 填「已拒绝执行」结果。
+
+   on-tool-result: (fn [tool-name result-str])，每个实际执行的工具恰好触发
+   一次（:reject 不触发）；并行下批内触发顺序不确定。
+
+   返回: {:messages [...] :records [...] :context 新ctx
+          :errors [{:id :name :class :message :tc} ...]}
+   :errors 为本批失败调用及其故障类别（重试耗尽后仍失败的才出现在此），
+   供屏障处策略路由（环境类 → 暂停等人，见 run-tool-loop）。"
   ([kernel tool-calls gate tool-context init-records]
    (execute-batch kernel tool-calls gate tool-context init-records nil))
   ([kernel tool-calls gate tool-context init-records on-tool-result]
-   (reduce
-     (fn [{:keys [messages records context]} tc]
-       (let [fn-key (keyword (:name tc))
-             decision (if gate (gate tc) :proceed)]
-         (if (= :reject decision)
-           {:messages (conj messages (msg/tool-result (:id tc) (:name tc) "已拒绝执行"))
-            :records  (conj records {:name fn-key :args (:args tc) :result :rejected})
-            :context  context}
-           (let [{:keys [value context]}
-                 (try (kernel/invoke-tool kernel fn-key (:args tc) context)
-                      (catch Exception e
-                        {:value (str "错误: " (or (not-empty (.getMessage e))
-                                                   (.getName (class e))))
-                         :context context}))]
-             (when on-tool-result
-               (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
-             {:messages (conj messages (msg/tool-result (:id tc) (:name tc) value))
-              :records  (conj records {:name fn-key :args (:args tc) :result value})
-              :context  context}))))
-     {:messages [] :records init-records :context tool-context}
-     tool-calls)))
+   (let [;; ① gate 预判：串行、按原序（审批可能交互）
+         decisions (mapv #(if gate (gate %) :proceed) tool-calls)
+         serial?   (boolean (some #(kernel/serial-tool? kernel (:name %)) tool-calls))
+         ;; ②③④ map + 屏障：并行（缺省）或整批退化按序
+         results   (if (or serial? (<= (count tool-calls) 1))
+                     (mapv (fn [tc d] (invoke-one kernel tc d tool-context on-tool-result))
+                           tool-calls decisions)
+                     (let [futs (mapv (fn [tc d]
+                                        (.submit ^ExecutorService @tool-executor
+                                                 ^Callable
+                                                 (fn [] (invoke-one kernel tc d tool-context
+                                                                    on-tool-result))))
+                                      tool-calls decisions)]
+                       (mapv (fn [^Future f] (.get f)) futs)))
+         ;; ⑤ reduce：writes 按原始序折叠（collect-all——错误/拒绝无 :writes）
+         {:keys [context conflicts]}
+         (ctx/apply-writes tool-context
+                           (keep :writes results)
+                           (get-in kernel [:settings :state-slots]))]
+     (when (seq conflicts)
+       (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
+                 conflicts))
+     ;; ⑥ messages/records 按原始序排回
+     {:messages (mapv (fn [{:keys [tc value]}]
+                        (msg/tool-result (:id tc) (:name tc) value))
+                      results)
+      :records  (into init-records
+                      (map (fn [{:keys [tc value rejected?]}]
+                             {:name   (keyword (:name tc))
+                              :args   (:args tc)
+                              :result (if rejected? :rejected value)}))
+                      results)
+      :errors   (into []
+                      (keep (fn [{:keys [tc error]}]
+                              (when error
+                                {:id      (:id tc)
+                                 :name    (:name tc)
+                                 :class   (:class error)
+                                 :message (:message error)
+                                 :tc      tc})))
+                      results)
+      :context  context})))
 
 (defn run-tools
   "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。"
@@ -122,17 +198,40 @@
                                                 "已取消（上一轮工具调用未审批/未恢复）")
                               dangling))))))
 
+(defn- env-pause
+  "构造环境类错误的暂停返回值（屏障处策略钩子，S2）。
+   批次已执行完且结果/写折叠均已落定；暂停发生在「结果交给模型之前」。
+   resume 决策：:retry（环境已修复，重跑失败调用）| :proceed（错误结果交给模型）。"
+  [env-errors batch-messages records remaining tctx]
+  {:status :paused
+   :pause-reason (str "环境类错误，需人工介入: "
+                      (clojure.string/join "; "
+                        (map #(str (:name %) ": " (:message %)) env-errors)))
+   :loop-state {:phase          :env-retry
+                :batch-messages batch-messages
+                :failed-calls   (mapv :tc env-errors)
+                :remaining      remaining
+                :records        records}
+   :pending-tool (let [e (first env-errors)]
+                   {:name (:name e) :args (:args (:tc e)) :tool-call (:tc e)})
+   :tool-calls-made records
+   :tool-context tctx})
+
 (defn- run-tool-loop
-  "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或被 gate 暂停。
+  "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或暂停。
 
    callbacks 携带观察回调（:on-llm-call/:on-llm-result/:on-tool-result）和元数据
    （:metadata）。gate 评估结果按 tool-call :id 缓存，确保每个工具调用恰好触发
    一次（不因 pause 检测的两阶段逻辑而重复）。
 
+   policy: {:on-env-error :pause|:proceed}——屏障处发现 :environment 类错误时
+   暂停等人（HITL）还是照常把错误结果交给模型（缺省 :proceed）。
+
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
-   {:status :paused    :loop-state {:tool-calls :remaining :records} :pending-tool {...} :tool-context c}"
-  [kernel delta remaining records tctx gate chat-opts callbacks]
+   {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}
+   （暂停两种 phase：审批（工具未执行）与 :env-retry（批已执行、环境类失败））"
+  [kernel delta remaining records tctx gate chat-opts callbacks policy]
   (let [token (:cancel-token chat-opts)
         meta (or (:metadata callbacks) {})
         on-tool-result (:on-tool-result callbacks)]
@@ -188,9 +287,14 @@
                                    :tool-calls-made records}))
 
                   :else
-                  (let [{:keys [messages records context]}
-                        (execute-batch kernel calls cached-gate tctx records on-tool-result)]
-                    (recur messages (dec remaining) records context)))))))))))
+                  (let [{:keys [messages records context errors]}
+                        (execute-batch kernel calls cached-gate tctx records on-tool-result)
+                        env-errors (when (= :pause (:on-env-error policy))
+                                     (filterv #(= :environment (:class %)) errors))]
+                    (if (seq env-errors)
+                      ;; 屏障处策略钩子：环境类失败 → 带一致快照暂停等人
+                      (env-pause env-errors messages records (dec remaining) context)
+                      (recur messages (dec remaining) records context))))))))))))
 
 (defn invoke
   "工具调用循环主入口（统一循环）。
@@ -200,6 +304,8 @@
    - store:    ChatMemory store（与 kernel 上 memory-filter 同一实例；用于 heal/临时清理）
    - messages: 本轮新消息（中立消息）
    - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags
+               :on-env-error :pause|:proceed（缺省 :proceed——环境类工具失败照常交给模型；
+                              :pause 时在屏障处暂停等人，resume :retry/:proceed 续跑）
                :callbacks  回调 map（:on-llm-call/:on-llm-result/:on-tool-result/:metadata 等）}
 
    返回:
@@ -224,7 +330,8 @@
                                   max-iter [] init-ctx
                                   (:tool-gate opts)
                                   (build-chat-opts kernel opts)
-                                  callbacks)]
+                                  callbacks
+                                  {:on-env-error (or (:on-env-error opts) :proceed)})]
         (when (and ephemeral? store (= :completed (:status result)))
           (memory/mem-clear store conv-id))
         result)
@@ -232,28 +339,68 @@
         (when (and ephemeral? store) (memory/mem-clear store conv-id))
         (throw t)))))
 
+(defn- replace-tool-results
+  "把重试产出的 tool 结果消息按 :tool-call-id 替换进原批次消息（保持原序）。"
+  [orig-messages retry-messages]
+  (let [by-id (into {} (map (juxt :tool-call-id identity)) retry-messages)]
+    (mapv #(or (get by-id (:tool-call-id %)) %) orig-messages)))
+
+(defn- resume-env
+  "从 :env-retry 暂停恢复（批已执行、环境类失败）。
+   decision :retry   → 环境已修复：重跑失败调用，结果按 id 替换进原批次消息；
+                       若仍有环境类失败则再次暂停（同 phase）。
+   decision 其他     → :proceed：原错误结果照常交给模型。"
+  [kernel {:keys [batch-messages failed-calls remaining records]} decision opts]
+  (let [tctx (or (:context opts) (ctx/create))
+        gate (:tool-gate opts)
+        callbacks (or (:callbacks opts) {})
+        policy {:on-env-error (or (:on-env-error opts) :pause)}
+        chat-opts (build-chat-opts kernel opts)]
+    (if (= :retry decision)
+      (let [{:keys [messages records context errors]}
+            (execute-batch kernel failed-calls nil tctx records
+                           (:on-tool-result callbacks))
+            merged (replace-tool-results batch-messages messages)
+            env-errors (when (= :pause (:on-env-error policy))
+                         (filterv #(= :environment (:class %)) errors))]
+        (if (seq env-errors)
+          (env-pause env-errors merged records remaining context)
+          (run-tool-loop kernel merged remaining records context
+                         gate chat-opts callbacks policy)))
+      (run-tool-loop kernel batch-messages remaining records tctx
+                     gate chat-opts callbacks policy))))
+
 (defn resume
   "从 paused 的 loop-state 继续工具循环。
 
+   两种暂停 phase：
+   - 审批暂停（缺省，工具未执行）：decision :approved（强制全部执行）
+     | :rejected（gate 决定，敏感→拒绝）
+   - :env-retry（批已执行、环境类失败）：decision :retry（环境已修复，重跑
+     失败调用）| :proceed（错误结果交给模型）
+
    参数:
    - kernel:     Kernel 实例
-   - loop-state: invoke 返回的 :loop-state {:tool-calls :remaining :records}
-   - decision:   :approved（强制全部执行）| :rejected（gate 决定，敏感→拒绝）
+   - loop-state: invoke 返回的 :loop-state
+   - decision:   见上
    - opts:       同 invoke（须含带 conversation-id 的 :context 以接续历史）
 
    返回: 同 invoke（:completed 或再次 :paused）"
   [kernel loop-state decision opts]
-  (let [{:keys [tool-calls remaining records]} loop-state
-        tctx (or (:context opts) (ctx/create))
-        gate (:tool-gate opts)
-        callbacks (or (:callbacks opts) {})
-        on-tool-result (:on-tool-result callbacks)
-        resume-gate (if (= decision :approved)
-                      (constantly :proceed)
-                      (fn [tc] (if (and gate (= :pause (gate tc))) :reject :proceed)))
-        {:keys [messages records context]}
-        (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
-    (run-tool-loop kernel messages remaining records context
-                   gate
-                   (build-chat-opts kernel opts)
-                   callbacks)))
+  (if (= :env-retry (:phase loop-state))
+    (resume-env kernel loop-state decision opts)
+    (let [{:keys [tool-calls remaining records]} loop-state
+          tctx (or (:context opts) (ctx/create))
+          gate (:tool-gate opts)
+          callbacks (or (:callbacks opts) {})
+          on-tool-result (:on-tool-result callbacks)
+          resume-gate (if (= decision :approved)
+                        (constantly :proceed)
+                        (fn [tc] (if (and gate (= :pause (gate tc))) :reject :proceed)))
+          {:keys [messages records context]}
+          (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
+      (run-tool-loop kernel messages remaining records context
+                     gate
+                     (build-chat-opts kernel opts)
+                     callbacks
+                     {:on-env-error (or (:on-env-error opts) :proceed)}))))

@@ -141,7 +141,7 @@
                           (str "agent-" (java.util.UUID/randomUUID)))
      :callbacks       (or (:callbacks opts) {})
      :state-atom      (atom {:status :idle :paused-state nil :turn-count 0 :run-id nil})
-     :settings        (select-keys opts [:system-prompt :max-iterations])}))
+     :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error])}))
 
 ;;; ============================================================
 ;;; 内部辅助
@@ -179,6 +179,15 @@
 (defn- sys-prompts [agent opts]
   (when-let [sp (or (:system-prompt opts) (:system-prompt (:settings agent)))]
     [{:role "system" :content sp}]))
+
+(defn- env-error-policy
+  "环境类工具失败的屏障策略：显式配置优先；缺省——配置了 :on-tool-call
+   （HITL 已启用，宿主会处理 :paused）的 agent 用 :pause，否则 :proceed
+   （错误结果照常交给模型，不会让无人值守调用方收到意外的暂停态）。"
+  [agent opts]
+  (or (:on-env-error opts)
+      (:on-env-error (:settings agent))
+      (if (gate-of agent) :pause :proceed)))
 
 (defn- cancel-pending!
   "未-resume 保护：暂停态下开新对话时，只重置控制状态。
@@ -264,6 +273,7 @@
     (cond-> {:context (tctx agent)
              :tool-gate (gate-of agent)
              :callbacks callbacks-with-meta
+             :on-env-error (env-error-policy agent opts)
              :max-iterations (or (:max-iterations opts)
                                  (:max-iterations (:settings agent)) 10)}
       (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
@@ -306,21 +316,30 @@
   (= :paused (:status @(:state-atom agent))))
 
 (defn resume
-  "恢复暂停的 Agent。decision = \"approved\"/:approved 批准，其余拒绝。"
+  "恢复暂停的 Agent。
+
+   审批暂停：decision = \"approved\"/:approved 批准，其余拒绝。
+   环境类暂停（:env-retry，工具环境失败）：decision = \"retry\"/:retry 或
+   \"approved\"/:approved 表示环境已修复、重跑失败工具；其余 → 错误结果交给模型。"
   [agent decision]
   (when-not (paused? agent)
     (throw (ex-info "Agent 未处于暂停状态" {:status (:status @(:state-atom agent))})))
   (let [ls (:loop-state (:paused-state @(:state-atom agent)))
-        approved? (or (= decision "approved") (= decision :approved))
+        env? (= :env-retry (:phase ls))
+        approved? (contains? #{"approved" :approved "retry" :retry} decision)
+        loop-decision (if env?
+                        (if approved? :retry :proceed)
+                        (if approved? :approved :rejected))
         run-id (str (java.util.UUID/randomUUID))
         meta (build-meta agent run-id)
         callbacks (:callbacks agent)]
     (swap! (:state-atom agent) assoc :run-id run-id)
     (cb/invoke callbacks :on-resume {:approved? approved?} meta)
     (run-loop agent
-      #(agent-loop/resume (:kernel agent) ls (if approved? :approved :rejected)
+      #(agent-loop/resume (:kernel agent) ls loop-decision
          (cond-> {:context (tctx agent)
                   :tool-gate (gate-of agent)
+                  :on-env-error (env-error-policy agent nil)
                   :callbacks (assoc callbacks :metadata meta)}
            (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil)))))))
 

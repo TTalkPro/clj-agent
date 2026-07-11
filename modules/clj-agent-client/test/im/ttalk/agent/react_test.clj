@@ -23,12 +23,12 @@
   (str "echo: " text))
 
 (deftool append-item
-  "添加项目到列表"
+  "添加项目到列表（ctx 只读；写 delta 走 :writes，槽 reducer 负责合并）"
   [[item :string "项目名"]]
   {:context true}
   (let [items (context/get-var ctx :items [])]
-    {:result (str "已添加: " item)
-     :context (context/set-var ctx :items (conj items item))}))
+    {:result (str "已添加: " item "（快照中已有 " (count items) " 项）")
+     :writes {:items item}}))
 
 (deftool inc-counter
   "增加计数器"
@@ -36,7 +36,7 @@
   {:context true}
   (let [c (context/get-var ctx :counter 0)]
     {:result (str "counter=" (inc c))
-     :context (context/set-var ctx :counter (inc c))}))
+     :writes {:counter (inc c)}}))
 
 ;;; ============================================================
 ;;; 公共设施：mock service + 挂载 memory-filter 的 kernel
@@ -45,12 +45,15 @@
 (defn- mock-service [responses-fn]
   {:chat-fn (fn [_msgs _opts] (responses-fn))})
 
-(defn- build [tools svc store]
-  (let [filters (when store [(ma/memory-filter store)])]
-    (core/build-kernel
-      {:service  svc
-       :tools    (vec tools)
-       :filters  (vec filters)})))
+(defn- build
+  ([tools svc store] (build tools svc store nil))
+  ([tools svc store state-slots]
+   (let [filters (when store [(ma/memory-filter store)])]
+     (core/build-kernel
+       (cond-> {:service  svc
+                :tools    (vec tools)
+                :filters  (vec filters)}
+         state-slots (assoc :state-slots state-slots))))))
 
 ;;; ============================================================
 ;;; invoke 工具循环
@@ -68,14 +71,16 @@
                                    {:id "tc2" :name "append-item" :args {:item "pen"}}])
                     (response/make-response :text "已添加 book 和 pen" :tool-calls nil)))))
         store (memory/in-memory-store)
-        kernel (build [#'append-item] svc store)]
-    (testing "工具结果写回 ToolContext，原变量保留，tool-calls-made 记录"
+        kernel (build [#'append-item] svc store
+                      {:items {:init [] :reduce conj}})]
+    (testing "同批两个写经槽 reducer 按序折叠进 ToolContext，原变量保留"
       (reset! call-count 0)
       (let [result (agent-loop/invoke kernel store
                      [{:role :user :content "添加 book 和 pen"}]
                      {:context (context/create {:items [] :user-id "u123"})})]
         (is (= "已添加 book 和 pen" (get-in result [:response :text])))
-        (is (= ["book" "pen"] (context/get-var (:tool-context result) :items)))
+        (is (= ["book" "pen"] (context/get-var (:tool-context result) :items))
+            "conj reducer 按 tool-call 原始序折叠")
         (is (= "u123" (context/get-var (:tool-context result) :user-id)))
         (is (= 2 (count (:tool-calls-made result))))))))
 
@@ -203,3 +208,245 @@
     (testing "Memory store 拼出完整历史"
       ;; user, assistant(tool-calls), tool-result, assistant(text)
       (is (= 4 (count (memory/mem-get store cid)))))))
+
+;;; ============================================================
+;;; execute-batch MapReduce 语义（S1，设计文档 §9）
+;;; ============================================================
+
+;; 内联工具工厂：行为可闭包注入（deftool 是静态宏，动态行为用 inline handler）
+(defn- inline-tool [name handler & [serial?]]
+  (cond-> {:name name
+           :description name
+           :input_schema {:type "object" :properties {} :required []}
+           :handler handler}
+    serial? (assoc :serial true)))
+
+(defn- batch-kernel
+  "无 service 的 kernel（只测 execute-batch），tools 为 inline 工具。"
+  [tools & [state-slots]]
+  (core/build-kernel (cond-> {:tools (vec tools)}
+                       state-slots (assoc :state-slots state-slots))))
+
+(defn- tc [id name] {:id id :name name :args {}})
+
+(deftest batch-true-parallel-test
+  (testing "同批两个工具互等对方启动——串行执行会死等超时报 :not-parallel"
+    (let [a (promise) b (promise)
+          mk (fn [own other]
+               (fn [_ _] (deliver own true)
+                 (if (true? (deref other 3000 false)) "ok" "not-parallel")))
+          kernel (batch-kernel [(inline-tool "ta" (mk a b))
+                                (inline-tool "tb" (mk b a))])
+          {:keys [messages]} (agent-loop/execute-batch
+                               kernel [(tc "1" "ta") (tc "2" "tb")] nil {} [])]
+      (is (= ["ok" "ok"] (mapv :content messages))))))
+
+(deftest batch-snapshot-isolation-test
+  (testing "同批工具互相看不到对方的写（全部拿轮初快照）"
+    (let [gate-a (promise) gate-b (promise)
+          writer (fn [_ _] (deliver gate-a true)
+                   (deref gate-b 3000 false)
+                   {:result "wrote" :writes {:seen "from-a"}})
+          reader (fn [_ ctx] (deref gate-a 3000 false)
+                   (deliver gate-b true)
+                   (str "saw=" (context/get-var ctx :seen "nothing")))
+          kernel (batch-kernel [(inline-tool "writer" writer)
+                                (inline-tool "reader" reader)])
+          {:keys [messages context]} (agent-loop/execute-batch
+                                       kernel [(tc "1" "writer") (tc "2" "reader")] nil {} [])]
+      (is (= "saw=nothing" (:content (second messages))) "reader 读到的是轮初快照")
+      (is (= "from-a" (context/get-var context :seen)) "屏障后写已折叠进新 context"))))
+
+(deftest batch-last-writer-by-index-test
+  (testing "last-writer 按 tool-call 原始序而非完成序（index 0 慢但先折叠）"
+    (let [slow (fn [_ _] (Thread/sleep 150) {:result "slow" :writes {:x :from-slow}})
+          fast (fn [_ _] {:result "fast" :writes {:x :from-fast}})
+          kernel (batch-kernel [(inline-tool "slow" slow) (inline-tool "fast" fast)])
+          {:keys [context]} (agent-loop/execute-batch
+                              kernel [(tc "1" "slow") (tc "2" "fast")] nil {} [])]
+      (is (= :from-fast (context/get-var context :x))
+          "index 大者后折叠生效，与完成顺序无关"))))
+
+(deftest batch-failed-writes-dropped-test
+  (testing "抛异常的工具：错误折为结果，writes 不生效；其余工具照常"
+    (let [boom (fn [_ _] (throw (ex-info "炸了" {})))
+          good (fn [_ _] {:result "ok" :writes {:good true}})
+          kernel (batch-kernel [(inline-tool "boom" boom) (inline-tool "good" good)])
+          {:keys [messages context]} (agent-loop/execute-batch
+                                       kernel [(tc "1" "boom") (tc "2" "good")] nil {} [])]
+      (is (clojure.string/includes? (:content (first messages)) "错误"))
+      (is (true? (context/get-var context :good)) "collect-all：单个失败不炸批次")
+      (is (nil? (context/get-var context :boom))))))
+
+(deftest batch-messages-order-test
+  (testing "messages/records 按 tool-call 原始序排回（与完成序无关）"
+    (let [slow (fn [_ _] (Thread/sleep 150) "slow-done")
+          fast (fn [_ _] "fast-done")
+          kernel (batch-kernel [(inline-tool "slow" slow) (inline-tool "fast" fast)])
+          {:keys [messages records]} (agent-loop/execute-batch
+                                       kernel [(tc "1" "slow") (tc "2" "fast")] nil {} [])]
+      (is (= ["1" "2"] (mapv :tool-call-id messages)))
+      (is (= ["slow-done" "fast-done"] (mapv :content messages)))
+      (is (= [:slow :fast] (mapv :name records))))))
+
+(deftest batch-serial-degrade-test
+  (testing "批内含 :serial 工具 → 整批退化按序执行（无重叠）"
+    (let [trace (atom [])
+          mk (fn [tag] (fn [_ _]
+                         (swap! trace conj [tag :start])
+                         (Thread/sleep 50)
+                         (swap! trace conj [tag :end])
+                         "done"))
+          kernel (batch-kernel [(inline-tool "s1" (mk :s1) true)
+                                (inline-tool "s2" (mk :s2))])
+          _ (agent-loop/execute-batch kernel [(tc "1" "s1") (tc "2" "s2")] nil {} [])]
+      (is (= [[:s1 :start] [:s1 :end] [:s2 :start] [:s2 :end]] @trace)
+          "按原始序依次执行，不并发"))))
+
+(deftest batch-reject-test
+  (testing ":reject 不执行、不触发回调、无 writes、记录 :rejected"
+    (let [executed (atom false)
+          cb-hits (atom [])
+          w (fn [_ _] (reset! executed true) {:result "ran" :writes {:x 1}})
+          kernel (batch-kernel [(inline-tool "w" w) (inline-tool "ok" (fn [_ _] "fine"))])
+          gate (fn [t] (if (= "w" (:name t)) :reject :proceed))
+          {:keys [messages records context]}
+          (agent-loop/execute-batch kernel [(tc "1" "w") (tc "2" "ok")] gate {} []
+                                    (fn [n _] (swap! cb-hits conj n)))]
+      (is (false? @executed))
+      (is (= "已拒绝执行" (:content (first messages))))
+      (is (= :rejected (:result (first records))))
+      (is (nil? (context/get-var context :x)))
+      (is (= ["ok"] @cb-hits) "reject 的工具不触发 on-tool-result"))))
+
+(deftest batch-conflict-warn-path-test
+  (testing "同批写同一未声明槽：last-writer 生效（warn 路径可执行不炸）"
+    (let [w1 (fn [_ _] {:result "1" :writes {:x 1}})
+          w2 (fn [_ _] {:result "2" :writes {:x 2}})
+          kernel (batch-kernel [(inline-tool "w1" w1) (inline-tool "w2" w2)])
+          {:keys [context]} (agent-loop/execute-batch
+                              kernel [(tc "1" "w1") (tc "2" "w2")] nil {} [])]
+      (is (= 2 (context/get-var context :x))))))
+
+;;; ============================================================
+;;; S2：瞬态重试 + 环境类屏障暂停（设计文档 §5/§9）
+;;; ============================================================
+
+(deftest transient-retry-test
+  (testing "声明 :retry 的工具：:transient 失败自动退避重试至成功"
+    (let [attempts (atom 0)
+          flaky (fn [_ _]
+                  (if (< (swap! attempts inc) 3)
+                    (throw (ex-info "网络抖动" {:error-class :transient}))
+                    "第三次成功"))
+          kernel (batch-kernel [(assoc (inline-tool "flaky" flaky)
+                                       :retry {:max-retries 3 :initial-delay-ms 1})])
+          {:keys [messages errors]} (agent-loop/execute-batch
+                                      kernel [(tc "1" "flaky")] nil {} [])]
+      (is (= 3 @attempts))
+      (is (= "第三次成功" (:content (first messages))))
+      (is (empty? errors) "重试成功后不出现在 :errors")))
+
+  (testing "重试耗尽仍失败 → 错误结果 + :errors 携带类别"
+    (let [attempts (atom 0)
+          dead (fn [_ _] (swap! attempts inc)
+                 (throw (ex-info "一直挂" {:error-class :transient})))
+          kernel (batch-kernel [(assoc (inline-tool "dead" dead)
+                                       :retry {:max-retries 2 :initial-delay-ms 1})])
+          {:keys [messages errors]} (agent-loop/execute-batch
+                                      kernel [(tc "1" "dead")] nil {} [])]
+      (is (= 3 @attempts) "初次 + 2 次重试")
+      (is (clojure.string/includes? (:content (first messages)) "错误"))
+      (is (= :transient (:class (first errors))))))
+
+  (testing "未声明 :retry → 不重试"
+    (let [attempts (atom 0)
+          flaky (fn [_ _] (swap! attempts inc)
+                  (throw (ex-info "抖动" {:error-class :transient})))
+          kernel (batch-kernel [(inline-tool "flaky" flaky)])]
+      (agent-loop/execute-batch kernel [(tc "1" "flaky")] nil {} [])
+      (is (= 1 @attempts))))
+
+  (testing ":semantic 失败即使声明 :retry 也不重试（重试同一调用无意义）"
+    (let [attempts (atom 0)
+          bad (fn [_ _] (swap! attempts inc) (throw (ex-info "查无此人" {})))
+          kernel (batch-kernel [(assoc (inline-tool "bad" bad)
+                                       :retry {:max-retries 3 :initial-delay-ms 1})])]
+      (agent-loop/execute-batch kernel [(tc "1" "bad")] nil {} [])
+      (is (= 1 @attempts)))))
+
+(deftest env-error-pause-resume-test
+  (let [env-ok (atom false)   ;; 模拟环境：false=凭证失效，true=已修复
+        calls  (atom 0)
+        svc (mock-service
+              (fn []
+                (let [n (swap! calls inc)]
+                  (if (= n 1)
+                    (response/make-response :text nil
+                      :tool-calls [{:id "t1" :name "fetch" :args {}}
+                                   {:id "t2" :name "note" :args {}}])
+                    (response/make-response :text "拿到了" :tool-calls nil)))))
+        fetch (fn [_ _] (if @env-ok
+                          "数据"
+                          (throw (ex-info "凭证失效" {:error-class :environment}))))
+        note  (fn [_ _] "旁路成功")
+        store (memory/in-memory-store)
+        kernel (core/build-kernel
+                 {:service svc
+                  :tools [(inline-tool "fetch" fetch) (inline-tool "note" note)]
+                  :filters [(ma/memory-filter store)]})]
+    (testing "环境类失败 → 屏障处暂停（:env-retry），旁路工具结果保留"
+      (reset! calls 0)
+      (let [r (agent-loop/invoke kernel store [(msg/user "取数据")]
+                {:context (context/with-conversation-id (context/create) "env-1")
+                 :on-env-error :pause})]
+        (is (= :paused (:status r)))
+        (is (= :env-retry (get-in r [:loop-state :phase])))
+        (is (clojure.string/includes? (:pause-reason r) "环境类错误"))
+        (is (= "fetch" (get-in r [:pending-tool :name])))
+        (testing "resume :retry（环境已修复）→ 失败工具重跑、结果按 id 替换、循环完成"
+          (reset! env-ok true)
+          (let [r2 (agent-loop/resume kernel (:loop-state r) :retry
+                     {:context (context/with-conversation-id (context/create) "env-1")
+                      :on-env-error :pause})]
+            (is (= :completed (:status r2)))
+            (is (= "拿到了" (get-in r2 [:response :text])))
+            ;; 历史里 t1 的结果应是重试后的"数据"，不是错误
+            (let [stored (memory/mem-get store "env-1")
+                  t1-results (filterv #(= "t1" (:tool-call-id %)) stored)]
+              (is (= ["数据"] (mapv :content t1-results))
+                  "重试结果替换原错误，历史无重复 tool_result"))))))
+    (testing "resume :proceed → 错误结果照常交给模型"
+      (reset! env-ok false)
+      (reset! calls 0)
+      (let [r (agent-loop/invoke kernel store [(msg/user "再取")]
+                {:context (context/with-conversation-id (context/create) "env-2")
+                 :on-env-error :pause})
+            r2 (agent-loop/resume kernel (:loop-state r) :proceed
+                 {:context (context/with-conversation-id (context/create) "env-2")
+                  :on-env-error :pause})]
+        (is (= :completed (:status r2)))
+        (let [stored (memory/mem-get store "env-2")
+              t1-results (filterv #(= "t1" (:tool-call-id %)) stored)]
+          (is (clojure.string/includes? (:content (first t1-results)) "错误")
+              "错误结果原样进入历史交给模型"))))))
+
+(deftest env-error-default-proceed-test
+  (testing "react 层缺省 :proceed：环境类失败不暂停，错误结果交给模型"
+    (let [calls (atom 0)
+          svc (mock-service
+                (fn []
+                  (if (= 1 (swap! calls inc))
+                    (response/make-response :text nil
+                      :tool-calls [{:id "t1" :name "broken" :args {}}])
+                    (response/make-response :text "我看到工具挂了" :tool-calls nil))))
+          broken (fn [_ _] (throw (ex-info "磁盘满" {:error-class :environment})))
+          store (memory/in-memory-store)
+          kernel (core/build-kernel
+                   {:service svc
+                    :tools [(inline-tool "broken" broken)]
+                    :filters [(ma/memory-filter store)]})
+          r (agent-loop/invoke kernel store [(msg/user "干活")]
+              {:context (context/with-conversation-id (context/create) "env-3")})]
+      (is (= :completed (:status r)))
+      (is (= "我看到工具挂了" (get-in r [:response :text]))))))
