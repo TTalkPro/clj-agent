@@ -2,6 +2,51 @@
 
 本项目版本号形如 `0.x.<git-count>`（各模块同步）。本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织。
 
+## [0.3.0] - 未发布（2026-07-11，S1：工具阶段 MapReduce 化）
+
+设计与动机见 `docs/agent-loop-concurrency-design.md`（§9 为实施设计）。
+
+### 💥 破坏性变更
+
+- **同一轮的多个 tool-call 并行执行**（虚拟线程；批内任一工具声明
+  `{:serial true}` 时整批退化为按序执行）。工具的执行环境从「批内穿线」
+  改为「轮初快照」：同批工具互相看不到对方的写（此前语义全仓库零真实使用者）。
+- **ToolContext 对工具/filter 只读**。工具写共享状态改走返回值
+  `{:result r :writes {k v}}`（任意工具均可，不再要求 `{:context true}`）；
+  屏障处按 tool-call 原始序经 `build-kernel` 新增的 `:state-slots` 槽级
+  reducer 折叠（未声明槽默认 last-writer，冲突记 warn）。失败/超时/被拒的
+  调用 `:writes` 不生效（单工具事务性）。
+- **`kernel/invoke-tool` 返回 `{:value (:writes)}`**（原 `{:value :context}`）。
+  跨轮折叠由调用方（react 循环）负责；直调方自行用 `context/apply-writes`。
+- **tool filter 响应契约收窄为 `{:result (:writes)}`**：响应侧 `:context`
+  移除——filter 短路分支不再需要手工回传 `(:context req)`（原易错点）。
+- **工具/inline handler 返回值不再按「含 `:result` 的 map」拆包**，判据改为
+  「含 `:writes`」；返回 `{:result ...}` 包装的旧 inline handler 需改为直接
+  返回值（subagent delegate 已随迁）。
+- `on-tool-result` 回调改为任务完成时实时触发，批内顺序不确定
+  （确定顺序请读 `:tool-calls-made`）。
+
+### ✨ 新增
+
+- `context/apply-writes`：批次写折叠纯函数（槽级 reducer + conflict 上报）。
+- `build-kernel :state-slots`：状态槽合并语义声明。
+- `deftool {:serial true}` / inline 工具 `:serial` 键 + `kernel/serial-tool?`。
+- **工具失败分层路由（S2，纯增量）**：`model.error/classify-exception`
+  （显式 `ex-data :error-class` > canonical `:retryable?`/`:auth-error` >
+  常见网络异常 > 缺省 `:semantic`）；`invoke-tool`/`execute-batch` 透出
+  `:error {:class :message}` / `:errors`。
+- **瞬态类自动重试**：`deftool {:retry true|{:max-retries n :initial-delay-ms ms}}`
+  （幂等工具 opt-in），仅 `:transient` 类错误指数退避重试，对模型透明；
+  timeout-filter 的超时结果标 `:transient`。
+- **环境类屏障暂停（HITL）**：react `:on-env-error :pause|:proceed`（缺省
+  :proceed）——环境类失败在屏障处带一致快照暂停；resume 决策 `:retry`
+  （重跑失败调用，结果按 tool-call-id 替换进原批次）| `:proceed`（错误交给
+  模型）。client 层配置了 `:on-tool-call` 的 HITL agent 自动 `:pause`，
+  `resume` 接受 `"retry"/"approved"` 表示环境已修复。
+- 新语义测试 9 个：批内真并行证明、快照隔离、last-writer 按调用序（非完成序）、
+  失败 writes 丢弃、messages/records 原序、serial 整批退化、reject 语义、
+  reducer 折叠与跨轮累积。全套 213 tests / 870 assertions / 0 failures。
+
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 
 v0.2 是一次**破坏性**版本：统一消息/tool-call 词汇、模块重组、删除无消费者的子系统。
