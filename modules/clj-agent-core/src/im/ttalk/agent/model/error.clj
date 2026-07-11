@@ -81,6 +81,38 @@
        (:context opts)  (assoc :context (:context opts))))))
 
 ;;; ============================================================
+;;; 工具错误分类（S2：屏障策略路由，见 docs/agent-loop-concurrency-design.md §5）
+;;; ============================================================
+
+(defn classify-exception
+  "把工具执行抛出的异常分类为故障类别，决定屏障处的路由：
+
+   - :semantic    （缺省）模型造成、只有模型能修 → 序列化为结果回给模型
+   - :transient   重试同一调用有意义（超时/限流/网络抖动）→ 工具级自动重试
+                  （仅当工具声明 :retry；幂等前提）
+   - :environment 模型修不了、重试无用（认证失效/配额/磁盘满）→ 屏障处暂停等人
+
+   判定顺序：
+   1. ex-data 显式 :error-class（工具作者标注，最高优先级）
+   2. canonical error（D5 词汇）：:retryable? true → :transient；
+      :auth-error → :environment；其余 → :semantic
+   3. 常见网络异常（SocketTimeoutException/ConnectException/HttpTimeoutException）
+      → :transient
+   4. 其余 → :semantic"
+  [e]
+  (let [data (ex-data e)]
+    (cond
+      (:error-class data) (:error-class data)
+      (contains? data :retryable?) (cond
+                                     (:retryable? data)          :transient
+                                     (= :auth-error (:type data)) :environment
+                                     :else                        :semantic)
+      (or (instance? java.net.SocketTimeoutException e)
+          (instance? java.net.ConnectException e)
+          (instance? java.net.http.HttpTimeoutException e)) :transient
+      :else :semantic)))
+
+;;; ============================================================
 ;;; 错误判断
 ;;; ============================================================
 

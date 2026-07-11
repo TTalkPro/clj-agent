@@ -376,3 +376,29 @@
     (is (= "[TIMEOUT-ERROR] 请求超时 (HTTP 504) [openai]"
            (errors/format-error (errors/error :timeout-error "请求超时"
                                               {:status 504 :provider :openai}))))))
+
+;;; ============================================================
+;;; classify-exception（S2 屏障路由分类）
+;;; ============================================================
+
+(deftest classify-exception-test
+  (testing "工具作者显式标注最高优先级"
+    (is (= :environment (errors/classify-exception
+                          (ex-info "凭证过期" {:error-class :environment}))))
+    (is (= :transient (errors/classify-exception
+                        (ex-info "抖一下" {:error-class :transient
+                                            :retryable? false}))
+        ) "显式标注压过 canonical 推断"))
+  (testing "canonical error（D5 词汇）推断"
+    (is (= :transient (errors/classify-exception
+                        (ex-info "限流" {:type :rate-limit-error :retryable? true}))))
+    (is (= :environment (errors/classify-exception
+                          (ex-info "401" {:type :auth-error :retryable? false}))))
+    (is (= :semantic (errors/classify-exception
+                       (ex-info "参数不合法" {:type :validation-error :retryable? false})))))
+  (testing "常见网络异常 → :transient"
+    (is (= :transient (errors/classify-exception (java.net.SocketTimeoutException. "t"))))
+    (is (= :transient (errors/classify-exception (java.net.ConnectException. "refused")))))
+  (testing "普通异常缺省 :semantic（errors are data，回给模型）"
+    (is (= :semantic (errors/classify-exception (ex-info "查无此人" {}))))
+    (is (= :semantic (errors/classify-exception (NullPointerException.))))))
