@@ -2,12 +2,27 @@
   "Filter 系统 - 扁平 vector，注册顺序即执行顺序
 
     所有 filter 都是 around：(fn [req chain] -> resp)。
-    filter 通过 :chat 和 :tool 键挂到对应的链上，两者可以并存。
+    filter 通过 :chat / :tool / :turn 三个键挂到对应的链上，可任意并存：
+
+    - :chat  包单次 LLM 调用（工具循环内每轮执行；memory/日志/重试）
+    - :tool  包单次工具执行（并行任务内各自生效；超时/审批/限流）
+    - :turn  包**整个工具循环**（每 turn 一次；RAG 注入/最终答案校验/
+             guardrail/turn 级预算）。TurnRequest {:messages :context (:resume?)}
+             可改写；TurnResult 为循环结果 {:status :response :tool-context ...}。
+             闭包链天然\"仅下游\"，turn filter 可多次 (chain req) 递归重入
+             （evaluator-optimizer；重入的 :messages 应为新 delta，完整上下文
+             由 memory filter 拼接）。**硬规则**：:paused/:cancelled/:error
+             结果必须透传、不得重入（暂停态上重试会破坏 HITL 语义）。
+             resume 同样经过 turn 链（TurnRequest 带 :resume? true，首次进入
+             延续暂停的 turn、:messages 为 nil）——请求侧改写类 filter（RAG
+             注入等）应在 :resume? 时跳过首次改写；响应侧（校验/guardrail）
+             无需感知，递归重入照常。
 
     Filter 定义:
       {:name :my-filter
        :chat (fn [req chain] ...)     ;; 可选，挂到 chat 链
-       :tool (fn [req chain] ...)}    ;; 可选，挂到 tool 链
+       :tool (fn [req chain] ...)     ;; 可选，挂到 tool 链
+       :turn (fn [req chain] ...)}    ;; 可选，挂到 turn 链
 
     filter 可以通过闭包携带自己的上下文：
       (defn caching-filter []
@@ -24,7 +39,8 @@
     (build-kernel {:service svc
                    :tools [#'t1 #'t2]
                    :filters [memory-filter retry-filter logging-filter]})"
-  (:require [clojure.string]))
+  (:require [clojure.string]
+            [im.ttalk.agent.model.message :as msg]))
 
 (set! *warn-on-reflection* true)
 
@@ -38,15 +54,17 @@
     参数:
     - name: 标识(keyword)
     - opts: 可选键值对
-      :chat (fn [req chain] resp)  — around-chat，可选
-      :tool (fn [req chain] resp)  — around-tool，可选
-      :chat 和 :tool 可以同时提供
+      :chat (fn [req chain] resp)  — around 单次 LLM 调用，可选
+      :tool (fn [req chain] resp)  — around 单次工具执行，可选
+      :turn (fn [req chain] resp)  — around 整个工具循环（每 turn 一次），可选
+      三者可任意并存
 
     返回: filter 定义 map"
-  [name & {:keys [chat tool]}]
+  [name & {:keys [chat tool turn]}]
   (cond-> {:name name}
     chat (assoc :chat chat)
-    tool (assoc :tool tool)))
+    tool (assoc :tool tool)
+    turn (assoc :turn turn)))
 
 ;;; ============================================================
 ;;; 洋葱链构建
@@ -133,3 +151,45 @@
                   (chain req)
                   {:result "用户拒绝了此敏感工具调用"})
                 (chain req)))})))
+
+;;; ============================================================
+;;; 内置 filter: 最终答案校验（turn 链，递归重试）
+;;; ============================================================
+
+(defn validation-turn-filter
+  "最终答案校验 turn filter（对标 Spring AI StructuredOutputValidationAdvisor，
+   设计见 docs/agent-loop-concurrency-design.md §14.2）。
+
+   validate-fn: (fn [turn-result] -> nil=通过 | 字符串=不合格原因)。
+   不合格时把原因作为反馈消息重入循环（新 delta；完整上下文由 memory filter
+   拼接，故须与 memory 同挂），最多重试 max-retries 次，耗尽后原样返回最后
+   一次结果（调用方自行判断 valid 与否）。
+
+   :paused / :cancelled / :error 结果透传不重试（HITL 硬规则）。
+
+   opts:
+   - :max-retries  重试上限（缺省 2）
+   - :feedback-fn  (fn [原因] -> 中立消息)，缺省生成
+                   「你的上一个回答未通过校验：<原因>。请修正后重新回答。」"
+  [validate-fn & {:keys [max-retries feedback-fn]
+                  :or {max-retries 2}}]
+  (let [mk-feedback (or feedback-fn
+                        (fn [problem]
+                          (msg/user (str "你的上一个回答未通过校验：" problem
+                                         "。请修正后重新回答。"))))]
+    {:name :validation
+     :turn (fn [req chain]
+             (loop [attempt 0, req req]
+               (let [result (chain req)]
+                 (if (not= :completed (:status result))
+                   result                          ;; 暂停/取消/错误：透传
+                   (if-let [problem (validate-fn result)]
+                     (if (>= attempt max-retries)
+                       result                      ;; 耗尽：原样返回
+                       ;; 重入是有真实入口消息的新循环：摘掉可能继承的
+                       ;; :resume? 标记，让下游请求侧 filter 照常工作
+                       (recur (inc attempt)
+                              (-> req
+                                  (dissoc :resume?)
+                                  (assoc :messages [(mk-feedback problem)]))))
+                     result)))))}))
