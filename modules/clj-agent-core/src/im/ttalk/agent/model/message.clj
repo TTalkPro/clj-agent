@@ -76,13 +76,19 @@
    - tool-call-id: 关联的工具调用 ID
    - name:         工具名（字符串或 keyword）
    - content:      结果内容（非字符串会 pr-str）
+   - writes:       (可选) 该工具对状态槽的写意图 {k v}——event-sourcing
+                   元数据：只进历史存储，不发给 LLM（wire 层构造时天然剥落）。
+                   见 docs/agent-loop-concurrency-design.md §12.4
 
-   返回：{:role :tool :tool-call-id :name :content}"
-  [tool-call-id name content]
-  {:role :tool
-   :tool-call-id tool-call-id
-   :name (if (keyword? name) (clojure.core/name name) (str name))
-   :content (if (string? content) content (pr-str content))})
+   返回：{:role :tool :tool-call-id :name :content (:writes)}"
+  ([tool-call-id name content]
+   (tool-result tool-call-id name content nil))
+  ([tool-call-id name content writes]
+   (cond-> {:role :tool
+            :tool-call-id tool-call-id
+            :name (if (keyword? name) (clojure.core/name name) (str name))
+            :content (if (string? content) content (pr-str content))}
+     (seq writes) (assoc :writes writes))))
 
 ;;; ============================================================
 ;;; 谓词与访问器
