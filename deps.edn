@@ -4,6 +4,9 @@
           "modules/clj-agent-provider/src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
+        ;; Process V2 并行 runtime（process/parallel.clj）
+        org.clojure/core.async {:mvn/version "1.6.681"}
+
         ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
 
