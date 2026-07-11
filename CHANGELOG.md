@@ -71,23 +71,6 @@ v0.2 是一次**破坏性**版本：统一消息/tool-call 词汇、模块重组
 
 ### ✨ 新增
 
-- **Process Framework V1（新模块 `im.ttalk/clj-agent-process`）**：事件驱动的
-  步骤编排引擎（≈ SK Process / beamai process）。纯函数式同步 runtime（零外部
-  依赖、确定性执行）：builder 校验 + 事件路由 + required-inputs 激活模型 +
-  step 私有 state / 共享 context 双层状态；支持线性/Fan-out/Fan-in/循环/
-  pause-resume/error-handler/on-quiescent 快照/快照恢复。
-- **Process Framework V2 并行引擎（`process.parallel`，2026-07-11）**：core.async
-  事件循环，与 V1 并存（同一 spec 两引擎都能跑，event/step/builder 层复用）。
-  fan-out 真并行（router/worker go-loop + in-flight 计数完成判定）；ProcessHandle
-  外部事件（`start-process`/`send-event`/`get-status`/`wait-for-completion`/
-  `stop-process`，`:auto-complete? false` 支持外部事件驱动的常驻 process）；
-  单步与全局 `:timeout-ms`；同步 `run-process`/`resume` 与 V1 同构。context
-  写回只合并相对执行前快照有变化的 key（并行 step 不互相覆盖）。core.async
-  依赖仅进 process 模块。
-- **Timeline / Snapshot（`clj-agent-process` 内）**：通用版本链管理
-  （时间旅行 go-back/go-forward/goto、分支实验、血缘、prune；in-memory + SQLite
-  两个 store）+ Process 快照适配（`checkpointer` 挂 on-quiescent 自动存档、
-  `resume-checkpoint` 跨进程重启续跑暂停的流程、分支时间线互不污染）。
 - **流式建链重试（opt-in）**：`post-stream-sync` 支持 `:retry`（约定同
   `http.retry/maybe-with-retry`：`true`=默认配置 / map=合并），仅当错误可重试
   **且尚未流出任何 token** 时指数退避重试；provider config 传 `:retry` 即启用。
@@ -100,8 +83,11 @@ v0.2 是一次**破坏性**版本：统一消息/tool-call 词汇、模块重组
 - 测试基线 196 → 204 tests / 840 assertions / 0 failures；新增覆盖：
   timeout/approval filter（含后台中断不泄漏线程）、factory 配置（env 名规范/
   三级合并/validate 全分支）、SQLite 与 InMemory 并发写、子 agent 生命周期、
-  DashScope 同步回归、流式建链重试。加上 Process V1/V2 + Timeline 后
-  全套 249 tests / 1020 assertions / 0 failures。
+  DashScope 同步回归、流式建链重试。
+- Process Framework（V1 同步引擎 / V2 core.async 并行引擎 / Timeline 快照，
+  曾以 `clj-agent-process` 第四模块形态完整落地并全绿）在发布前整体撤下——
+  设计经评审判定需重新思考（V1/V2 快照与并行的语义撕裂，对照 SK Process /
+  MS Agent Framework superstep 模型）；未进入任何发布版本，设计文档留档。
 - `client_test` 的 httpbin.org 外网用例本地化（com.sun.net.httpserver），
   消除 CI flake。
 - 设计文档状态与代码对齐：memory-filter-refactor（已完成）、onion-filter

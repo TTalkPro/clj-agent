@@ -174,36 +174,25 @@
   **验收成立：`grep ChatMemory` 在 clj-agent-core 内零命中**。
   设计文档 onion-filter.md / response-path-consolidation.md 状态已对齐。
 
-## P4 — 新功能（2026-07-10 启动）
+## P4 — 新功能（2026-07-10 启动，2026-07-11 全部撤下）
 
-- [x] **Process Framework V1**（方案见 `docs/process-framework-design.md`）：
-  新模块 `clj-agent-process`（仅依赖 core，零外部依赖）。纯函数式同步事件循环：
-  builder（build 时校验）+ runtime（run-process/resume/paused?）+ event/step 纯函数层。
-  覆盖：线性 / Fan-out / Fan-in / 循环（自环 + :terminate）/ can-activate? 守卫 /
-  pause-resume（可对同一暂停快照多次 resume）/ error-handler（:error 事件隐式路由）/
-  on-quiescent 静止点快照 / 快照恢复（step-states+context+initial-events 续驱）/
-  on-terminate 清理（异常互不影响）/ max-events 保险丝 / kernel 经 context 注入。
-  18 tests / 67 assertions 钉住设计文档全部模式。
-- [x] **Process Framework V2**（2026-07-11，方案见 `docs/process-parallel-design.md`）：
-  新 ns `process/parallel.clj`（V1 不动，同一 spec 两引擎都能跑；event/step/builder
-  直接复用）。router/worker go-loop + 单一 in-flight 计数完成判定（子项先 inc
-  后父项 dec，不假归零）；ProcessHandle（start-process/send-event/get-status/
-  wait-for-completion/stop-process）+ 同步 run-process/resume 与 V1 同构；
-  单步 `:timeout-ms`（超时线程不强杀，结果天然写不进共享状态）+ 全局 :timeout-ms；
-  新增 `:auto-complete?`（外部事件驱动的常驻 process 不被误判完成）；context
-  写回只合并相对快照有变化的 key（并行不互相覆盖）。core.async 依赖只进
-  process 模块（+root 聚合）。13 tests / 49 assertions（含 fan-out 真并行的
-  互等证明）。全套 249/1020/0。V2 无 on-quiescent（无确定性静止点），
-  快照/Timeline 仍走 V1；实施偏差记录见设计文档实施笔记。
-- [x] **Timeline / Snapshot**（2026-07-10，方案见 `design/timeline-snapshot-checkpoint.md`）：
-  落地 clj-agent-process 模块。通用层 `timeline`（版本链 save!/load-latest、
-  时间旅行 goto!/go-back!/go-forward!（back/forward 不切分支保证对称性）、
-  分支 create-branch!/switch-branch!、血缘 get-lineage、prune!；TimelineStore
-  协议 + in-memory + SQLite(EDN) 两个 store）+ 框架层 `process.snapshot`
-  （checkpointer 挂 on-quiescent 自动存档并剥 :kernel、resume-checkpoint 跨进程
-  重启续跑、branch! 分支实验、restore-opts）；runtime 新增 resume-from-snapshot。
-  14 个测试：链/旅行/分支对称性/血缘/prune/SQLite 跨实例持久化/暂停点跨重启
-  续跑/分支实验互不污染。
+- [x] ~~Process Framework V1 / V2 / Timeline-Snapshot~~ → **2026-07-11 用户拍板
+  整体删除，重新思考**。曾完整落地并全绿（V1 纯函数同步 18 tests、V2 core.async
+  并行 13 tests、Timeline/Snapshot 14 tests；全套 249/1020/0），随后在
+  「V2 无确定性静止点 → 对照 SK Process / MS Agent Framework 的 superstep
+  checkpoint 模型」的讨论后判定设计有结构性问题，整个 `modules/clj-agent-process`
+  模块（含 Timeline/Snapshot）+ root 接线（deps/tests.edn/CI/install/README）
+  全部移除；core.async 依赖随之退出。
+  - 代码可从 git 历史找回：V1 见 baf1994/a2a541d、Timeline 见 7bc5d64..764285c、
+    V2 见 63dc926..fa13f2b（并行提交会话在删除决定前已提交）。
+  - 三份设计文档（`docs/process-framework-design.md`、
+    `docs/process-parallel-design.md`、`design/timeline-snapshot-checkpoint.md`）
+    保留并标注已废弃，作为 rethink 的输入。
+- [ ] **Process 能力 rethink**（待启动）：重新回答「编排该不该做、以什么形态做」。
+  已知输入：V1（确定性/快照）与 V2（自由并发）的语义撕裂；BSP superstep
+  （= 原设计文档方案 C，MS Agent Framework 已验证：批内并行 + 屏障处 checkpoint
+  且快照含在途消息）是"既要并行又要快照"的已验证中间点；SK Dapr actor 路线
+  （per-step 持久化、放弃全局快照）对标 beamai。
 
 ### 📋 历史账本
 
