@@ -514,7 +514,7 @@ env-retry 修复后 retry；context 累积恢复回归；暂停态下开新 chat
   SQLite/in-memory 实现零改动；
 - **所有既有组件自动兼容**：memory advisor / PauseStore / react 循环全部
   按 conversation-id 工作，换分支 = 换 conv-id 建 agent，无组件感知"树"；
-- 血缘存 LineageStore（工程学同 PauseStore：协议 + in-memory + SQLite EDN）；
+- 血缘存 BranchStore（工程学同 PauseStore：协议 + in-memory + SQLite EDN）；
 - 对比树形 store（消息带 parent 指针）：表达力相同但要改 ChatMemory 契约；
   本框架量级下前缀复制成本可忽略，简单性胜。
 
@@ -549,9 +549,9 @@ tool-result 中立消息新增可选 `:writes` 元数据（该工具对状态槽
 ### 12.5 实施轮廓
 
 - `model.message/tool-result` 4-arity 带 writes；execute-batch 落消息时附带；
-- 新 ns `im.ttalk.agent.timeline`（client 模块）：LineageStore 协议 +
+- 新 ns `im.ttalk.agent.timeline`（client 模块）：BranchStore 协议 +
   in-memory/SQLite + fork!/rollback!/lineage/ancestry/prune!，deps 显式传入
-  `{:memory mem :pause-store ps :lineage ls}`（后两者可选）；
+  `{:memory mem :pause-store ps :branch ls}`（后两者可选）；
 - 测试：writes 落历史（错误工具无 writes）/ wire 剥除 / fork 前缀与血缘 /
   暂停 fork 带快照 + 双分支各自 resume 不同决策 / rollback 截断清暂停 /
   prune 拒绝有子 / ancestry。

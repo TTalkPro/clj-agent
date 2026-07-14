@@ -172,7 +172,7 @@ payload 在 resume 时才提供，与快照正交。
   (pause-load   [store conv-id])
   (pause-clear! [store conv-id]))
 ;; in-memory-pause-store / sqlite-pause-store（EDN 一列，locking 串行化，
-;; 可与 ChatMemory / LineageStore 同库不同表）
+;; 可与 ChatMemory / BranchStore 同库不同表）
 ```
 
 ### 3.3 Agent 集成（opt-in 全自动）
@@ -232,13 +232,13 @@ payload 在 resume 时才提供，与快照正交。
 
 ### 4.3 分支模型：fork-as-new-conversation
 
-分支 = 前缀复制到新 conversation-id + 一条血缘记录（`LineageStore`，
+分支 = 前缀复制到新 conversation-id + 一条血缘记录（`BranchStore`，
 in-memory + SQLite EDN）。现有 ChatMemory 协议零改动；memory advisor /
 PauseStore / react 循环全部按 conversation-id 工作——**没有组件感知"树"**，
 换分支就是换 conv-id 建 agent。
 
 ```clojure
-(def deps {:memory mem :pause-store ps :lineage (tl/in-memory-lineage-store)})
+(def deps {:memory mem :pause-store ps :branch (tl/in-memory-branch-store)})
 (tl/fork! deps "main" {:as "exp"})   ;; 全量分支（源暂停中 → 连带暂停快照）
 (tl/fork! deps "main" {:at 4})       ;; 前 4 条消息处开分支
 (tl/rollback! deps "main" 4)         ;; 破坏性截断（"重新生成"；清暂停快照）
@@ -279,7 +279,7 @@ tool-result 中立消息携带可选 `:writes` 元数据（该工具对状态槽
 | client | `create-agent {:pause-store :on-env-error :state-slots ...}`；`chat`；`paused?`；`resume [agent decision (payload)]`；`reset!` |
 | react | `invoke {... :tool-gate :on-env-error}`；`resume [kernel loop-state decision opts]`（opts `:payload`）；`execute-batch`（gate 决策：`:proceed/:reject/{:reject 理由}/{:reply 结果}`） |
 | pause | `in-memory-pause-store` / `sqlite-pause-store`；`pause-save!/load/clear!`；`snapshot`/`strip-unserializable` |
-| timeline | `in-memory-lineage-store` / `sqlite-lineage-store`；`fork!`/`rollback!`/`lineage`/`ancestry`/`prune!` |
+| timeline | `in-memory-branch-store` / `sqlite-branch-store`；`fork!`/`rollback!`/`lineage`/`ancestry`/`prune!` |
 | tool 侧约定 | `(throw (ex-info "..." {:error-class :transient/:environment}))`；`deftool {:retry ... :serial ... :sensitive ...}` |
 
 ---
