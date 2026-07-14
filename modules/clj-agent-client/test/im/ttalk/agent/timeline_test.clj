@@ -64,8 +64,8 @@
 
 (deftest fork-basic-test
   (let [mem (memory/in-memory-store)
-        lin (tl/in-memory-lineage-store)
-        deps {:memory mem :lineage lin}]
+        lin (tl/in-memory-branch-store)
+        deps {:memory mem :branch lin}]
     (seed! mem "main" 6)
     (testing "全量 fork：完整前缀 + 血缘"
       (let [b (tl/fork! deps "main" {:as "b-full"})]
@@ -87,8 +87,8 @@
 
 (deftest ancestry-and-prune-test
   (let [mem (memory/in-memory-store)
-        lin (tl/in-memory-lineage-store)
-        deps {:memory mem :lineage lin}]
+        lin (tl/in-memory-branch-store)
+        deps {:memory mem :branch lin}]
     (seed! mem "root" 4)
     (let [c1 (tl/fork! deps "root" {:as "c1"})
           c2 (tl/fork! deps c1 {:at 2 :as "c2"})]
@@ -127,8 +127,8 @@
                     {:text "好的，不执行" :tool-calls nil}])
         mem (memory/in-memory-store)
         ps  (pause/in-memory-pause-store)
-        lin (tl/in-memory-lineage-store)
-        deps {:memory mem :pause-store ps :lineage lin}
+        lin (tl/in-memory-branch-store)
+        deps {:memory mem :pause-store ps :branch lin}
         mk (fn [cid] (agent/create-agent
                        {:provider provider :model "test"
                         :tools [#'ts/dangerous-tool]
@@ -165,7 +165,7 @@
                    [{:text "第一次回答" :tool-calls nil}
                     {:text "第二次回答" :tool-calls nil}])
         mem (memory/in-memory-store)
-        deps {:memory mem :lineage (tl/in-memory-lineage-store)}
+        deps {:memory mem :branch (tl/in-memory-branch-store)}
         a1 (agent/create-agent {:provider provider :model "test"
                                 :memory mem :conversation-id "edit-main"})]
     ;; 造两轮对话：u1 a1 u2 a2（共 4 条）

@@ -12,12 +12,12 @@
    PauseStore 快照——两个分支可各自 resume 不同决策（HITL 决策分支）。
 
    用法：
-     (def deps {:memory mem :pause-store ps :lineage (in-memory-lineage-store)})
-     (fork! deps \"main\" {})                ;; 全量分支（含暂停快照）
+     (def deps {:memory mem :pause-store ps :branch (in-memory-branch-store)})
+     (fork! deps \"main\" {})                 ;; 全量分支（含暂停快照）
      (fork! deps \"main\" {:at 4 :as \"exp\"}) ;; 前 4 条消息处开分支
-     (rollback! deps \"main\" 4)             ;; 破坏性截断（\"重新生成\"）
-     (ancestry deps \"exp\")                 ;; 血缘回溯
-     (prune! deps \"exp\")                   ;; 删分支（有子分支拒绝）"
+     (rollback! deps \"main\" 4)              ;; 破坏性截断（\"重新生成\"）
+     (ancestry deps \"exp\")                  ;; 血缘回溯
+     (prune! deps \"exp\")                    ;; 删分支（有子分支拒绝）"
   (:require [clojure.edn :as edn]
             [next.jdbc :as jdbc]
             [im.ttalk.agent.memory :as memory]
@@ -26,70 +26,70 @@
 (set! *warn-on-reflection* true)
 
 ;;; ============================================================
-;;; LineageStore：分支血缘
+;;; BranchStore：分支血缘
 ;;; ============================================================
 
-(defprotocol LineageStore
+(defprotocol BranchStore
   "分支血缘记录 {:id :parent :fork-point :created-at}。"
-  (lineage-add!    [store record]  "登记一条血缘。返回 nil。")
-  (lineage-get     [store conv-id] "查该会话的血缘记录；根会话（非 fork 产物）为 nil。")
-  (lineage-children [store conv-id] "直接子分支的记录列表。")
-  (lineage-remove! [store conv-id] "删除该会话的血缘记录。返回 nil。"))
+  (record-branch! [store branch-rec]   "登记一条血缘。返回 nil。")
+  (get-branch     [store conv-id]      "查该会话的血缘记录；根会话（非 fork 产物）为 nil。")
+  (branch-children [store conv-id]     "直接子分支的记录列表。")
+  (delete-branch! [store conv-id]      "删除该会话的血缘记录。返回 nil。"))
 
-(defrecord InMemoryLineageStore [state]
-  LineageStore
-  (lineage-add!    [_ rec] (swap! state assoc (:id rec) rec) nil)
-  (lineage-get     [_ conv-id] (get @state conv-id))
-  (lineage-children [_ conv-id] (filterv #(= conv-id (:parent %)) (vals @state)))
-  (lineage-remove! [_ conv-id] (swap! state dissoc conv-id) nil))
+(defrecord InMemoryBranchStore [state]
+  BranchStore
+  (record-branch!   [_ rec] (swap! state assoc (:id rec) rec) nil)
+  (get-branch       [_ conv-id] (get @state conv-id))
+  (branch-children  [_ conv-id] (filterv #(= conv-id (:parent %)) (vals @state)))
+  (delete-branch!   [_ conv-id] (swap! state dissoc conv-id) nil))
 
-(defn in-memory-lineage-store []
-  (->InMemoryLineageStore (atom {})))
+(defn in-memory-branch-store []
+  (->InMemoryBranchStore (atom {})))
 
 (defn- ensure-schema! [ds]
   (jdbc/execute! ds
-    ["CREATE TABLE IF NOT EXISTS branch_lineage (
+    ["CREATE TABLE IF NOT EXISTS branch_records (
         conversation_id TEXT PRIMARY KEY,
         record TEXT NOT NULL)"])
   (jdbc/execute! ds
-    ["CREATE INDEX IF NOT EXISTS idx_lineage_parent
-        ON branch_lineage(conversation_id)"]))
+    ["CREATE INDEX IF NOT EXISTS idx_branch_parent
+        ON branch_records(conversation_id)"]))
 
-(defrecord SqliteLineageStore [conn]
-  LineageStore
-  (lineage-add! [_ rec]
+(defrecord SqliteBranchStore [conn]
+  BranchStore
+  (record-branch! [_ rec]
     (locking conn
       (jdbc/execute! conn
-        ["INSERT INTO branch_lineage (conversation_id, record) VALUES (?, ?)
+        ["INSERT INTO branch_records (conversation_id, record) VALUES (?, ?)
           ON CONFLICT(conversation_id) DO UPDATE SET record = excluded.record"
          (:id rec) (pr-str rec)]))
     nil)
-  (lineage-get [_ conv-id]
+  (get-branch [_ conv-id]
     (locking conn
       (some-> (jdbc/execute-one! conn
-                ["SELECT record FROM branch_lineage WHERE conversation_id = ?" conv-id])
-              :branch_lineage/record
+                ["SELECT record FROM branch_records WHERE conversation_id = ?" conv-id])
+              :branch_records/record
               edn/read-string)))
-  (lineage-children [_ conv-id]
+  (branch-children [_ conv-id]
     (locking conn
-      (->> (jdbc/execute! conn ["SELECT record FROM branch_lineage"])
-           (mapv #(edn/read-string (:branch_lineage/record %)))
+      (->> (jdbc/execute! conn ["SELECT record FROM branch_records"])
+           (mapv #(edn/read-string (:branch_records/record %)))
            (filterv #(= conv-id (:parent %))))))
-  (lineage-remove! [_ conv-id]
+  (delete-branch! [_ conv-id]
     (locking conn
       (jdbc/execute! conn
-        ["DELETE FROM branch_lineage WHERE conversation_id = ?" conv-id]))
+        ["DELETE FROM branch_records WHERE conversation_id = ?" conv-id]))
     nil)
 
   java.io.Closeable
   (close [_] (.close ^java.sql.Connection conn)))
 
-(defn sqlite-lineage-store
-  "SQLite 后端的 LineageStore（可与 ChatMemory / PauseStore 同库不同表）。"
+(defn sqlite-branch-store
+  "SQLite 后端的 BranchStore（可与 ChatMemory / PauseStore 同库不同表）。"
   [db-path]
   (let [conn (jdbc/get-connection {:dbtype "sqlite" :dbname db-path})]
     (ensure-schema! conn)
-    (->SqliteLineageStore conn)))
+    (->SqliteBranchStore conn)))
 
 ;;; ============================================================
 ;;; 分支操作
@@ -98,7 +98,7 @@
 (defn fork!
   "在 src-conv-id 上开分支：前缀复制到新 conversation-id + 血缘记录。
 
-   deps: {:memory ChatMemory必填 :pause-store 可选 :lineage 可选}
+   deps: {:memory ChatMemory必填 :pause-store 可选 :branch 可选}
    opts:
    - :at  前缀长度（消息条数）；缺省全量。**合法 fork 点是 turn 边界/暂停点**
           （§12.2 不变量，:at 应落在完整 turn 的消息边界上，由调用方保证）
@@ -108,7 +108,7 @@
    部分前缀 fork 不带）——两个分支可各自 resume 不同决策。
 
    返回新 conversation-id。"
-  [{:keys [memory pause-store lineage]} src-conv-id
+  [{:keys [memory pause-store branch]} src-conv-id
    & [{:keys [at as]}]]
   (let [msgs (memory/mem-get memory src-conv-id)
         _ (when (empty? msgs)
@@ -126,11 +126,11 @@
       (when-let [snap (pause/pause-load pause-store src-conv-id)]
         (pause/pause-save! pause-store new-id
                            (assoc snap :conversation-id new-id))))
-    (when lineage
-      (lineage-add! lineage {:id new-id
-                             :parent src-conv-id
-                             :fork-point n
-                             :created-at (System/currentTimeMillis)}))
+    (when branch
+      (record-branch! branch {:id new-id
+                               :parent src-conv-id
+                               :fork-point n
+                               :created-at (System/currentTimeMillis)}))
     new-id))
 
 (defn rollback!
@@ -150,28 +150,28 @@
 
 (defn lineage
   "该会话的血缘记录 {:id :parent :fork-point :created-at}；根会话为 nil。"
-  [{:keys [lineage]} conv-id]
-  (when lineage (lineage-get lineage conv-id)))
+  [{:keys [branch]} conv-id]
+  (when branch (get-branch branch conv-id)))
 
 (defn ancestry
   "自身到根的血缘链 [自身记录 父记录 ...]（根会话无记录，链止于最老的 fork）。"
-  [{:keys [lineage]} conv-id]
-  (when lineage
+  [{:keys [branch]} conv-id]
+  (when branch
     (loop [id conv-id, chain []]
-      (if-let [rec (lineage-get lineage id)]
+      (if-let [rec (get-branch branch id)]
         (recur (:parent rec) (conj chain rec))
         chain))))
 
 (defn prune!
   "删除分支：历史 + 暂停快照 + 血缘记录。有直接子分支时拒绝
    （先 prune 子分支，或改挂血缘后再删）。"
-  [{:keys [memory pause-store lineage]} conv-id]
-  (when lineage
-    (let [children (lineage-children lineage conv-id)]
+  [{:keys [memory pause-store branch]} conv-id]
+  (when branch
+    (let [children (branch-children branch conv-id)]
       (when (seq children)
         (throw (ex-info (str "分支有子分支，拒绝删除: " conv-id)
                         {:id conv-id :children (mapv :id children)})))))
   (memory/mem-clear memory conv-id)
   (when pause-store (pause/pause-clear! pause-store conv-id))
-  (when lineage (lineage-remove! lineage conv-id))
+  (when branch (delete-branch! branch conv-id))
   nil)
