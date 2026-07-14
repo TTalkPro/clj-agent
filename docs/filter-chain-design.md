@@ -37,6 +37,11 @@
 map 均可。**执行顺序 = `:filters` 向量注册顺序**（无 order/phase），
 靠前者在最外层（最先见 req、最后见 resp）。
 
+> **第四钩子 `:token-xform`（2026-07-14）**：流式专用、非 around 形状——值为
+> **transducer**，变换 invoke-chat-stream 出站 token 流（1→N / 跨 chunk
+> 状态 / 流末 flush）。只变换交付给 on-token 的流，不改最终 `:response`。
+> 权威设计见专文 `token-stream-filter-design.md`，本文不重复。
+
 ---
 
 ## 1. 洋葱机制：6 行闭包折叠
@@ -160,6 +165,8 @@ terminal (fn [treq]
 | `(timeout-filter ms)` | :tool | 超时短路 + future-cancel 中断；超时结果标 `:error {:class :transient}`（声明 `:retry` 的幂等工具可自动重试） |
 | `(approval-filter fn?)` | :tool | 敏感工具审批，拒绝短路（交互式场景请改用 gate） |
 | `(validation-turn-filter validate-fn :max-retries n)` | :turn | 最终答案校验：不合格把原因作反馈消息重入循环；耗尽原样返回；非 :completed 透传。对标 Spring AI `StructuredOutputValidationAdvisor`，配 provider 原生 json_schema 使用 |
+| `(token-redact-filter re replacement)` | :token-xform | 流式出站 token 无状态正则脱敏（跨 chunk 限制见专文） |
+| `(hold-release-filter check-fn)` | :token-xform | 先审后放：缓冲整流，完流 check-fn 全文，通过原序放行 / 不通过 emit 单个替换 token |
 | `(memory-filter store)`（client） | :chat | 按 conversation-id 读写历史；应放 filters 首位 |
 
 ---
@@ -171,6 +178,7 @@ terminal (fn [treq]
 | ToolCallingAdvisor（循环进链，位置=粒度） | `:turn` 钩子（循环本体不动，只包一层） | **吸收**——不学大搬家：循环与 gate/HITL/暂停/持久化深度耦合，为优雅重构不值 |
 | `chain.copy(this)` 递归 advisor（1.1 experimental） | 闭包链天然仅下游 | **免费拥有**，无需新 API |
 | StructuredOutputValidationAdvisor | `validation-turn-filter` | 吸收（~30 行，取回已删 converter 子系统的核心价值） |
+| `StreamAdvisor` 返回 `Flux<ChatClientResponse>`（流是一等值，Call/Stream 双接口） | `:token-xform` transducer 变换出站 token 流 | **吸收算子思想**（1→N/有状态/flush），不引 Reactor、不拆双接口——详见 `token-stream-filter-design.md` §5 |
 | memory advisor 放循环外 | memory 刻意放循环内 | 不跟（完整 transcript 是我们的契约） |
 | QuestionAnswerAdvisor（RAG） | 留 `:turn` 挂点 | 不跟本体（需 vector store，超出定位） |
 | advisor context map（跨 advisor 状态） | 请求 map 透传 + 闭包 | 不跟（已够） |
@@ -200,3 +208,4 @@ terminal (fn [treq]
 - `agent-loop-concurrency-design.md` §4.6（tool 链契约收紧的动因与盘点）、
   §14（turn 链的实施记录与 Spring AI 调研）
 - `hitl-timeline-design.md`（gate/暂停/resume 与 filter 链的边界分工）
+- `token-stream-filter-design.md`（`:token-xform` token 流变换链权威设计）
