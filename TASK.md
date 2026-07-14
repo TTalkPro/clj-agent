@@ -215,7 +215,7 @@
   4. [x] **Timeline 与多分支（2026-07-11 完成）**：判定 Agent 持久状态 =
      对话历史（唯一真相，slots turn 级）→ 日志即 timeline，无需快照版本链。
      新 ns `im.ttalk.agent.timeline`：fork-as-new-conversation（前缀复制 +
-     LineageStore 血缘，现有 ChatMemory 协议零改动）、rollback!/prune!/
+     BranchStore 血缘，现有 ChatMemory 协议零改动）、rollback!/prune!/
      ancestry；暂停点全量 fork 连带复制 PauseStore 快照 → HITL 决策分支
      （两支各自 resume 不同决策）；编辑重试 = fork + 替换重发。
      **writes 进历史**（event-sourcing 伏笔）：tool-result 中立消息带

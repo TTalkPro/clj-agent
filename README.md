@@ -261,7 +261,7 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 ```clojure
 (require '[im.ttalk.agent.timeline :as tl])
 
-(def deps {:memory mem :pause-store ps :lineage (tl/in-memory-lineage-store)})
+(def deps {:memory mem :pause-store ps :branch (tl/in-memory-branch-store)})
 (tl/fork! deps "main" {:as "exp"})       ;; 全量分支（源暂停中则连带暂停快照——
                                           ;;   两支可各自 resume 不同审批决策做对比）
 (tl/fork! deps "main" {:at 4})           ;; 在第 4 条消息处开分支（编辑重试：

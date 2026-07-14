@@ -24,7 +24,15 @@
   「含 `:writes`」；返回 `{:result ...}` 包装的旧 inline handler 需改为直接
   返回值（subagent delegate 已随迁）。
 - `on-tool-result` 回调改为任务完成时实时触发，批内顺序不确定
-  （确定顺序请读 `:tool-calls-made`）。
+   （确定顺序请读 `:tool-calls-made`）。
+- **`LineageStore` 协议更名为 `BranchStore`**：与 beamai（Erlang 姐妹项目）命名对齐。方法名同步更新：
+  `lineage-add!` → `record-branch!` / `lineage-get` → `get-branch` / `lineage-children` → `branch-children` / `lineage-remove!` → `delete-branch!`。
+  实现类 `InMemoryLineageStore`/`SqliteLineageStore` → `InMemoryBranchStore`/`SqliteBranchStore`。
+  工厂函数 `in-memory-lineage-store`/`sqlite-lineage-store` → `in-memory-branch-store`/`sqlite-branch-store`。
+  deps map key `:lineage` → `:branch`（`timeline/fork!`/`rollback!`/`lineage`/`ancestry`/`prune!`）。
+  SQL 表 `branch_lineage` → `branch_records`（跨版本需重建）；索引 `idx_lineage_parent` → `idx_branch_parent`。
+  **用户-facing API 不变**：`lineage`（单记录查询）、`ancestry`、`fork!`、`rollback!`、`prune!`。
+  中文描述词「血缘」/「分支血缘」不变。
 
 ### ✨ 新增
 
@@ -50,7 +58,7 @@
   （审批与 :env-retry 两种暂停均支持；对话历史配 SQLite ChatMemory）。
   `create-agent` 同时补透传 `:state-slots`。
 - **Timeline 与多分支（`im.ttalk.agent.timeline`）**：对话日志即时间线，
-  分支 = fork-as-new-conversation（前缀复制 + LineageStore 血缘记录，
+  分支 = fork-as-new-conversation（前缀复制 + BranchStore 血缘记录，
   现有 ChatMemory 协议零改动）。`fork!`（暂停点全量 fork 连带复制暂停快照
   → HITL 决策分支：两支各自 resume 不同决策）/ `rollback!`（破坏性截断，
   "重新生成"）/ `lineage`/`ancestry` / `prune!`（有子分支拒绝）。
