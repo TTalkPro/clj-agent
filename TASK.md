@@ -248,6 +248,28 @@
      监督/HITL 冒泡/可观测/引擎三路线），用户判定太复杂暂弃；真有需求时按
      决策阶梯走（委派工具够不够 → handoff → HITL 冒泡 → 才到 BSP/actor）。
 
+## P5 — Token 流变换链（`:token-xform`，2026-07-14）✅ 全部完成
+
+> 来源：与 Spring AI `StreamAdvisor`（Flux 一等流）的对照——流式路径缺
+> "逐 token 变换"（1→N / 跨 chunk 状态 / 流末 flush）。结论：filter 第四
+> 钩子 `:token-xform`，值为 transducer（completion arity 天然是 end-of-stream
+> flush 信号），不引 Reactor、不拆 Call/Stream 双接口。
+> **权威设计：`docs/token-stream-filter-design.md`**。
+> 测试：243/1021/0 → **253 tests / 1039 assertions / 0 failures**。
+
+- [x] **机制**：`create-filter` 支持 `:token-xform`；`kernel/invoke-chat-stream`
+  terminal 组合 xform 链包裹 on-token（chat filter 之后，provider 原始 token →
+  xform 链 → sink）；正常完流 flush、异常不 flush、reduced? 早停、无 xform 零开销
+  退化。硬边界：token 链只改交付流，不改最终 `:response`（memory/turn 用原文）。
+- [x] **内置 filter**：`token-redact-filter`（无状态正则脱敏，注明跨 chunk
+  限制）、`hold-release-filter`（先审后放：缓冲整流，完流 check-fn 全文，
+  通过原序放行 / 不通过 emit 单个替换 token）。
+- [x] **测试**：`token_xform_test.clj` 覆盖 7 个锚点（1→N flush / 异常不 flush /
+  组合顺序 / hold-release 两分支 / 退化路径 / reasoning-token 透传 /
+  最终响应不被变换）+ create-filter，10 tests / 18 assertions，全套回归全绿。
+- [x] **文档**：`filter-chain-design.md` 加 token 链引言 + 内置表两行 +
+  §4 对照表补 StreamAdvisor 行；CHANGELOG 0.3.0 条目。
+
 ### 📋 历史账本
 
 2026-06 审查（P0/P1/P2 + 测试盲区）与 2026-07 优化轮（P3 + A/B/C 组）全部清零。

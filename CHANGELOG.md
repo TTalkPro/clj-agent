@@ -75,6 +75,18 @@
   **ask-user 模式解锁**（提问工具 + gate 拦截 + reply 送回）。
   gate 决策词汇同步扩展（`{:reject 理由}`/`{:reply 结果}`）；loop-state
   新增 `:pending-id`；env 暂停显式拒收 reply。零破坏。
+- **Token 流变换链（`:token-xform` 钩子，2026-07-14）**：filter 第四个钩子，
+  值为 **transducer**，变换流式出站 token 流（1→N / 跨 chunk 状态 / 流末
+  flush——completion arity 即 end-of-stream 信号）。组装在
+  `invoke-chat-stream` terminal 内：provider 原始 token → xform 链（注册顺序）
+  → on-token；正常完流 flush、stream-fn 异常不 flush（缓冲丢弃）、下游
+  reduced 早停、无 xform 零开销退化。**硬边界**：只变换交付流，不改最终
+  `:response`（memory/turn 用原文）。内置 `advisor/token-redact-filter`
+  （无状态正则脱敏）与 `advisor/hold-release-filter`（先审后放：缓冲整流、
+  完流 check-fn 全文，通过原序放行 / 不通过 emit 单个替换 token）。
+  对标 Spring AI `StreamAdvisor`（Flux 一等流）——吸收算子思想，不引
+  Reactor、不拆 Call/Stream 双接口。零破坏。
+  设计见 `docs/token-stream-filter-design.md`。
 
 ### 🐛 修复
 
