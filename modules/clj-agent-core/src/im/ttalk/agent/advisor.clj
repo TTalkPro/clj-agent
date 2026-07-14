@@ -18,11 +18,21 @@
              注入等）应在 :resume? 时跳过首次改写；响应侧（校验/guardrail）
              无需感知，递归重入照常。
 
+    第四钩子 :token-xform（流式专用，非 around 形状）：值为一个 **transducer**，
+    作用于出站 token-data 流（{:token ...} / {:reasoning-token ...}）。
+    组装在 invoke-chat-stream 的 terminal 内（chat 链之后）：
+    provider 原始 token → :token-xform 链（注册顺序，靠前者先见原始 token）→
+    最终 on-token。正常完流调 completion arity（缓冲 flush），异常不 flush；
+    状态作用域 = 单次 LLM 流。**硬边界**：只变换交付给 on-token 的流，
+    不改 stream-fn 返回的最终 :response（memory/turn 用原文）。
+    设计见 docs/token-stream-filter-design.md。
+
     Filter 定义:
       {:name :my-filter
        :chat (fn [req chain] ...)     ;; 可选，挂到 chat 链
        :tool (fn [req chain] ...)     ;; 可选，挂到 tool 链
-       :turn (fn [req chain] ...)}    ;; 可选，挂到 turn 链
+       :turn (fn [req chain] ...)     ;; 可选，挂到 turn 链
+       :token-xform xform}            ;; 可选，流式 token 变换（transducer）
 
     filter 可以通过闭包携带自己的上下文：
       (defn caching-filter []
@@ -57,14 +67,16 @@
       :chat (fn [req chain] resp)  — around 单次 LLM 调用，可选
       :tool (fn [req chain] resp)  — around 单次工具执行，可选
       :turn (fn [req chain] resp)  — around 整个工具循环（每 turn 一次），可选
-      三者可任意并存
+      :token-xform xform           — 流式出站 token 变换（transducer），可选
+      四者可任意并存
 
     返回: filter 定义 map"
-  [name & {:keys [chat tool turn]}]
+  [name & {:keys [chat tool turn token-xform]}]
   (cond-> {:name name}
     chat (assoc :chat chat)
     tool (assoc :tool tool)
-    turn (assoc :turn turn)))
+    turn (assoc :turn turn)
+    token-xform (assoc :token-xform token-xform)))
 
 ;;; ============================================================
 ;;; 洋葱链构建
@@ -193,3 +205,52 @@
                                   (dissoc :resume?)
                                   (assoc :messages [(mk-feedback problem)]))))
                      result)))))}))
+
+;;; ============================================================
+;;; 内置 filter: token 流变换（:token-xform，流式专用）
+;;; ============================================================
+
+(defn token-redact-filter
+  "无状态逐 token 正则脱敏 filter（:token-xform）。
+
+   只改写 :token 字段，其余 token-data（:reasoning-token 等）原样透传。
+
+   已知限制：秘密被切在两个 chunk 之间时漏检——跨 chunk 检测需有状态
+   缓冲，按需自写 transducer 或改用 hold-release-filter。"
+  [re replacement]
+  {:name :token-redact
+   :token-xform (map (fn [tok]
+                    (if (:token tok)
+                      (update tok :token clojure.string/replace re replacement)
+                      tok)))})
+
+(defn hold-release-filter
+  "先审后放 filter（:token-xform）：缓冲整条流不外泄，正常完流时 check-fn
+   收全文（:token 拼接），通过则缓冲按原序放行，不通过则只 emit 一个
+   替换 token。
+
+   check-fn: (fn [full-text] -> nil=通过 | 字符串=不通过时的替换文本)。
+
+   代价即语义：用户在流结束前看不到任何 token——「完整答案没成形就无法审」
+   的根本矛盾任何机制都消不掉（Spring AI 的 Flux buffer 同样毁流式 UX），
+   本 filter 只是把缓冲逻辑标准化。异常完流不 flush（缓冲丢弃）由机制保证。
+
+   注意：只影响交付给 on-token 的流；最终 :response 仍是原始完整答案，
+   要改写答案本身请用 validation-turn-filter（turn 链）。"
+  [check-fn]
+  {:name :hold-release
+   :token-xform (fn [rf]
+               (let [buf (volatile! [])]
+                 (fn
+                   ([] (rf))
+                   ([acc]
+                    (let [toks @buf
+                          _ (vreset! buf [])
+                          text (apply str (keep :token toks))
+                          acc (if-let [replacement (check-fn text)]
+                                (unreduced (rf acc {:token replacement}))
+                                (reduce rf acc toks))]
+                      (rf acc)))
+                   ([acc tok]
+                    (vswap! buf conj tok)
+                    acc))))})

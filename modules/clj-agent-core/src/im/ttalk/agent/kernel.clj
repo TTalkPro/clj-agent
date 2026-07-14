@@ -291,6 +291,12 @@
     透传到 terminal。:stream-fn 在流结束时返回最终归一化响应，故 memory-filter 落库的是
     **完整** assistant 消息——与同步路径历史不分叉。
 
+    filter 的 :token-xform（transducer）在 terminal 内组合成出站 token 变换链：
+    provider 原始 token → xform 链（注册顺序，靠前者先见原始 token）→ on-token。
+    正常完流调 completion arity（缓冲 flush），stream-fn 抛异常则不 flush；
+    下游 reduced（如 take）后不再喂 token，completion 照常。**只变换交付流，
+    不改最终 :response**。设计见 docs/token-stream-filter-design.md。
+
     参数:
     - opts: 同 invoke-chat，外加 :on-token (fn [token-data] ...)
 
@@ -310,12 +316,32 @@
                  :system-prompt (:system-prompt opts)
                  :on-token      (:on-token opts)
                  :context       context}
+        token-xforms (seq (keep :token-xform (:filters kernel)))
         terminal (fn [req]
                    (let [chat-opts (cond-> {}
                                      (some? (:tools req))         (assoc :tools (:tools req))
                                      (some? (:tool-choice req))   (assoc :tool-choice (:tool-choice req))
-                                     (some? (:system-prompt req)) (assoc :system-prompt (:system-prompt req)))]
-                     {:response (stream-fn (:messages req) chat-opts (:on-token req))
+                                     (some? (:system-prompt req)) (assoc :system-prompt (:system-prompt req)))
+                         sink (:on-token req)
+                         ;; :token-xform 链：chat 链之后组装（包裹链上存活的 on-token）。
+                         ;; rf 每次现场实例化——有状态 xform 的作用域 = 单次 LLM 流。
+                         rf (when token-xforms
+                              ((apply comp token-xforms)
+                               (fn ([acc] acc)
+                                   ([acc tok] (when sink (sink tok)) acc))))
+                         on-tok (if rf
+                                  (let [done (volatile! false)]
+                                    (fn [tok]
+                                      (when-not @done
+                                        ;; 下游 reduced（如 take）：早停，不再喂 token
+                                        (when (reduced? (rf nil tok))
+                                          (vreset! done true)))))
+                                  sink)
+                         response (stream-fn (:messages req) chat-opts on-tok)]
+                     ;; 正常完流 flush（对齐 transduce：reduced 后 completion 照常）；
+                     ;; stream-fn 抛异常则不执行——缓冲丢弃，半截答案不外泄
+                     (when rf (rf nil))
+                     {:response response
                       :context  (:context req)}))
         chain (filters/build-chain
                 (keep :chat (:filters kernel))
