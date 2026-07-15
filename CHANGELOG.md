@@ -95,6 +95,55 @@
   对标 Spring AI `StreamAdvisor`（Flux 一等流）——吸收算子思想，不引
   Reactor、不拆 Call/Stream 双接口。零破坏。
   设计见 `docs/token-stream-filter-design.md`。
+- **Spring AI 2.0 Advisor 全面对齐（2026-07-15）**——逐个对完之后，真正的
+  缺口只有一个半。设计与吸收记录见 `docs/advisor-alignment-design.md`。零破坏。
+  - **ToolSearch（`advisor/tool-search`，对标 `ToolSearchToolCallingAdvisor`）**：
+    渐进式工具披露——初始只暴露 `search_tools`，模型检索到的工具下一轮才进
+    工具列表（Spring 实测省 34–64% token）。**零新增钩子**：`search_tools` 是
+    普通内联工具，返回 `{:writes {::discovered #{名字}}}` → 屏障按槽 reducer
+    折叠（`into` = 集合并，跨轮累积）→ 每轮进 ChatRequest `:context` →
+    `:chat` filter 据此重写 `:tools`。发现集合住在 tool-context 里，故
+    暂停/resume/持久化全自动正确。索引零依赖可插拔：内置
+    `keyword-tool-index`（名称/描述分词 **× IDF** 打分，**中文二元组切分**，拆
+    snake_case/camelCase）与 `regex-tool-index`（名称模式，非法正则退化字面
+    匹配不抛异常）；向量检索经 `IToolIndex` 注入。`with-tool-search` 一次装好
+    工具/filter/状态槽三处。
+    **live 实测（MiniMax-M2.7，50 工具目录）省 78% prompt token，且任务质量
+    与基线一致**（可复现：`examples/toolsearch_live_test.clj`，11 项行为断言）。
+    赚不赚看**工具定义总量**而非工具个数——固定成本约 600–1000 token（多一轮
+    LLM 往返），沿用 Spring 的度量「工具定义 >5K token 才用」。
+    ⚠️ **省 token 未必省钱**：基线的静态工具前缀天然适合 prompt cache，本
+    filter 每轮改写 `:tools` 会打碎可缓存前缀。按缓存读 10% 计价折算，实测
+    **冷缓存下 ToolSearch 省 65%、热缓存下反贵 66%**——差别全在基线前缀的冷热。
+    工具集静态 + 高频会话 + 廉价缓存时，省的是上下文窗口而非钱。适用判断见
+    `docs/advisor-alignment-design.md` §2.4。
+  - **return-direct（deftool `{:return-direct true}`）**：工具结果即最终答案，
+    不再回灌 LLM（转人工/升级工单/guardrail）。整批全声明才生效（对齐 Spring
+    allMatch）；多个结果按原序拼接。**补落库**：正常路径下工具结果靠下一次
+    invoke-chat 经 memory filter 落库，return-direct 没有下一次——不补则历史
+    留下悬空 tool_use 并被下个 turn 的 heal 整条摘掉。
+  - **可插拔续跑判据（`build-kernel` `:eligibility-fn`，对标
+    `ToolExecutionEligibilityChecker`）**：`(fn [response context] -> boolean)`，
+    响应带 tool-call 时是否真的执行并续跑；返回 false 则按最终答案收尾。
+    缺省恒真（行为不变）。
+  - **`advisor/structured-output`（补 `StructuredOutputValidationAdvisor` 的
+    判据侧）**：`validation-turn-filter` 早有机制，缺的是判据——按 JSON Schema
+    子集校验并把失败写成模型能据以自我修正的人话（「缺少必填字段 films」/
+    「字段 films[1] 期望 string，实为 integer」）。`validate-value` 纯函数零
+    依赖；`validate-fn` 的 JSON 解析经 `:parse-fn` 注入（core 无依赖，不内置
+    解析器）。
+  - **`safeguard-turn-filter`（对标 `SafeGuardAdvisor`）**：敏感词命中即不进
+    循环直接拒答。**推翻旧决定**（原记「用户一个 chat filter 即可」）——那句
+    写在 turn 链之前且挂点有误：`:chat` 会每轮重查累积历史。大小写不敏感。
+  - **`advisor/rag` `qa-turn-filter`（对标 `QuestionAnswerAdvisor`）**：每 turn
+    检索一次并拼进用户问题。**推翻旧决定**（原记「不跟本体」）——推翻的是
+    「不做本体」而非「不引 vector store」：仍零检索依赖，向量库经 `IRetriever`
+    注入；本体价值在提示词编排不在检索。检索为空时不注入（刻意偏离 Spring 的
+    空上下文 + 拒答指令，可用 `:inject-when-empty?` 恢复）。
+  - **`logging-chat-filter`（对标 `SimpleLoggerAdvisor`）**：既有
+    `logging-filter` 只覆盖工具侧，补 LLM 侧请求/响应日志。
+  - **`re-reading-filter`（对标 `ReReadingAdvisor`，RE2）**：入口用户问题重复
+    一遍附在其后。
 
 ### 🐛 修复
 
@@ -111,6 +160,83 @@
   （EDN 往返、跨重启审批与 env-retry 恢复、context 恢复回归、清理时机）
   + Timeline 7 个（writes 落历史与 wire 剥除、fork/血缘/rollback/prune、
   HITL 决策分支、编辑重试）。全套 230 tests / 971 assertions / 0 failures。
+- **Advisor 对齐批次测试（2026-07-15）**：253/1039 → **292 tests / 1194
+  assertions / 0 failures**（+39 tests / +155 assertions，零回归）。
+  - 先补钉子后动工：`:chat` filter 改写 `:tools` 抵达 provider 的契约此前
+    **无测试覆盖**，而 ToolSearch 完全建立在它之上——先补 3 个断言钉住
+    （含 context 驱动的动态工具集），再实现。
+  - ToolSearch：索引单测 8 组（中文二元组/camelCase/snake_case/limit/权重/
+    重建/非法正则）+ 端到端 3 组（真实 react 循环跑通「只见 search_tools →
+    检索 → 下一轮见到工具 → 调用」完整往返、两次检索并集累积、未命中不污染
+    context）。
+  - return-direct 5 组（LLM 只调一次、**transcript 完整无悬空且下个 turn 的
+    heal 不摘**、混批仍回灌、多结果拼接、tool-calls-made 记录）；
+    eligibility-fn 3 组。
+  - structured-output 10 组（必填/类型/枚举/嵌套路径/数组下标/布尔不算
+    integer/字符串键/开放世界/围栏剥离/驱动重试反馈带具体问题）。
+  - safeguard 7 组（短路不进循环、大小写、resume 放行、多模态 content）、
+    re-reading 4 组、logging-chat 3 组、rag 9 组（每 turn 只检索一次、空检索
+    不注入、多模态不改写、只改最后一条 user 消息）。
+- **文档一致性门禁（`scripts/check_docs.clj`）+ 六个 README 的幽灵 API 清理**：
+  一轮排查发现文档里积了一批**幽灵 API**——功能早被删/改，源码里甚至留了
+  「已移除」的注释，文档却没跟：
+  - `:build-result-msgs`（service map 的历史键）——`model/service.clj` 明写它已
+    移除，**四个 README 却还在头部特性 bullet 里教人用**；真实契约是
+    `:chat-fn` + `:stream-fn`，而 `:stream-fn` 一处没提；
+  - `proto/call-with-tools`——协议里**根本没这个方法**（真实为 `call-llm` +
+    `extract-tool-calls`/`extract-text`）；
+  - `find-function` → `{:plugin p :tool-var v}`（`:plugin` 不存在）、
+    `invoke-tool` → `{:value r :context ctx}`（`:context` v0.3 已删）、
+    `chat-fn` → `:assistant-msg`（早已归一化为 ILLMResponse）、
+    `im.ttalk.agent.model.types`（从未存在）、filter 的 `:order`/`:phase`/
+    `:before`/`:after`（早已移除）；
+  - **模块索引隐身**：`pause` / `timeline` 整块功能不在 client README 里；
+    DashScope 在 provider README 出现 0 次（却已注册并有专属 SSE 解析器）；
+    `modules/README.md` 的依赖图把 core 标成「协议 + Agent 运行时」且
+    **整个 client 模块不在图里**（2026-07 拆分前的图）。
+  全部修正，并加门禁挡住复发：**ns 存在 / ns 覆盖 / 符号 resolve / 墓碑**四项，
+  接入 CI（新增 `docs` job）与 `scripts/test-all.sh`。设计取舍是**宁可漏报不可
+  误报**（alias 未由同文件 require 绑定即跳过；注释与字符串字面量先剥掉）——
+  会误报的门禁很快就会被 `|| true` 绕过。四项均已用变异测试验证真的会失败。
+- **`scripts/test-all.sh` 漏测整个 client 模块**：MODULES 列表只有 core 与
+  provider（CI matrix 有 client，本脚本没有）——本地 `test-all` 长期静默跳过
+  Agent 运行时。已补。
+- **live 验证脚本（真实 provider）**：五个新脚本，共 **78 项行为断言**，均已实跑
+  通过（各自反复跑 2–3 遍稳定）。断言一律钉**机制**（发给 provider 的消息/工具集、
+  LLM 调用次数、落库形状），不钉模型措辞——后者会波动，拿它当断言等于给 CI 埋雷；
+  模型的实际回答只打印不断言。
+  - 新增 `examples/safeguard_live_test.clj`（18 项）——拦截逻辑本身有单测，live
+    验的是单测证明不了的：**拦下时真的一次 LLM 都没调**（短路在 :turn 层，连接
+    都没建）、**不落库的语义后果在真实多轮里长什么样**（第 2 轮模型答「我没有
+    之前的记录，这是对话的开始」——刻意取舍的代价看得见）。并跑出了语义边界：
+    工具结果里含敏感词照样通过——**SafeGuard 是入口守卫，不是输出守卫**。
+  - 新增 `examples/return_direct_live_test.clj`（19 项）——**对照组**是重点：
+    同一句合规话术，return-direct → 逐字送达（LLM 只调 1 次）；普通工具 →
+    被模型回灌改写（`【工单已创建】…` 变成 `已为您创建转接工单…`）。两边一比
+    才知道 return-direct 在防什么。场景 3 用真实第二轮对话验证**补落库的修复**：
+    模型答得出上一轮的工单号 T-88123，证明 transcript 没被 heal 摘掉。
+    另含 `:eligibility-fn` 的放行/拦停对照。
+  - 新增 `examples/rag_live_test.clj`（18 项）——语料全为**虚构事实**（模型训练
+    数据里不可能有「每 42 天除垢」），故对照组答不出、RAG 组答得出，**grounding
+    真的来自检索**这件事才算被证明。并实跑印证了对 Spring 的刻意偏离：同一个
+    无关问题，默认（空检索不注入）→ 模型正常作诗；`:inject-when-empty? true`
+    （Spring 行为）→ 模型拒答「没有足够的上下文信息」。
+  - 新增 `examples/structured_output_live_test.clj`（12 项）——校验器本身有单测，
+    live 唯一值得验的是单测证明不了的：**把「缺少必填字段 internal_review_code」
+    丢回给真实模型，它会不会真把字段补上**。用「schema 要求 prompt 里没提过的
+    字段」触发**真实**失败（不作假），实测第 1 轮漏、反馈点名、第 2 轮补上、
+    校验通过。另钉死「合格只调 1 次 LLM」与「耗尽恰好 2 次、原样返回」。
+  - 新增 `examples/toolsearch_live_test.clj`（11 项）——ToolSearch × MiniMax 端到端：
+    11 项行为断言（渐进式披露成立 / 发现集合跨轮累积 / 任务质量不掉 / 大目录
+    真省 token）+ 冷热缓存对照报告。**跑真机推翻了三个基于单测的判断**：
+    检索工具描述缺「多能力须各检索一次」会静默掉召回、关键词索引缺 IDF、
+    prompt cache 会让 token 对照得出反向结论。
+  - 修复 `examples/minimax_agent_live_test.clj` 的**两处静默失效**（该脚本因
+    环境变量改名 `MINIMAX_AUTH_TOKEN` → `MINIMAX_API_KEY` 早已启动即 exit 1，
+    无人跑到，assertion 悄悄烂掉）：① 环境变量两个都接受；② `on-tool-call`
+    的 `tool-name` 契约是**字符串**，脚本却拿 keyword 比较——scenario 1 断言
+    直接失败，scenario 2 更严重：gate 的 `(= :send-email n)` 永不相等 → 永不
+    中断 → 中断/恢复整条链路静默失效。`callbacks.clj` 文档补上类型说明防复发。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 

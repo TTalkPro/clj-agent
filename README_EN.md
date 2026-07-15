@@ -10,8 +10,9 @@ English | [中文](README.md)
 
 - **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, `build-kernel` declaratively registers and schedules them
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM); the tool-calling loop is provided by SimpleAgent
-- **Filter Middleware**: onion-style around chain (mirrors Spring AI Advisor), :chat / :tool phases, can short-circuit/retry/time
-- **Service Abstraction**: LLM services via `{:chat-fn :build-result-msgs}` map, zero coupling
+- **Filter Middleware**: onion-style around chain (mirrors Spring AI 2.0 Advisor), four hooks — :chat / :tool / :turn / :token-xform — can short-circuit/retry/time/recurse
+- **Spring AI 2.0 Advisor Alignment**: ToolSearch progressive tool disclosure (78% prompt-token savings measured), return-direct, pluggable loop-continuation predicate, SafeGuard, RAG injection, self-correcting structured output, RE2 — retrieval and vector stores are injected via protocols, so the framework adds zero deps (see `docs/advisor-alignment-design.md`)
+- **Service Abstraction**: LLM services via `{:chat-fn :stream-fn}` map, zero coupling
 - **Multi-Provider Support**: Anthropic, OpenAI, DeepSeek, Zhipu, Ollama, Gemini, Mistral, MiniMax, DashScope (Alibaba), and OpenAI-compatible protocols
 - **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval; LLM/tool errors normalized to `{:status :error}` (configurable `:on-error`)
 - **ChatMemory**: per-conversation-id history persistence (in-memory / windowed / SQLite; the SQLite store is `Closeable`)
@@ -243,37 +244,134 @@ Kernel provides three categories of APIs:
 Service is a map defining the LLM call protocol:
 
 ```clojure
-{:chat-fn           (fn [messages opts] -> {:text "..." :tool-calls [...] :assistant-msg {...}})
- :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
+{:chat-fn   (fn [messages opts] -> normalized-response)              ;; sync
+ :stream-fn (fn [messages opts on-token] -> normalized-response)}
 ```
 
 Core's generic `im.ttalk.agent.model.service/create-service` (protocol-only) builds this from any provider. You can also implement this map yourself to integrate any LLM.
 
-### Filter Middleware (onion-style around, mirrors Spring AI Advisor)
+### Filter Middleware (onion-style around, mirrors Spring AI 2.0 Advisor)
 
 The root abstraction is `around(req, chain)`: the filter holds the downstream `chain`
-and decides whether/when/how many times to call it (short-circuit / retry / time it).
-`before`/`after` are sugar for request/response rewriting only.
+and decides whether/when/how many times to call it (short-circuit / retry / recurse).
+A filter carries any of four hooks; execution order is simply the `:filters` vector
+order (no `:order`/`:phase`) — earlier = outer.
 
 ```clojure
-;; Custom filter — around (gets the chain)
-(filters/create-filter :my-filter :tool :order 10
-  :around (fn [req chain]
-                 (println "Before tool call:" (get-in req [:function :name]))
-                 (chain req)))        ;; not calling chain => short-circuit
+;; Custom filter — a plain map (or use create-filter)
+(filters/create-filter :my-filter
+  :chat (fn [req chain] (chain (update req :messages conj sys-msg)))
+  :tool (fn [req chain]
+          (println "Before tool call:" (get-in req [:function :name]))
+          (chain req)))               ;; not calling chain => short-circuit
 
-;; Or rewrite-only (sugar)
-(filters/create-filter :inject :chat :order 0
-  :before (fn [req] (update req :messages conj sys-msg)))
+;; The four hooks:
+;;   :chat        one LLM call    (each round inside the tool loop; memory lives here)
+;;   :tool        one tool call   (applies inside each parallel task)
+;;   :turn        the whole tool loop (once per turn; may call (chain req) again to recurse)
+;;   :token-xform outbound streaming token transform (a transducer, not an around fn)
 
-;; Built-in tool filters
-filters/logging-filter        ;; Pre/post-call logging
-(filters/timeout-filter 5000) ;; Timeout control (ms, around)
-(filters/approval-filter)     ;; Sensitive tool approval (short-circuits on reject)
+;; Built-in filters
+filters/logging-filter          ;; :tool  pre/post-call logging
+(filters/logging-chat-filter)   ;; :chat  LLM request/response logging (~ SimpleLoggerAdvisor)
+(filters/timeout-filter 5000)   ;; :tool  timeout + interrupt, marks :transient
+(filters/approval-filter)       ;; :tool  sensitive-tool approval (short-circuits on reject)
+(filters/validation-turn-filter validate-fn :max-retries 2)
+                                ;; :turn  validate the final answer; re-enter with feedback
+(filters/safeguard-turn-filter ["badword"])
+                                ;; :turn  block before the loop even starts (~ SafeGuardAdvisor)
+(filters/re-reading-filter)     ;; :turn  RE2 re-reading (~ ReReadingAdvisor)
 
-;; phase: :chat (invoke-chat, terminal calls LLM) | :tool (invoke-tool, terminal calls fn)
-;; order: smaller = outer (before runs first, after runs last)
+;; Standalone advisor namespaces (Spring AI 2.0 alignment)
+im.ttalk.agent.advisor.tool-search        ;; progressive tool disclosure (~ ToolSearchToolCallingAdvisor)
+im.ttalk.agent.advisor.structured-output  ;; JSON-Schema validator (~ StructuredOutputValidationAdvisor)
+im.ttalk.agent.advisor.rag                ;; retrieval injection (~ QuestionAnswerAdvisor)
 ```
+
+Retrieval/vector stores are never bundled — they are injected through the
+`IToolIndex` / `IRetriever` protocols, so the framework keeps zero extra deps.
+Full alignment record: `docs/advisor-alignment-design.md`; mechanism contracts:
+`docs/filter-chain-design.md`.
+
+### ToolSearch — Progressive Tool Disclosure (mirrors Spring AI `ToolSearchToolCallingAdvisor`)
+
+Once you have many tools, every round ships the full schema set into the prompt
+(Spring measured 28 tools ≈ 5K–17K tokens, and tool-selection accuracy degrades past
+30+ similarly-named tools). Progressive disclosure replaces "send everything upfront"
+with "retrieve on demand": only a `search_tools` tool is exposed initially, and
+whatever the model retrieves enters the tool list on the **next** round.
+
+```clojure
+(require '[im.ttalk.agent.advisor.tool-search :as ts])
+
+(kernel/build-kernel
+  (ts/with-tool-search                       ;; wires tool + filter + state-slot in one shot
+    {:service svc
+     :tools   [#'t1 #'t2 ... #'t80]
+     :filters [(ma/memory-filter store)]}
+    {:index (ts/keyword-tool-index)          ;; or (ts/regex-tool-index)
+     :limit 5
+     :always-include #{"handoff"}}))         ;; always-on tools, no search needed
+```
+
+The index is **zero-dep and pluggable**: built-in `keyword-tool-index` (name/description
+token overlap × IDF, CJK bigram segmentation) and `regex-tool-index` (name patterns);
+bring your own vector store by `(reify ts/IToolIndex ...)`. The discovered set rides in
+the tool-context, so pause/resume/persistence are correct for free.
+
+Measured at 78% prompt-token savings on a 50-tool catalog — but read
+`docs/advisor-alignment-design.md` §2.3–2.5 before adopting: whether it pays depends on
+**total schema size** (not tool count), and it can *cost more money* when a static tool
+prefix would otherwise be served cheaply from the provider's prompt cache.
+
+### RAG Injection (mirrors Spring AI `QuestionAnswerAdvisor`)
+
+Retrieves once per turn and folds the result into the user's question.
+**No vector store is bundled** — retrieval is injected via `IRetriever`:
+
+```clojure
+(require '[im.ttalk.agent.advisor.rag :as rag])
+
+(def retriever
+  (reify rag/IRetriever
+    (retrieve [_ query top-k]
+      (map (fn [hit] {:text (:content hit)}) (my-vector-store/search query top-k)))))
+
+(kernel/build-kernel
+  {:service svc
+   :filters [(ma/memory-filter store)
+             (rag/qa-turn-filter retriever :top-k 4)]})
+```
+
+Mounted on `:turn`, so retrieval happens exactly once per turn (a `:chat` filter would
+re-retrieve on every round of the tool loop). On an empty retrieval we **skip injection**
+— a deliberate divergence from Spring, which injects an empty context plus a "say you
+can't answer" instruction and therefore makes the model refuse questions that have
+nothing to do with retrieval. Pass `:inject-when-empty? true` for Spring's semantics.
+
+### Structured Output Validation (mirrors Spring AI `StructuredOutputValidationAdvisor`)
+
+`validation-turn-filter` is the **mechanism** (invalid → re-enter with feedback → retry
+cap); `advisor/structured-output` is the **predicate** (validate against a JSON Schema
+and phrase the failure so the model can self-correct, rather than blindly retry):
+
+```clojure
+(require '[im.ttalk.agent.advisor.structured-output :as so]
+         '[cheshire.core :as json])
+
+(filters/validation-turn-filter
+  (so/validate-fn {:type "object"
+                   :properties {:actor {:type "string"}
+                                :films {:type "array" :items {:type "string"}}}
+                   :required ["actor" "films"]}
+    :parse-fn #(json/parse-string % true))   ;; core has zero deps — you inject the parser
+  :max-retries 2)
+;; Feedback the model receives: "缺少必填字段 films" / "字段 films[1] 期望 string，实为 integer"
+```
+
+Note the self-correction loop only converges if the fix is **achievable by the model** —
+a schema demanding information the model cannot know will spin until the retry cap
+(which is exactly why exhaustion returns the last result as-is instead of throwing).
 
 ### Context (Shared State)
 
@@ -348,7 +446,66 @@ Context manages shared state within a conversation:
 
 # Install to local Maven
 ./scripts/install-all.sh
+
+# Check that the READMEs still match the code (ghost APIs / missing index entries)
+clojure -M scripts/check_docs.clj
 ```
+
+<!-- check-docs:ignore-start -->
+### Docs-vs-code gate (`scripts/check_docs.clj`)
+
+A sweep once found a pile of **ghost APIs** across the six READMEs — features long
+removed or renamed, sometimes with an "already removed" note sitting right there in
+the source, while the docs happily kept teaching them. Worst case: `:build-result-msgs`
+was documented in four READMEs' **headline feature bullet** while `model/service.clj`
+explicitly said it was gone. Human review doesn't catch this, so it's mechanized:
+
+| Check | Catches |
+|---|---|
+| **ns exists** | every `im.ttalk.agent.*` named in a README must exist (caught `model.types`, which never existed) |
+| **ns coverage** | every source ns must be mentioned by some README (caught `pause` / `timeline` / `dashscope` — whole features invisible in the index) |
+| **symbol resolve** | `alias/sym` in code blocks must resolve (caught `proto/call-with-tools` — no such protocol method) |
+| **tombstones** | removed APIs must not come back. Map keys and macro options can't be resolved, so they're listed explicitly — **add an entry when you remove an API** |
+
+Design bias: **prefer false negatives over false positives.** An alias not bound by a
+`require` in the same file is skipped (so Spring class names, `my-vector-store/search`
+placeholders and `scripts/test-all.sh` paths never participate); comments and string
+literals are stripped first (otherwise "pause/resume" in a comment and the URL
+`/anthropic/v1/messages` in a string both misfire). *A gate that cries wolf gets
+`|| true`'d within a week.*
+
+### Live Verification Scripts (real provider)
+
+The unit suite (293 tests / 1198 assertions) touches no network. But some properties
+**a unit test cannot prove** — "will the model actually fix itself when handed the
+validation error?", "does the answer come from retrieval or from prior knowledge?",
+"do we really save tokens?" — only a real model can answer those. That's what these
+are for (**78 assertions** total):
+
+| Script | Asserts | What only it can prove |
+|---|---|---|
+| `examples/toolsearch_live_test.clj` | 11 | **78% prompt-token savings** on a 50-tool catalog with no loss of task quality; plus a cold/warm cache cost comparison — **saving tokens ≠ saving money** |
+| `examples/rag_live_test.clj` | 18 | corpus is entirely **fabricated facts** → control group can't answer, RAG group can — proving **grounding really comes from retrieval** |
+| `examples/structured_output_live_test.clj` | 12 | hand "missing required field birth_year" back to a real model and **it actually adds the field** (self-correction isn't just a claim) |
+| `examples/safeguard_live_test.clj` | 18 | a blocked turn makes **zero LLM calls**; the cost of not persisting is visible across real turns; boundary — a sensitive word in a *tool result* passes (**entry guard ≠ output guard**) |
+| `examples/return_direct_live_test.clj` | 19 | **control group**: the same compliance text goes through verbatim with return-direct, but gets rewritten by the model via a normal tool; the persistence fix verified with a real second turn |
+| `examples/minimax_agent_live_test.clj` | — | 9 callbacks / custom memory & kernel / `:filters` not exposed |
+
+```bash
+export MINIMAX_API_KEY=...        # legacy name MINIMAX_AUTH_TOKEN also accepted
+clojure -M -e '(load-file "examples/toolsearch_live_test.clj")'
+```
+
+These bill real tokens. Exit 0 on success, 1 on failure (CI-able, but needs a key).
+
+**The rule for live assertions**: pin the **mechanism** (LLM call counts, the messages
+and tool set actually sent, the persisted shape) — never the model's wording, which
+fluctuates and would turn CI into a minefield. The model's actual replies are printed,
+not asserted. Where a branch depends on "did the model happen to comply on the first
+try", use a **conditional assertion** (decide from the first output, then assert the
+matching invariant) — both paths test the mechanism and neither flakes.
+
+<!-- check-docs:ignore-end -->
 
 ## Dependencies
 

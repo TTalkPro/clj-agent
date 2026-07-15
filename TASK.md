@@ -270,6 +270,96 @@
 - [x] **文档**：`filter-chain-design.md` 加 token 链引言 + 内置表两行 +
   §4 对照表补 StreamAdvisor 行；CHANGELOG 0.3.0 条目。
 
+## P6 — Spring AI 2.0 Advisor 全面对齐（2026-07-15）✅ 全部完成
+
+> 来源：Spring AI 2.0.0 GA（2026-06）逐个 advisor 对照。结论：真正的缺口只有
+> **一个半**——ToolSearch（全缺）与 ToolCalling 的 return-direct/eligibility
+> （半缺）；其余要么早已等价拥有（`chain.copy` 递归 = 闭包链天然性质），
+> 要么是刻意不跟（memory 放循环内、getOrder、advisor context map）。
+> 两条旧结论被推翻（SafeGuard / RAG 本体，见下）。
+> **权威设计：`docs/advisor-alignment-design.md`**。
+> 测试：253/1039/0 → **292 tests / 1194 assertions / 0 failures**（零回归）。
+
+- [x] **先补钉子**：`:chat` filter 改写 `:tools` 抵达 provider 的契约此前**无测试
+  覆盖**，而 ToolSearch 完全建立在它之上——先补 3 个断言钉住再动工。
+- [x] **ToolSearch**（`advisor/tool_search.clj`，≈ `ToolSearchToolCallingAdvisor`）：
+  渐进式工具披露。**零新增钩子**——`search_tools` 是普通内联工具，`:writes`
+  经槽 reducer（`into` 集合并）折叠进 tool-context，`:chat` filter 据此重写
+  `:tools`；发现集合住在 tool-context 里 → 暂停/resume/持久化白拿正确。
+  索引零依赖可插拔（`keyword-tool-index` 中文二元组切分 / `regex-tool-index`
+  非法正则退化字面匹配；向量检索经 `IToolIndex` 注入）。
+- [x] **return-direct + eligibility-fn**（`tool.clj`/`kernel.clj`/`react.clj`，
+  ≈ ToolCallingAdvisor 的两个缺口）：整批全声明才生效（对齐 allMatch）；
+  **补落库**——正常路径工具结果靠下一次 invoke-chat 落库，return-direct 没有
+  下一次，不补则历史留悬空 tool_use 并被下个 turn 的 heal 整条摘掉。
+- [x] **结构化输出判据**（`advisor/structured_output.clj`）：机制早有，缺的是
+  判据——JSON Schema 子集校验 + 人话报错（模型据此自我修正）。core 零依赖，
+  JSON 解析经 `:parse-fn` 注入。
+- [x] **SafeGuard**（`safeguard-turn-filter`）：**推翻** §14.3「用户一个 chat
+  filter 即可」——那句写在 turn 链之前且挂点有误（`:chat` 会每轮重查累积历史）。
+- [x] **RAG 本体**（`advisor/rag.clj`）：**推翻** §4/§14.3「不跟本体」——推翻的是
+  「不做本体」而非「不引 vector store」：仍零检索依赖，`IRetriever` 注入；
+  本体价值在提示词编排不在检索。
+- [x] **SimpleLogger / RE2**：`logging-chat-filter`（LLM 侧日志，既有
+  `logging-filter` 只覆盖工具侧）、`re-reading-filter`。
+- [x] **live 验证**（MiniMax-M2.7 真实 provider）：五个脚本共 **78 项行为断言**，
+  均已实跑通过（各自反复跑 2–3 遍稳定）。断言一律钉机制（发出去的消息/工具集、
+  LLM 调用次数、落库形状），不钉模型措辞——后者会波动，拿它当断言等于给 CI 埋雷。
+  - `examples/safeguard_live_test.clj`（18 项）：拦下时**零 LLM 调用**；不落库的
+    代价在真实多轮里可见（第 2 轮模型答「没有之前的记录」）；边界——工具结果里
+    的敏感词照样通过（**入口守卫 ≠ 输出守卫**）。
+  - `examples/return_direct_live_test.clj`（19 项）：对照组是重点——同一句合规
+    话术 return-direct 逐字送达 vs 普通工具被模型改写。场景 3 用真实第二轮验证
+    **补落库的修复**（模型答得出上一轮工单号 → transcript 没被 heal 摘掉）。
+    另含 `:eligibility-fn` 放行/拦停对照。
+  - `examples/rag_live_test.clj`（18 项）：语料全为虚构事实 → 对照组答不出、
+    RAG 组答得出，grounding 才算被证明。并实跑印证「空检索不注入」这条偏离是
+    对的：同一无关问题，默认 → 模型正常作诗；`:inject-when-empty? true`
+    （Spring 行为）→ 模型拒答。
+  - `examples/structured_output_live_test.clj`（12 项）：用「schema 要求 prompt
+    里没提过的字段」触发**真实**校验失败 → 实测模型据反馈补上字段 → 通过。
+    另钉死「合格只调 1 次 LLM」「耗尽恰好 2 次、原样返回」。
+    **实测教训**：缺失字段必须是模型**答得上来**的——最初用
+    `internal_review_code`，模型两轮反馈都补不上（无从得知该填什么），
+    3 次耗尽；换 `birth_year` 后稳定 2 次收敛。这是自我修正方法本身的边界
+    （Spring 隐含假设了模型有能力照做），已写进设计文档 §3。
+  - `examples/toolsearch_live_test.clj`（11 项 + 冷/热缓存对照报告）。
+  **跑真机推翻了三个基于单测的判断**：
+  - 检索工具的**描述是 prompt 工程**：首版模型只检索一种能力就作答，另一半
+    问题静默丢失（基线正确调了两个工具）。补「需要多种能力时必须为每一种各
+    检索一次」后恢复；
+  - 索引**缺 IDF**：「查询」「获取」这类中文常见动词与「天气」同分，搜天气
+    捞出 get_holiday/get_balance。已加 IDF（全文档出现的词权重恰为 0 =
+    天然停用词）+ 回归测试。**刻意不加相对分数截断**——实测真实失败是召回
+    而非精确；
+  - **prompt cache 会毁 token 对照**：`:input-tokens` 不含缓存命中部分，同一
+    脚本跑第二遍基线会显示成「50 个工具 = 330 token」。必须用
+    `input + cache-read + cache-write`。据此更正了文档里一版错误结论
+    （原写「现金成本反贵 66%」实为热缓存假象；冷缓存下 ToolSearch 省 65%）。
+- [x] **顺带修复**：`examples/minimax_agent_live_test.clj` 因环境变量改名
+  （`MINIMAX_AUTH_TOKEN` → `MINIMAX_API_KEY`）**已失效**（启动即 exit 1）；
+  改为两个变量都接受，模型名取 `minimax/default-model`。
+- [x] **文档一致性门禁 + 六个 README 幽灵 API 清理**（`scripts/check_docs.clj`，
+  接入 CI 的 `docs` job 与 `scripts/test-all.sh`）：排查发现文档里积了一批幽灵
+  API——`:build-result-msgs`（源码明写已移除，四个 README 仍在头部 bullet 教人
+  用）、`proto/call-with-tools`（协议无此方法）、`find-function` 的 `:plugin`、
+  `invoke-tool` 的 `:context`、`chat-fn` 的 `:assistant-msg`、`model.types`、
+  filter 的 `:order`/`:phase`/`:before`/`:after`；以及模块索引隐身：`pause`/
+  `timeline` 不在 client README、DashScope 在 provider README 出现 0 次、
+  `modules/README.md` 依赖图停留在 client 拆分之前。门禁四项：ns 存在 / ns 覆盖
+  / 符号 resolve / 墓碑（map 键、宏选项没法 resolve，故显式登记，删 API 时补一条）。
+  取舍：宁可漏报不可误报（alias 未绑定即跳过；注释与字符串先剥）。四项均经变异
+  测试验证会真的失败；门禁自身的说明文档用 `<!-- check-docs:ignore-start/end -->`
+  窄区间豁免（否则举反例会自我触发）。
+- [x] **顺带修复**：`scripts/test-all.sh` 的 MODULES 漏了 `clj-agent-client`
+  ——CI matrix 有它、本脚本没有，本地 test-all 长期静默跳过整个 Agent 运行时。
+- [x] **文档**：新增 `docs/advisor-alignment-design.md`（权威对齐记录）；
+  `filter-chain-design.md` §3 内置表 + §4 对照表刷新（两条推翻标注）；
+  `agent-loop-concurrency-design.md` §14.3 加更正块；README（TOC/特性/内置
+  filter/ToolSearch/RAG/结构化输出三节）、core README Filter API
+  （**顺带修既有失效文档**：仍在写 `:order`/`:phase`/`:before`/`:after` 这套
+  早已不存在的 API）、CHANGELOG 0.3.0。
+
 ### 📋 历史账本
 
 2026-06 审查（P0/P1/P2 + 测试盲区）与 2026-07 优化轮（P3 + A/B/C 组）全部清零。

@@ -18,9 +18,13 @@ Clojure AI Agent Framework - Kernel 中央编排器
   - [Kernel API](#kernel-api)
   - [Service 接口](#service-接口)
   - [Filter 中间件](#filter-中间件洋葱式-around对标-spring-ai-advisor)
-  - [Context（共享状态）](#context共享状态)
+  - [ToolSearch（渐进式工具披露）](#toolsearch--渐进式工具披露对标-spring-ai-toolsearchtoolcallingadvisor)
+  - [RAG 注入](#rag-注入对标-spring-ai-questionansweradvisor)
+  - [结构化输出校验](#结构化输出校验对标-spring-ai-structuredoutputvalidationadvisor)
+  - [Context（请求级共享状态）](#context请求级共享状态)
 - [LLM Provider](#llm-provider)
 - [开发](#开发)
+  - [Live 验证脚本（真实 provider）](#live-验证脚本真实-provider)
 - [依赖](#依赖)
 
 ---
@@ -31,8 +35,9 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 - **Kernel + Tool 编排**：`deftool` 宏定义工具，`build-kernel` 声明式注册并统一调度
 - **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）；工具调用循环由 SimpleAgent 提供
-- **Filter 中间件**：洋葱式 around 链（对标 Spring AI Advisor），:chat / :tool 两类，可短路/重试/计时
-- **Service 抽象**：LLM 服务通过 `{:chat-fn :build-result-msgs}` map 接入，无耦合
+- **Filter 中间件**：洋葱式 around 链（对标 Spring AI 2.0 Advisor），:chat / :tool / :turn / :token-xform 四类钩子，可短路/重试/计时/递归重入
+- **Spring AI 2.0 Advisor 对齐**：ToolSearch 渐进式工具披露（省 34–64% token）、return-direct、可插拔续跑判据、SafeGuard 敏感词、RAG 注入、结构化输出自我修正、RE2 重读——检索/向量库一律经协议注入，框架零新增依赖（见 `docs/advisor-alignment-design.md`）
+- **Service 抽象**：LLM 服务通过 `{:chat-fn :stream-fn}` map 接入，无耦合
 - **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）及 OpenAI 兼容协议
 - **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error :error <规范错误 map>}`（可配 `:on-error`）
 - **统一错误模型**：失败统一用规范错误 map `{:type :message :retryable? :status :provider}`（见 `im.ttalk.agent.model.error`）。各边界封装一致：provider I/O 失败抛 `ex-info`（data 即规范错误）、配置/解析返回 `[:ok]/[:error]`、SimpleAgent 返回 `{:status :error}`、工具错误渲染成字符串喂回 LLM——彼此可单向转换，`:retryable?`/`:status` 全程不丢（如 401 始终不可重试）
@@ -373,8 +378,9 @@ Kernel 提供三类 API：
 Service 是一个 map，定义 LLM 调用协议：
 
 ```clojure
-{:chat-fn           (fn [messages opts] -> {:text "..." :tool-calls [...] :assistant-msg {...}})
- :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
+{:chat-fn   (fn [messages opts] -> 归一化响应)              ;; 同步
+ :stream-fn (fn [messages opts on-token] -> 归一化响应)}    ;; 流式；不支持的 provider 自动回退同步
+;; 归一化响应实现 ILLMResponse：(resp/response-text r) / (resp/response-tool-calls r) / (resp/response-usage r)
 ```
 
 core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议）可从任意 provider 创建。也可自行实现此 map 接入任意 LLM。
@@ -410,10 +416,14 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 
 ;; 内置 filter
 filters/logging-filter        ;; 调用前后日志（:tool）
+(filters/logging-chat-filter) ;; LLM 请求/响应日志（:chat，对标 SimpleLoggerAdvisor）
 (filters/timeout-filter 5000) ;; 超时控制（ms，around；超时标 :transient 可触发重试）
 (filters/approval-filter)     ;; 敏感工具审批（拒绝则短路）
 (filters/validation-turn-filter validate-fn :max-retries 2)
                               ;; 最终答案校验（:turn）：不合格带反馈重入循环重试
+(filters/safeguard-turn-filter ["敏感词"])
+                              ;; 敏感词命中 → 不进循环直接拒答（:turn，对标 SafeGuardAdvisor）
+(filters/re-reading-filter)   ;; RE2 重读（:turn，对标 ReReadingAdvisor）
 
 ;; 注册：filters 向量顺序即洋葱层序（越靠前越外层）
 (kernel/build-kernel {:service svc :tools tools :filters [my-filter both]})
@@ -422,6 +432,69 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 ;; filter 可改写 :args、短路、around；无需（也不应）回传 :context。
 ;; 注意：同一轮的多个 tool-call 并行执行，交互式审批请放 agent 的 :tool-gate（批前串行），
 ;; 勿放 tool filter（会在并行任务中并发弹提示）。
+```
+
+### ToolSearch —— 渐进式工具披露（对标 Spring AI `ToolSearchToolCallingAdvisor`）
+
+工具一多，全量 schema 每轮都进 prompt（Spring 实测 28 个工具 ≈ 5K–17K token，
+且模型在 30+ 同名工具间选择准确率下降）。渐进式披露把「一次性全塞」换成
+「按需检索」：初始只暴露一个 `search_tools`，模型检索到的工具**下一轮**才进
+工具列表。
+
+```clojure
+(require '[im.ttalk.agent.advisor.tool-search :as ts])
+
+(kernel/build-kernel
+  (ts/with-tool-search                       ;; 工具 / filter / 状态槽三处一次装好
+    {:service svc
+     :tools   [#'t1 #'t2 ... #'t80]
+     :filters [(ma/memory-filter store)]}
+    {:index (ts/keyword-tool-index)          ;; 或 (ts/regex-tool-index)
+     :limit 5
+     :always-include #{"handoff"}}))         ;; 无需检索即常驻的关键工具
+```
+
+索引**零依赖、可插拔**：内置 `keyword-tool-index`（名称/描述分词打分，中文按
+二元组切分）与 `regex-tool-index`（名称模式）；自带向量库 `(reify ts/IToolIndex ...)`
+注入即可。发现集合随 tool-context 累积，故暂停/resume/持久化全自动正确。
+详见 `docs/advisor-alignment-design.md` §2。
+
+### RAG 注入（对标 Spring AI `QuestionAnswerAdvisor`）
+
+每 turn 检索一次并拼进用户问题。**不含向量库**——检索经 `IRetriever` 注入：
+
+```clojure
+(require '[im.ttalk.agent.advisor.rag :as rag])
+
+(def retriever
+  (reify rag/IRetriever
+    (retrieve [_ query top-k]
+      (map (fn [hit] {:text (:content hit)}) (my-vector-store/search query top-k)))))
+
+(kernel/build-kernel
+  {:service svc
+   :filters [(ma/memory-filter store)
+             (rag/qa-turn-filter retriever :top-k 4)]})
+```
+
+### 结构化输出校验（对标 Spring AI `StructuredOutputValidationAdvisor`）
+
+`validation-turn-filter` 是机制（不合格 → 反馈重入 → 重试上限），
+`advisor/structured-output` 是判据（按 JSON Schema 校验 + 人话报错，
+模型据此自我修正而非盲目重试）：
+
+```clojure
+(require '[im.ttalk.agent.advisor.structured-output :as so]
+         '[cheshire.core :as json])
+
+(filters/validation-turn-filter
+  (so/validate-fn {:type "object"
+                   :properties {:actor {:type "string"}
+                                :films {:type "array" :items {:type "string"}}}
+                   :required ["actor" "films"]}
+    :parse-fn #(json/parse-string % true))   ;; core 零依赖，解析器由你注入
+  :max-retries 2)
+;; 不合格时模型收到的反馈："缺少必填字段 films" / "字段 films[1] 期望 string，实为 integer"
 ```
 
 ### Context（请求级共享状态）
@@ -513,13 +586,20 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
   [{:role "user" :content "你好"}])
 ;; => "你好！有什么我可以帮助你的吗？"
 
-;; 带工具的调用
-(proto/call-with-tools provider
-  {:model "gpt-4" :max-tokens 1024}
-  [{:role "user" :content "北京天气怎么样？"}]
-  [{:name "get-weather" :description "获取天气" :parameters {...}}])
-;; => {:text "..." :tool-calls [{:id "..." :name "get-weather" :args {:city "北京"}}]}
+;; 带工具的调用：走协议方法 call-llm（第 4 个参数即 tools）
+(def resp (proto/call-llm provider
+            {:model "gpt-4" :max-tokens 1024}
+            [{:role "user" :content "北京天气怎么样？"}]
+            [{:name "get-weather" :description "获取天气"
+              :input_schema {:type "object" :properties {}}}]))
+
+;; call-llm 返回的是**厂商原始响应**，用协议方法取内容：
+(proto/extract-text provider resp)         ;; => "..."
+(proto/extract-tool-calls provider resp)   ;; => [{:id "..." :name "get-weather" :args {:city "北京"}}]
 ```
+
+> 归一化（统一成 `ILLMResponse`）发生在 `service/create-service` 里；直调
+> provider 拿到的是原始响应，故需经 `extract-*` 协议方法读取。
 
 ## 高级用法：完整示例
 
@@ -563,9 +643,66 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 
 # 单独跑某个模块
 cd modules/clj-agent-core && clojure -M:test
+
+# 检查 README 与真实代码是否一致（幽灵 API / 模块索引缺漏）
+clojure -M scripts/check_docs.clj
 ```
 
-> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对三个模块并行跑测试。
+> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对三个模块并行跑测试，
+> 外加一个 `docs` job 跑文档一致性检查。
+
+<!-- check-docs:ignore-start -->
+### 文档一致性门禁（`scripts/check_docs.clj`）
+
+**动机**：一次排查在六个 README 里挖出一批**幽灵 API**——功能早被删/改，源码里
+甚至留了「已移除」的注释，文档却没跟。最离谱的是 `:build-result-msgs`：
+`model/service.clj` 明写它已移除，四个 README 却还在**头部特性 bullet** 里教人
+用它。人肉复查挡不住这个，所以机器化。四项检查：
+
+| 检查 | 抓的是 |
+|---|---|
+| **ns 存在** | README 点名的 `im.ttalk.agent.*` 必须真实存在（抓到过从未存在的 `model.types`） |
+| **ns 覆盖** | 源码里每个 ns 至少被某个 README 提到（抓到过 `pause`/`timeline`/`dashscope` —— 整块功能在索引里隐身） |
+| **符号 resolve** | 代码块里的 `alias/sym` 必须能 resolve（抓到过 `proto/call-with-tools` —— 协议里根本没这方法） |
+| **墓碑** | 已删除的 API 不得复活。map 键/宏选项没法靠 resolve 检查，故显式登记——**删 API 时往 `tombstones` 加一条** |
+
+设计取舍：**宁可漏报，不可误报**。alias 未由同文件 `require` 绑定即跳过（Spring
+类名、`my-vector-store/search` 占位符、`scripts/test-all.sh` 路径因此天然不参检）；
+注释与字符串字面量在检查前剥掉（否则注释里的「pause/resume」、字符串里的 URL
+`/anthropic/v1/messages` 都会误报）。**一个会误报的门禁很快就会被加 `|| true` 绕过。**
+
+### Live 验证脚本（真实 provider）
+
+单测（293 tests / 1198 assertions）不叩任何网络。但有些性质**单测证明不了**——
+「模型看到反馈会不会真的改对」「答案到底来自检索还是先验知识」「省 token 是不是
+真省」这类问题，只有真模型能回答。这些脚本就是干这个的，共 **78 项断言**：
+
+| 脚本 | 断言 | 单测证明不了、只有它能证的事 |
+|---|---|---|
+| `examples/toolsearch_live_test.clj` | 11 | 50 工具目录**省 78% prompt token** 且任务质量不掉；附冷/热缓存成本对照——**省 token 未必省钱** |
+| `examples/rag_live_test.clj` | 18 | 语料全为**虚构事实** → 对照组答不出、RAG 组答得出，**grounding 真的来自检索**；空检索两种语义的实跑差异 |
+| `examples/structured_output_live_test.clj` | 12 | 把「缺少必填字段 birth_year」丢回真实模型，**它真的把字段补上了**（自我修正不是纸面主张） |
+| `examples/safeguard_live_test.clj` | 18 | 拦下时**零 LLM 调用**；不落库的代价在真实多轮里可见；边界——工具结果里的敏感词照样通过（**入口守卫 ≠ 输出守卫**） |
+| `examples/return_direct_live_test.clj` | 19 | **对照组**：同一句合规话术，return-direct 逐字送达 vs 普通工具被模型改写；补落库修复用真实第二轮验证 |
+| `examples/minimax_agent_live_test.clj` | — | 9 个 callback / 自定义 memory & kernel / `:filters` 不暴露 |
+
+```bash
+export MINIMAX_API_KEY=...        # 兼容旧变量名 MINIMAX_AUTH_TOKEN
+clojure -M -e '(load-file "examples/toolsearch_live_test.clj")'
+```
+
+会真实计费；全部通过 exit 0，有失败 exit 1（可进 CI，但需 key）。
+
+**写 live 断言的一条规矩**：只钉**机制**（LLM 调用次数、发给 provider 的消息与
+工具集、落库形状），绝不钉模型措辞——后者会波动，拿它当断言等于给 CI 埋雷。
+模型的实际回答只打印、不断言。需要「模型首轮是否恰好合规」这类分支时，用**条件
+断言**（先判定首轮结果，再断言对应的不变量），两条路都在测机制且永不 flake。
+
+> 这几个脚本不是装饰：跑真机推翻过三个基于单测的判断（检索工具描述缺一句话会
+> 静默掉召回、关键词索引缺 IDF、prompt cache 会让 token 对照得出反向结论），
+> 也修出过一个静默失效的老脚本。详见 `docs/advisor-alignment-design.md` §2.3–2.5。
+
+<!-- check-docs:ignore-end -->
 
 ## 依赖
 
