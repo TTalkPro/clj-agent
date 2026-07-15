@@ -164,6 +164,18 @@ Spring 把「执行一批 tool-call」抽成 `ToolCallingManager`，由 `ToolCal
 **而不是引入 manager 对象**——两个可替换点已各有更好的落点，manager 只会与
 `:serial` / `:tool` filter 链重叠。
 
+> **⚠️ 已修订（2026-07-15）**：本节判断**已被推翻**——见专文
+> [`tool-calling-manager-design.md`](tool-calling-manager-design.md)。
+>
+> 推翻理由摘要：deftool 要支持 HTTP/MCP backend（多 transport）的需求兑现了
+> §1.3 末尾的「真实需求」条件；而 §1.3 推荐的「executor 可注入」形状只能换
+> 线程池（kernel 级），不能换 transport（per-tool）。新设计用 **`ToolCallingManager`
+> 协议 + 多 record 实现**（`VirtualThreadToolCallingManager` / `SequentialToolCallingManager`
+> / `ThreadPoolToolCallingManager`）——既是「executor 可注入」的彻底兑现（多 impl 而非
+> 单键注入），又通过 `deftool :backend` 元数据独立承担 transport dispatch（不与
+> manager 重叠）。**§1.3 当初担心的「manager 与 :serial / :tool filter 重叠」通过
+> 严格边界契约避免**（详见专文 §3 对账表与 §11 决策 #14-#17）。
+
 ---
 
 ## 2. ToolSearchToolCallingAdvisor —— 唯一的架构级缺口
