@@ -5,9 +5,11 @@ echo "=========================================="
 echo "Testing all clj-agent modules"
 echo "=========================================="
 
-# 按依赖顺序测试
+# 按依赖顺序测试（client 曾长期缺席本列表——CI matrix 有它，本脚本没有，
+# 于是本地 test-all 静默跳过整个 Agent 运行时）
 MODULES=(
   "clj-agent-core"
+  "clj-agent-client"
   "clj-agent-provider"
 )
 
