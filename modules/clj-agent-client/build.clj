@@ -3,7 +3,7 @@
             [deps-deploy.deps-deploy :as dd]))
 
 (def lib 'im.ttalk/clj-agent-client)
-(def version (format "0.2.%s" (b/git-count-revs nil)))
+(def version (format "0.3.%s" (b/git-count-revs nil)))
 (def class-dir "target/classes")
 ;; 发布关键：core 在 deps.edn 中是 {:local/root ...}，write-pom 无法把本地路径写成
 ;; 合法 Maven 坐标 —— 生成的 pom 会缺失 core 依赖，消费方解析即断。这里在构建期把
