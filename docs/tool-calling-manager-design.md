@@ -669,7 +669,15 @@ manager 分支让协议方法内部再抽一次。**双路径形状一致**是 P
 
 ### PR2：deftool 扩展 `:backend`（仅 local + http，mcp 留接口）
 
-**目标**：让 deftool 能声明 HTTP backend，跑通一个 HTTP 工具示例。
+> **⏸️ 未立项（2026-07-15）**：经评估，`:backend` 抽象在没有具体 HTTP/MCP 工具
+> 需求时 ROI 不高——用户可在普通 deftool 内手写 HTTP 调用包装（5-10 行），
+> 完全等价。MCP 协议复杂值得抽象，但同样待真实场景触发。
+> **PR1 已经是完整且自洽的交付状态**——没有真实需求的扩展，停在 PR1 反而干净。
+> 
+> **重新启动条件**：出现需要接入的真实 HTTP 工具服务或 MCP server。
+> 届时按本节设计执行，doc 已就绪。
+
+**目标**（重启时）：让 deftool 能声明 HTTP backend，跑通一个 HTTP 工具示例。
 
 **改动文件**：
 - `core/tool.clj`（宏改造 + `invoke-backend` defmulti + `:local` 方法）
@@ -683,7 +691,11 @@ manager 分支让协议方法内部再抽一次。**双路径形状一致**是 P
 
 ### PR3（可选）：MCP backend
 
-**目标**：加 `IMcpClient` 协议 + MCP 分派，至少跑通一个真实 MCP server。
+> **⏸️ 未立项（2026-07-15）**：与 PR2 同步搁置，待真实 MCP server 需求出现。
+> MCP 协议（listTools / callTool / STDIO / Streamable-HTTP）复杂度比 HTTP 高，
+> 值得专门抽象——但同样需要真实场景驱动，不为对齐 Spring AI 而预先建。
+
+**目标**（重启时）：加 `IMcpClient` 协议 + MCP 分派，至少跑通一个真实 MCP server。
 
 **何时做**：等具体 MCP 场景出现。首版只留 protocol + dispatch 占位。
 
@@ -785,6 +797,7 @@ Spring 用 `ToolCallingManager`。clj-agent 已有 `kernel` 概念（中央编�
 | 15 | `execute-batch` / `execute-single` 归属（v3 新增） | **每个 record 的内部 helper**（不是协议方法） | 协议只有一个方法；多 impl 通过不同 record 实现，不用多协议方法 |
 | 16 | 多 impl 策略（v3 新增） | **VT（默认）+ Sequential + ThreadPool** | 对齐 cl-agent 双 impl；§1.3「executor 可注入」诉求完全兑现 |
 | 17 | 多 impl 是否进 PR1（v3 新增） | **VT + Sequential 进 PR1**；ThreadPool 可选/后续 | 至少两个 impl 才能证明协议真能换策略 |
+| 18 | PR2/PR3 是否立项（2026-07-15） | **⏸️ 搁置，待真实需求触发** | 没有具体 HTTP/MCP 工具需求时，`:backend` 抽象 ROI 不高；用户可在 deftool 内手写 HTTP 包装（5-10 行）等价。PR1 已是完整自洽的交付状态 |
 
 ---
 
