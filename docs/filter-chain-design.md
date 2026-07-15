@@ -164,24 +164,41 @@ terminal (fn [treq]
 | `logging-filter` | :tool | 调用前后日志 |
 | `(timeout-filter ms)` | :tool | 超时短路 + future-cancel 中断；超时结果标 `:error {:class :transient}`（声明 `:retry` 的幂等工具可自动重试） |
 | `(approval-filter fn?)` | :tool | 敏感工具审批，拒绝短路（交互式场景请改用 gate） |
-| `(validation-turn-filter validate-fn :max-retries n)` | :turn | 最终答案校验：不合格把原因作反馈消息重入循环；耗尽原样返回；非 :completed 透传。对标 Spring AI `StructuredOutputValidationAdvisor`，配 provider 原生 json_schema 使用 |
+| `(logging-chat-filter :log-fn f :preview n)` | :chat | LLM 请求/响应日志（对标 Spring `SimpleLoggerAdvisor`；`logging-filter` 的 LLM 侧对应物） |
+| `(validation-turn-filter validate-fn :max-retries n)` | :turn | 最终答案校验：不合格把原因作反馈消息重入循环；耗尽原样返回；非 :completed 透传。对标 Spring AI `StructuredOutputValidationAdvisor`，配 provider 原生 json_schema 使用；判据可用 `advisor/structured-output` 生成 |
+| `(safeguard-turn-filter 敏感词 :failure-response s)` | :turn | 入口消息命中敏感词 → 不进循环直接拒答（对标 `SafeGuardAdvisor`）。**挂 :turn 不挂 :chat**：:chat 会每轮重查累积历史 |
+| `(re-reading-filter :template f)` | :turn | RE2 重读：入口用户问题重复一遍（对标 `ReReadingAdvisor`） |
 | `(token-redact-filter re replacement)` | :token-xform | 流式出站 token 无状态正则脱敏（跨 chunk 限制见专文） |
 | `(hold-release-filter check-fn)` | :token-xform | 先审后放：缓冲整流，完流 check-fn 全文，通过原序放行 / 不通过 emit 单个替换 token |
 | `(memory-filter store)`（client） | :chat | 按 conversation-id 读写历史；应放 filters 首位 |
+| `(ts/with-tool-search opts {:index ...})` | :chat + 工具 + 槽 | 渐进式工具披露（对标 `ToolSearchToolCallingAdvisor`）：初始只暴露 `search_tools`，检索到的工具下一轮才进列表。详见 `advisor-alignment-design.md` §2 |
+| `(rag/qa-turn-filter retriever :top-k n)` | :turn | 检索增强注入（对标 `QuestionAnswerAdvisor`）：每 turn 检索一次并拼进用户问题。零依赖，向量库经 `IRetriever` 注入 |
+
+工具侧另有两个 deftool/kernel 选项对齐 ToolCallingAdvisor（非 filter）：
+`{:return-direct true}`（结果即最终答案，不回灌 LLM；整批全声明才生效）与
+`build-kernel` 的 `:eligibility-fn`（续跑判据，对标
+`ToolExecutionEligibilityChecker`）。
 
 ---
 
 ## 4. 与 Spring AI 2.0 advisor 的对照（吸收记录）
 
+> **逐个 advisor 的完整对齐记录见专文 `advisor-alignment-design.md`（2026-07-15
+> 全面对齐，292/1194）。本表为速览；其中 SafeGuard 与 QuestionAnswer 两项的
+> 旧结论已被推翻，理由见专文 §5 / §7.1。**
+
 | Spring AI 2.0 | 我们 | 结论 |
 |---|---|---|
-| ToolCallingAdvisor（循环进链，位置=粒度） | `:turn` 钩子（循环本体不动，只包一层） | **吸收**——不学大搬家：循环与 gate/HITL/暂停/持久化深度耦合，为优雅重构不值 |
+| ToolCallingAdvisor（循环进链，位置=粒度） | `:turn` 钩子（循环本体不动，只包一层）+ `:return-direct` + `:eligibility-fn` | **吸收能力**——不学大搬家：循环与 gate/HITL/暂停/持久化深度耦合，为优雅重构不值 |
+| `ToolSearchToolCallingAdvisor` | `advisor/tool-search`（`IToolIndex` + `search_tools` + `:chat` filter） | **吸收**——零新增钩子：`:writes` 折叠进 context + `:chat` 改写 `:tools` 即成 |
 | `chain.copy(this)` 递归 advisor（1.1 experimental） | 闭包链天然仅下游 | **免费拥有**，无需新 API |
-| StructuredOutputValidationAdvisor | `validation-turn-filter` | 吸收（~30 行，取回已删 converter 子系统的核心价值） |
+| StructuredOutputValidationAdvisor | `validation-turn-filter`（机制）+ `advisor/structured-output`（判据） | 吸收（机制早有；本次补 schema 判据与人话报错） |
 | `StreamAdvisor` 返回 `Flux<ChatClientResponse>`（流是一等值，Call/Stream 双接口） | `:token-xform` transducer 变换出站 token 流 | **吸收算子思想**（1→N/有状态/flush），不引 Reactor、不拆双接口——详见 `token-stream-filter-design.md` §5 |
+| SafeGuardAdvisor | `safeguard-turn-filter`（:turn） | ~~不跟~~ **已吸收**（2026-07-15；旧结论「一个 chat filter 即可」写在 turn 链之前，挂点判断有误） |
+| QuestionAnswerAdvisor（RAG） | `advisor/rag` `qa-turn-filter`（`IRetriever` 注入） | ~~不跟本体~~ **已吸收**（2026-07-15；仍不引 vector store——本体价值在提示词编排，不在检索） |
 | memory advisor 放循环外 | memory 刻意放循环内 | 不跟（完整 transcript 是我们的契约） |
-| QuestionAnswerAdvisor（RAG） | 留 `:turn` 挂点 | 不跟本体（需 vector store，超出定位） |
-| advisor context map（跨 advisor 状态） | 请求 map 透传 + 闭包 | 不跟（已够） |
+| RetrievalAugmentationAdvisor / VectorStoreChatMemoryAdvisor | — | 不跟（需 vector store 本体 / 与完整 transcript 契约冲突） |
+| advisor context map（跨 advisor 状态） | 请求 map 透传 + 闭包（跨工具状态另有 `:writes`+`:state-slots`） | 不跟（已够） |
 | getOrder 数值排序 | 注册顺序即层序 | 不跟（显式列表更直白） |
 
 ---
@@ -205,7 +222,10 @@ terminal (fn [treq]
 
 ## 相关文档
 
+- `advisor-alignment-design.md`（**Spring AI 2.0 逐个 advisor 的对齐记录**：
+  ToolSearch / SafeGuard / RAG / return-direct / 结构化输出判据）
 - `agent-loop-concurrency-design.md` §4.6（tool 链契约收紧的动因与盘点）、
+  §9（`:writes`/`:state-slots` MapReduce 契约）、
   §14（turn 链的实施记录与 Spring AI 调研）
 - `hitl-timeline-design.md`（gate/暂停/resume 与 filter 链的边界分工）
 - `token-stream-filter-design.md`（`:token-xform` token 流变换链权威设计）

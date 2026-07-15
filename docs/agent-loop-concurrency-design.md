@@ -628,6 +628,17 @@ provider 原生 json_schema 取回已删 converter 子系统的核心价值
 
 解锁：每 turn 一次的 RAG 注入（此前只能 chat filter → 工具循环每轮重复
 检索）、最终答案 guardrail、turn 级预算/计时、episode 级 evaluator。
-不跟：RAG advisor 本体（需 vector store，超出定位，留挂点）、
-SafeGuardAdvisor（用户一个 chat filter 即可）、advisor context map
+不跟：~~RAG advisor 本体（需 vector store，超出定位，留挂点）、
+SafeGuardAdvisor（用户一个 chat filter 即可）~~、advisor context map
 （请求 map 透传已够）。零破坏（纯新增钩子）。
+
+> **更正（2026-07-15，见 `advisor-alignment-design.md`）**：上面划掉的两条
+> 已推翻，两者现均为内置 `:turn` filter。
+> - **SafeGuardAdvisor**：「一个 chat filter 即可」这句写在 turn 链落地之前，
+>   挂点判断有误——`:chat` 会在循环内每轮重查，且第 2 轮起 `:messages` 是
+>   memory 拼出的完整历史 + 工具往返，既重复告警又会因历史旧内容误伤。
+>   Spring 查的是「用户这次的输入」，只查一次——那正是本节新造的 `:turn`。
+> - **RAG 本体**：推翻的只是「不做本体」，不是「不引 vector store」——
+>   `advisor/rag` 仍零检索依赖，只定义 `IRetriever` 协议 + 注入 filter。
+>   本体的实质是提示词编排（问题 + 检索结果 + grounding 指令），不是检索；
+>   而「每 turn 只注入一次」恰是本节自己点名的解锁场景。
