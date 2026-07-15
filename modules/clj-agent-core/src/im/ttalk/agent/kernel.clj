@@ -48,7 +48,7 @@
 
 ;; inline-handlers: {keyword -> (fn [args ctx] result)} — 内联工具处理函数，
 ;; 由 delegate-tool 等动态构建的工具填充，与 tool-vars（var 引用）互补。
-(defrecord Kernel [service filters tools tool-vars inline-handlers settings])
+(defrecord Kernel [service filters tools tool-vars inline-handlers settings tool-manager])
 
 ;;; ============================================================
 ;;; Build API
@@ -77,7 +77,7 @@
                    :tools [#'get-weather #'get-time]
                    :filters [memory-filter retry-filter]
                    :settings {:max-tool-iterations 10}})"
-  [{:keys [service tools tool-vars filters settings state-slots eligibility-fn]
+  [{:keys [service tools tool-vars filters settings state-slots eligibility-fn tool-manager]
     :or {tools [] filters [] settings {}}}]
   (let [all-tools (vec (or tool-vars tools))
         ;; 内联工具：map 且含 :handler fn（由 delegate-tool 等动态构建）
@@ -98,9 +98,10 @@
               (into compiled-var-tools compiled-inline-tools)
               var-map
               inline-handler-map
-              (cond-> settings
-                state-slots (assoc :state-slots state-slots)
-                eligibility-fn (assoc :eligibility-fn eligibility-fn)))))
+               (cond-> settings
+                 state-slots (assoc :state-slots state-slots)
+                 eligibility-fn (assoc :eligibility-fn eligibility-fn))
+               tool-manager)))
 
 ;;; ============================================================
 ;;; Query API
