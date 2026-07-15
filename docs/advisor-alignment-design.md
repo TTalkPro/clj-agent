@@ -23,6 +23,7 @@ return-direct/eligibility（半缺）。其余要么早已等价拥有，要么�
 | Spring AI 2.0 | 我们 | 结论 |
 |---|---|---|
 | `ToolCallingAdvisor`（循环进链） | `:turn` 钩子包循环 + `:return-direct` + `:eligibility-fn` | **吸收能力，不学搬家**（§1） |
+| `ToolCallingManager`（批执行抽象） | `react/execute-batch` + `:serial` 声明 + `:tool` filter 链 | **拆散，不长这个抽象**（§1.3） |
 | `ToolSearchToolCallingAdvisor` | `advisor/tool-search`（`IToolIndex` + `search_tools` + `:chat` filter） | **新建**（§2）——本次唯一的架构级缺口 |
 | `StructuredOutputValidationAdvisor` | `validation-turn-filter` + `advisor/structured-output` | 机制早有，**补判据**（§3） |
 | `MessageChatMemoryAdvisor` | `advisor/memory` memory-filter | 等价，**放置刻意不同**（§4） |
@@ -93,6 +94,75 @@ turn 的 heal 摘掉。这是本次对齐里最容易漏的一刀，单测（`re
 工具一个都不执行。缺省恒真（行为不变）。
 
 解锁：预算/配额闸门、按 context 关停工具、灰度。
+
+### 1.3 ToolCallingManager —— 我们不长这个抽象
+
+> 本节是**记录性补充**（2026-07-15，无代码变更，不计入本次 292/1194）。
+> 起因：与 `cl-agent`（Common Lisp，同样对标 Spring AI 2.0，但**全面照抄**
+> ChatClient + Advisor）对读时发现，它有 `ToolCallingManager` 而我们没有。
+> 结论是「刻意拆散」而非疏漏，故留档——否则下一个人还会再问一遍。
+
+Spring 把「执行一批 tool-call」抽成 `ToolCallingManager`，由 `ToolCallingAdvisor`
+调用；cl-agent 照抄（`core/chat/tool.lisp`，default / concurrent 两个实现）。
+**关键性质是循环不在它这里**：advisor 在 loop 里反复调模型，manager 只被调用
+一次做完一轮就返回——不知道 max-iterations、不知道自己是第几轮、也不决定要不要
+继续。它独立存在是为了两个可替换点：**执行策略**（顺序 / lparallel 并发，
+语义一致可换实现）与**错误策略**（`process-tool-execution-error` 泛型函数，
+默认转文本回传，可覆盖成 re-signal 冒泡）。
+
+**我们的切法同性质，且多一层**：
+
+| 职责 | Spring / cl-agent | 我们 |
+|---|---|---|
+| 循环 / max-iterations / 是否续跑 | `ToolCallingAdvisor` | `react/invoke` |
+| **一批 tool-call** | `ToolCallingManager` | `react/execute-batch` |
+| **单个工具执行** | （manager 内部） | `kernel/invoke-tool` |
+
+`kernel/invoke-tool` 执行**一个**工具、**一次**，同样不知道 max-iterations、
+不知道第几轮——与 manager 是同一种"不持有编排"的性质，只是粒度更细一层。
+（外部若把「kernel 把 invoke-tool 和编排揉在一起」当成我们的切法，是误读：
+循环早已下沉到 `client/react.clj`，见该 ns doc 首行。）
+
+**那两个可替换点我们都有，只是都不落在 manager 上**：
+
+- **执行策略 → 落在 tool 声明，不在实现选择**。缺省并行（虚拟线程），
+  批内任一工具声明 `:serial` 则整批退化按序（`react/execute-batch`）。
+  理由：manager 层「全局选顺序 or 并发」是个**假选择**——真实工具集是混的
+  （多数只读可并行、少数有副作用）。全局选顺序＝为少数惩罚多数；全局选并发
+  ＝那少数出事。粒度放在工具上，**声明者正是知情者**。
+  （`(<= (count tool-calls) 1)` 时退化回顺序，与 cl-agent 并发版 ≤1 个工具
+  `call-next-method` 退化回顺序版是同一个优化，各自独立得出。）
+- **错误策略 → 落在数据 + 屏障路由，不在方法覆盖**。
+  `err/classify-exception` 三分类 `:semantic` / `:transient` / `:environment`
+  → `execute-batch` 把失败连同类别放进 `:errors` 交到屏障 → `:transient` 且
+  工具声明 `:retry` 则指数退避；`:environment` 且 `:on-env-error :pause` 则
+  暂停等人修好再 resume。缺省 `:proceed`（转文本回传，与 Spring/cl-agent
+  默认一致）。
+- **限流 / 熔断 / 超时 → 落在 `:tool` filter 链**（`timeout-filter` /
+  `approval-filter`），不在 manager。
+
+**更本质的一条：concurrent manager 有一半在管线程池生命周期**——`pool-size`、
+双检锁懒创建 lparallel kernel、幂等 shutdown。我们用虚拟线程：
+
+```clojure
+(def ^:private tool-executor
+  (delay (Executors/newVirtualThreadPerTaskExecutor)))
+```
+
+没有池要调、没有 size 要选、没有 shutdown 要幂等。**那个抽象有相当一部分是在
+解一个我们不存在的问题**——这是"要不要抽"的判据被运行时改写的典型例子。
+
+**代价（诚实记账）**：manager 是可替换的对象，能塞进一个完全不同的执行器
+（优先级队列、限流池、分布式）而循环一行不动。我们的 `tool-executor` 是私有
+`delay`，**写死的**——要换得改 `execute-batch`。缓解手段两个但都不完全等价：
+`react/run-tools` 是公开的（docstring：「供外部手搓工具循环使用」），可自搓
+循环；限流那类需求走 `:tool` filter。但「**保留内置循环、只换执行器**」这件事
+我们确实做不到。
+
+**立项判据**：出现真实需求（分布式工具执行、需要优先级队列的池）再抽，且抽的
+形状应是 **`execute-batch` 的 executor 可注入**（kernel `:settings` 加一个键），
+**而不是引入 manager 对象**——两个可替换点已各有更好的落点，manager 只会与
+`:serial` / `:tool` filter 链重叠。
 
 ---
 
