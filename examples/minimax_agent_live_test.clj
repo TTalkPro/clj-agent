@@ -10,7 +10,7 @@
    3. agent 层不暴露 kernel filter：create-agent 传 :filters 被忽略（warn），
       自定义 filter 必须走自建 kernel
 
-   运行（需 MINIMAX_AUTH_TOKEN）：
+   运行（需 MINIMAX_API_KEY，兼容旧的 MINIMAX_AUTH_TOKEN）：
      clojure -M -e \"(load-file \\\"examples/minimax_agent_live_test.clj\\\")\""
   (:require [im.ttalk.agent.client :as agent]
             [im.ttalk.agent.tool :refer [deftool]]
@@ -24,15 +24,16 @@
 ;;; 环境与公共设施
 ;;; ============================================================
 
-(def auth-token (System/getenv "MINIMAX_AUTH_TOKEN"))
+;; provider 默认读 MINIMAX_API_KEY；MINIMAX_AUTH_TOKEN 为旧变量名的兼容回退
+(def auth-token (or (System/getenv "MINIMAX_API_KEY")
+                    (System/getenv "MINIMAX_AUTH_TOKEN")))
 
 (when-not auth-token
-  (println "需要 MINIMAX_AUTH_TOKEN")
+  (println "需要 MINIMAX_API_KEY（或旧变量 MINIMAX_AUTH_TOKEN）")
   (System/exit 1))
 
-;; provider 默认读 MINIMAX_API_KEY；此处显式传 :api-key 接入 MINIMAX_AUTH_TOKEN
 (def p (minimax/create-provider {:api-key auth-token}))
-(def MODEL "MiniMax-M2.7")
+(def MODEL minimax/default-model)
 
 (def failures (atom 0))
 
@@ -82,7 +83,8 @@
       (check "on-tool-call 触发 1 次（gate 缓存，无双触发）" (= 1 (cnt :tool-call)))
       (check "on-tool-result 触发 1 次" (= 1 (cnt :tool-result)))
       (let [[_ n args] (first (filter #(= :tool-call (first %)) @log))]
-        (check "on-tool-call 收到 keyword 工具名" (= :get-weather n))
+        ;; 契约是**字符串**（client/gate-of 显式归一化；与 on-tool-result 同）
+        (check "on-tool-call 收到 string 工具名" (= "get-weather" n))
         (check "on-tool-call 收到 args(city)" (some? (:city args))))
       (let [[_ n res] (first (filter #(= :tool-result (first %)) @log))]
         (check "on-tool-result 名为 string" (= "get-weather" n))
@@ -104,7 +106,9 @@
             {:provider p :model MODEL :max-tokens 4096
              :tools [#'send-email]
              :callbacks {:on-tool-call (fn [n _args]
-                                         (when (and (= :send-email n) (not @approved))
+                                         ;; n 是字符串——写成 keyword 会永不相等，
+                                         ;; 于是 gate 永不中断，整个场景静默失败
+                                         (when (and (= "send-email" n) (not @approved))
                                            {:interrupt "发邮件需要人工审批"}))
                          :on-interrupt (fn [info m]
                                          (swap! log conj [:interrupt (:reason info) (:run-id m)]))

@@ -7,8 +7,11 @@
      :on-turn-error   (fn [error metadata])            turn 出错
      :on-llm-call     (fn [messages metadata])         每次 LLM 调用前（观察用）
      :on-llm-result   (fn [response metadata])         每次 LLM 返回后（观察用）
-     :on-tool-call    (fn [tool-name args])             tool 调用前；返回 {:interrupt reason} 触发中断
+     :on-tool-call    (fn [tool-name args])            tool 调用前；返回 {:interrupt reason} 触发中断
      :on-tool-result  (fn [tool-name result])          tool 执行后（观察用）
+
+   注意：`tool-name` 两处都是**字符串**（非 keyword）——拿 keyword 去 `=` 比较
+   会永不相等，于是 `:on-tool-call` 的中断判断静默失效（曾真的踩过）。
      :on-interrupt    (fn [interrupt-info metadata])   进入中断状态时
      :on-resume       (fn [interrupt-info metadata])   从中断状态恢复时
 
