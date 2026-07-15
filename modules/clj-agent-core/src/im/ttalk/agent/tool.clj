@@ -10,6 +10,7 @@
    支持敏感标记: {:sensitive true}
    支持只读 context: {:context true}
    支持串行标记: {:serial true}（副作用工具，批内并行时整批退化为按序执行）
+   支持直接返回: {:return-direct true}（结果即最终答案，不再回灌 LLM）
 
    状态读写（Tool 阶段 MapReduce 契约，见 docs/agent-loop-concurrency-design.md §9）：
    - 读：{:context true} 工具收到只读的轮初 context 快照（ctx 变量自动绑定）
@@ -206,7 +207,8 @@
   [fn-name description params & body]
   (let [;; 分离选项 map 和函数体
         [opts body] (if (and (map? (first body))
-                             (some #{:sensitive :timeout :category :context :tags :serial :retry}
+                             (some #{:sensitive :timeout :category :context :tags :serial :retry
+                                     :return-direct}
                                    (keys (first body))))
                       [(first body) (rest body)]
                       [{} body])
@@ -238,6 +240,7 @@
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
+            :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   true
@@ -251,6 +254,7 @@
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
+            :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   true
@@ -266,6 +270,7 @@
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
+            :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   false
@@ -279,6 +284,7 @@
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
+            :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
             :tool/category  ~(:category opts :general)
             :tool/context   false
@@ -331,6 +337,16 @@
    返回: boolean"
   [v]
   (boolean (:tool/serial (meta v))))
+
+(defn return-direct-tool?
+  "检查 tool function 是否声明 :return-direct（结果即最终答案，不再回灌 LLM）
+
+   参数:
+   - v: var 引用
+
+   返回: boolean"
+  [v]
+  (boolean (:tool/return-direct (meta v))))
 
 (defn retry-spec
   "读取 tool function 的 :retry 声明（deftool 选项，幂等工具 opt-in）。

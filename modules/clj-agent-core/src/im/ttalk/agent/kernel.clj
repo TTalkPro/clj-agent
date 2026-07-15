@@ -64,6 +64,10 @@
     - :settings    额外设置（可选），如 {:max-tool-iterations 10}
     - :state-slots 状态槽声明（可选）{k {:init v0 :reduce (fn [old new] merged)}}——
                    工具批次 :writes 的合并语义（未声明的槽默认 last-writer）
+    - :eligibility-fn 循环续跑判据（可选）(fn [response context] -> boolean)——
+                   响应带 tool-call 时是否**真的**执行并续跑；返回 false 则
+                   该响应按最终答案收尾（工具不执行）。缺省恒真，即「有
+                   tool-call 就跑」。对标 Spring AI ToolExecutionEligibilityChecker
 
     返回:
     Kernel record
@@ -73,7 +77,7 @@
                    :tools [#'get-weather #'get-time]
                    :filters [memory-filter retry-filter]
                    :settings {:max-tool-iterations 10}})"
-  [{:keys [service tools tool-vars filters settings state-slots]
+  [{:keys [service tools tool-vars filters settings state-slots eligibility-fn]
     :or {tools [] filters [] settings {}}}]
   (let [all-tools (vec (or tool-vars tools))
         ;; 内联工具：map 且含 :handler fn（由 delegate-tool 等动态构建）
@@ -95,7 +99,8 @@
               var-map
               inline-handler-map
               (cond-> settings
-                state-slots (assoc :state-slots state-slots)))))
+                state-slots (assoc :state-slots state-slots)
+                eligibility-fn (assoc :eligibility-fn eligibility-fn)))))
 
 ;;; ============================================================
 ;;; Query API
@@ -131,6 +136,18 @@
     (if-let [v (get (:tool-vars kernel) fn-key)]
       (tool/serial-tool? v)
       (boolean (some #(when (= fn-key (keyword (:name %))) (:serial %))
+                     (:tools kernel))))))
+
+(defn return-direct-tool?
+  "工具是否声明 :return-direct（结果即最终答案，不再回灌 LLM）。
+   var 工具查 :tool/return-direct 元数据；内联工具查 schema 的 :return-direct 键。
+
+   对标 Spring AI ToolCallingAdvisor 的 return direct。"
+  [kernel fn-name]
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
+    (if-let [v (get (:tool-vars kernel) fn-key)]
+      (tool/return-direct-tool? v)
+      (boolean (some #(when (= fn-key (keyword (:name %))) (:return-direct %))
                      (:tools kernel))))))
 
 (def ^:private default-retry-policy

@@ -116,6 +116,21 @@
         (seq writes) (assoc :writes writes)
         error        (assoc :error error)))))
 
+(defn- return-direct-batch?
+  "整批是否 return-direct。与 Spring AI 一致取**全体**语义（allMatch）：
+   混批（部分声明）时继续正常回灌 LLM——「一半直接返回、一半交给模型」
+   没有自洽解释。"
+  [kernel calls]
+  (and (seq calls)
+       (every? #(kernel/return-direct-tool? kernel (:name %)) calls)))
+
+(defn- direct-response
+  "把工具结果消息拼成最终响应（return-direct 时不再问 LLM，结果即答案）。"
+  [messages]
+  (response/make-response
+    :text (->> messages (keep :content) (clojure.string/join "\n"))
+    :finish-reason :stop))
+
 (defn execute-batch
   "MapReduce 执行一批工具调用（设计见 docs/agent-loop-concurrency-design.md §9）。
 
@@ -276,6 +291,13 @@
               {:status :completed :response response
                :tool-context tctx :tool-calls-made records}
 
+              ;; 续跑判据（对标 Spring AI ToolExecutionEligibilityChecker）：
+              ;; 判据说停 → 带 tool-call 的响应也按最终答案收尾（工具不执行）
+              (not ((or (get-in kernel [:settings :eligibility-fn]) (constantly true))
+                    response tctx))
+              {:status :completed :response response
+               :tool-context tctx :tool-calls-made records}
+
               ;; gate 评估缓存：按 :id 存结果，确保每个 tool-call 恰好评估一次。
               ;; 这修正了原来 some+filter 两阶段导致的双重触发问题，
               ;; 使 on-tool-call 集成在 gate 中时能保证「每工具恰好一次」语义。
@@ -310,10 +332,53 @@
                         (execute-batch kernel calls cached-gate tctx records on-tool-result)
                         env-errors (when (= :pause (:on-env-error policy))
                                      (filterv #(= :environment (:class %)) errors))]
-                    (if (seq env-errors)
+                    (cond
                       ;; 屏障处策略钩子：环境类失败 → 带一致快照暂停等人
+                      (seq env-errors)
                       (env-pause env-errors messages records (dec remaining) context)
+
+                      ;; return direct：结果即最终答案，不再回灌 LLM。
+                      ;; :direct-messages 交给调用方落库——正常路径下工具结果是靠
+                      ;; **下一次 invoke-chat** 经 memory filter 落库的，这里没有
+                      ;; 下一次，不补落库就会在历史里留下悬空 tool_use。
+                      (return-direct-batch? kernel calls)
+                      {:status :completed
+                       :response (direct-response messages)
+                       :tool-context context
+                       :tool-calls-made records
+                       :direct-messages messages
+                       :return-direct true}
+
+                      :else
                       (recur messages (dec remaining) records context))))))))))))
+
+(defn- kernel-memory-store
+  "取 kernel 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
+   没挂 memory filter → nil（此时工具结果本就不落库，直接返回也无需补）。"
+  [kernel]
+  (some #(when (= :memory (:name %)) (:store %)) (:filters kernel)))
+
+(defn- persist-direct-messages!
+  "return-direct 收尾时补落库工具结果消息。
+
+   正常路径下，某轮工具结果是靠**下一轮 invoke-chat** 经 memory filter 落库的
+   （每轮只向 invoke-chat 传 delta）。return-direct 没有下一轮，若不补这一刀，
+   历史里就只剩 assistant(tool_calls) 而无对应结果——下个 turn 的
+   heal-dangling-tool-calls! 会把它整条摘掉，于是「用户问了、也答了」在历史里
+   双双蒸发。
+
+   落库形状 = 正常路径的形状（user → assistant(tool_calls) → tool(results)），
+   与 Spring AI returnDirect 的 history 一致：不额外造一条 assistant 消息。
+
+   幂等：只在结果带 :direct-messages 时落一次，随后摘掉该键——turn filter
+   递归重入时不会重复落库。无 memory filter / 无 conv-id 时跳过。"
+  [result kernel conv-id]
+  (if-let [ms (:direct-messages result)]
+    (let [store (kernel-memory-store kernel)]
+      (when (and store conv-id)
+        (memory/mem-add store conv-id (mapv msg/normalize ms)))
+      (dissoc result :direct-messages))
+    result))
 
 (defn invoke
   "工具调用循环主入口（统一循环）。
@@ -348,13 +413,14 @@
       ;; turn 链：包整个工具循环（每 turn 一次；filter 可改写 :messages/:context、
       ;; 递归重入——每次重入获得全新 max-iterations 预算）。设计见 §14。
       (let [turn-terminal (fn [treq]
-                            (run-tool-loop kernel
-                                           (mapv msg/normalize (:messages treq))
-                                           max-iter [] (or (:context treq) init-ctx)
-                                           (:tool-gate opts)
-                                           (build-chat-opts kernel opts)
-                                           callbacks
-                                           {:on-env-error (or (:on-env-error opts) :proceed)}))
+                            (-> (run-tool-loop kernel
+                                               (mapv msg/normalize (:messages treq))
+                                               max-iter [] (or (:context treq) init-ctx)
+                                               (:tool-gate opts)
+                                               (build-chat-opts kernel opts)
+                                               callbacks
+                                               {:on-env-error (or (:on-env-error opts) :proceed)})
+                                (persist-direct-messages! kernel conv-id)))
             turn-chain (filters/build-chain (keep :turn (:filters kernel)) turn-terminal)
             result (turn-chain {:messages messages :context init-ctx})]
         (when (and ephemeral? store (= :completed (:status result)))
@@ -438,15 +504,17 @@
         consumed? (atom false)
         ;; 终端一次性分派：首调 = 暂停延续；重入 = 常规循环（新 delta）
         terminal (fn [treq]
-                   (if (compare-and-set! consumed? false true)
-                     (continuation)
-                     (run-tool-loop kernel
-                                    (mapv msg/normalize (:messages treq))
-                                    max-iter [] (or (:context treq) tctx)
-                                    (:tool-gate opts)
-                                    (build-chat-opts kernel opts)
-                                    (or (:callbacks opts) {})
-                                    {:on-env-error (or (:on-env-error opts) :proceed)})))
+                   (-> (if (compare-and-set! consumed? false true)
+                         (continuation)
+                         (run-tool-loop kernel
+                                        (mapv msg/normalize (:messages treq))
+                                        max-iter [] (or (:context treq) tctx)
+                                        (:tool-gate opts)
+                                        (build-chat-opts kernel opts)
+                                        (or (:callbacks opts) {})
+                                        {:on-env-error (or (:on-env-error opts) :proceed)}))
+                       ;; 延续与重入都可能撞上 return-direct 收尾
+                       (persist-direct-messages! kernel (ctx/conversation-id tctx))))
         turn-chain (filters/build-chain (keep :turn (:filters kernel)) terminal)]
     (turn-chain {:resume? true :messages nil :context tctx})))
 
