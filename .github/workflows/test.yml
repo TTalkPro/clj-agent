@@ -7,6 +7,35 @@ on:
     branches: [ main ]
 
 jobs:
+  # README 与真实代码的一致性（幽灵 API / 模块索引缺漏）——见 scripts/check_docs.clj
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Clojure
+        uses: DeLaGuardo/setup-clojure@13.2
+        with:
+          cli: latest
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/deps.edn') }}
+          restore-keys: ${{ runner.os }}-deps-
+
+      - name: Check docs match code
+        run: clojure -M scripts/check_docs.clj
+
   test:
     runs-on: ubuntu-latest
     strategy:

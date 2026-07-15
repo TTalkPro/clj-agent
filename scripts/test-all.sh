@@ -29,12 +29,24 @@ for module in "${MODULES[@]}"; do
   fi
 done
 
+# README 与真实代码的一致性（幽灵 API / 模块索引缺漏）
+echo ""
+echo "----------------------------------------"
+echo "Checking docs match code..."
+echo "----------------------------------------"
+if (cd "$ROOT" && clojure -M scripts/check_docs.clj); then
+  echo "✓ docs passed"
+else
+  echo "✗ docs FAILED"
+  failed+=("docs")
+fi
+
 echo ""
 echo "=========================================="
 if [ ${#failed[@]} -eq 0 ]; then
   echo "✓ All modules passed!"
 else
-  echo "✗ Failed modules: ${failed[*]}"
+  echo "✗ Failed: ${failed[*]}"
   exit 1
 fi
 echo "=========================================="
