@@ -33,7 +33,7 @@ LLM Provider 和 Service 工厂模块
 
 1. **可插拔** - Provider 注册表机制支持动态添加
 2. **配置灵活** - 环境变量、代码配置、默认值三级合并
-3. **Kernel 兼容** - 输出标准 `{:chat-fn :build-result-msgs}` Service map
+3. **Kernel 兼容** - 输出标准 `{:chat-fn :stream-fn}` Service map（同步 + 流式）
 4. **延迟加载** - Provider 首次使用时才注册，避免循环依赖
 5. **声明式** - OpenAI 兼容 provider 一律用 `base/defprovider` 一处声明（base-url/env-key/default-model + 可选 `:api-key`/`:require-api-key?`/`:require-model?`），自动生成 config、调用函数与 `create-provider`，消除样板
 
@@ -63,6 +63,7 @@ LLM Provider 和 Service 工厂模块
 | Mistral | `:mistral` | `MISTRAL_*` | Mistral |
 | DeepSeek | `:deepseek` | `DEEPSEEK_*` | deepseek-chat / reasoner，Function Call；reasoning_content → `:reasoning`；**前缀续写**（`call-prefix-completion{,-stream}`，beta）；SSE 末块 usage（含 cache hit/miss） |
 | MiniMax | `:minimax` | `MINIMAX_*` | MiniMax-M 系列，**Anthropic 兼容端点**（`/anthropic/v1/messages`，Bearer 鉴权） |
+| DashScope | `:dashscope` | `DASHSCOPE_*` | 阿里云百炼（通义千问等）；**原生 SSE 流式**（`X-DashScope-SSE` + `incremental_output`，专属 `stream/dashscope` 解析器） |
 | Ollama | `:ollama` | `OLLAMA_*` | 本地模型 |
 | OpenAI 兼容 | `:openai-compat` | 自定义 | vLLM、LocalAI 等 |
 | Mock | `:mock` | - | 测试用 |
@@ -82,15 +83,23 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.mistral` | Mistral 实现 |
 | `im.ttalk.agent.provider.deepseek` | DeepSeek 实现 |
 | `im.ttalk.agent.provider.minimax` | MiniMax 实现（复用 anthropic provider 的 Anthropic 兼容端点） |
+| `im.ttalk.agent.provider.dashscope` | DashScope（阿里云百炼）实现 |
+| `im.ttalk.agent.provider.openai-compat-provider` | 通用 OpenAI 兼容 provider（base-url 必填） |
+| `im.ttalk.agent.provider.api` | Provider 统一门面 |
 | `im.ttalk.agent.provider.mock` | Mock Provider |
 | `im.ttalk.agent.provider.common.base` | Provider 基座 + defprovider 宏（辅助层） |
 | `im.ttalk.agent.provider.common.openai-compat` | OpenAI 兼容协议层（辅助层） |
 | `im.ttalk.agent.provider.common.cache` | Anthropic prompt caching 策略层（辅助层） |
 | `im.ttalk.agent.provider.common.response-parser` | 响应归一化（辅助层） |
+| `im.ttalk.agent.provider.common.memo` | 有界记忆化（schema 转换缓存，辅助层） |
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |
 | `im.ttalk.agent.provider.schema.anthropic` | Anthropic Schema 转换 |
 | `im.ttalk.agent.provider.stream.openai` | OpenAI 流式处理 |
 | `im.ttalk.agent.provider.stream.anthropic` | Anthropic 流式处理 |
+| `im.ttalk.agent.provider.stream.dashscope` | DashScope 原生 SSE 流式处理 |
+| `im.ttalk.agent.provider.wire.{openai,anthropic}` | wire 格式转换（provider 内部） |
+| `im.ttalk.agent.provider.http.client` | HTTP 客户端（同步；走 JDK java.net.http） |
+| `im.ttalk.agent.provider.http.stream-client` | SSE 真流式传输（`fromLineSubscriber` + 虚拟线程 + cancel） |
 | `im.ttalk.agent.provider.http.retry` | 重试与错误分类（指数退避 + Retry-After） |
 
 ## 快速开始
@@ -148,8 +157,9 @@ LLM Provider 和 Service 工厂模块
                 :temperature 0.7}))       ;; 温度（可选）
 
 ;; Service 是一个 map:
-;; {:chat-fn           (fn [messages opts] -> {:text "..." :tool-calls [...] :assistant-msg {...}})
-;;  :build-result-msgs (fn [assistant-msg tool-results] -> [msg1 msg2 ...])}
+;; {:chat-fn           (fn [messages opts] -> 归一化响应)   ;; 同步
+;;  :stream-fn         (fn [messages opts on-token] -> normalized-response)}
+;; provider 不支持流式时 :stream-fn 自动回退同步，并把全文作为单个 token emit
 ```
 
 ### Provider 注册表
@@ -365,6 +375,15 @@ export GOOGLE_API_KEY="..."
 # Mistral
 export MISTRAL_API_KEY="..."
 
+# DeepSeek
+export DEEPSEEK_API_KEY="sk-..."
+
+# MiniMax
+export MINIMAX_API_KEY="..."
+
+# DashScope（阿里云百炼）
+export DASHSCOPE_API_KEY="sk-..."
+
 # Ollama（本地部署，无需 API Key）
 export OLLAMA_BASE_URL="http://localhost:11434"
 ```
@@ -401,12 +420,12 @@ export OLLAMA_BASE_URL="http://localhost:11434"
 
 - **Provider Registry**: Lazy-loaded provider registration
 - **Factory Builder**: Multiple creation methods (manual, env vars, auto-merge)
-- **Service Creation**: Wraps providers into Kernel-compatible `{:chat-fn :build-result-msgs}` maps
+- **Service Creation**: Wraps providers into Kernel-compatible `{:chat-fn :stream-fn}` maps
 - **Schema Translation**: Request/response format translation for each provider
 
 ### Supported Providers
 
-OpenAI, Anthropic, Zhipu, Ollama, Gemini, Mistral, OpenAI-compatible, Mock
+OpenAI, Anthropic, Zhipu, DeepSeek, MiniMax, DashScope (Alibaba), Gemini, Mistral, Ollama, OpenAI-compatible, Mock
 
 ### Key APIs
 
