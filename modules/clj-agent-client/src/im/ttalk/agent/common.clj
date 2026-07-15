@@ -44,4 +44,5 @@
                :tools    tools
                :filters  filters
                :settings {:max-tool-iterations (or (:max-iterations opts) 10)}}
-        (:state-slots opts) (assoc :state-slots (:state-slots opts))))))
+        (:state-slots opts) (assoc :state-slots (:state-slots opts))
+        (:tool-manager opts) (assoc :tool-manager (:tool-manager opts))))))

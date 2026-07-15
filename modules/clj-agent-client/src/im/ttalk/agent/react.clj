@@ -22,6 +22,7 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.streaming :as streaming]
+            [im.ttalk.agent.tool-calling-manager :as tool-calling-manager]
             [taoensso.timbre :as log])
   (:import [java.util.concurrent Callable ExecutorService Executors Future]))
 
@@ -201,7 +202,71 @@
                                  :message (:message error)
                                  :tc      tc})))
                       results)
-      :context  context})))
+       :context  context})))
+
+(defn- execute-batch-sequential
+  "顺序执行一批工具调用，保持 gate、retry、writes 屏障与返回形状契约。"
+  [kernel tool-calls gate tool-context init-records on-tool-result]
+  (let [decisions (mapv #(if gate (gate %) :proceed) tool-calls)
+        results (mapv (fn [tc d]
+                        (invoke-one kernel tc d tool-context on-tool-result))
+                      tool-calls decisions)
+        {:keys [context conflicts]}
+        (ctx/apply-writes tool-context
+                          (keep :writes results)
+                          (get-in kernel [:settings :state-slots]))]
+    (when (seq conflicts)
+      (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
+                conflicts))
+    {:messages (mapv (fn [{:keys [tc value writes]}]
+                       (msg/tool-result (:id tc) (:name tc) value writes))
+                     results)
+     :records (into init-records
+                    (map (fn [{:keys [tc value rejected?]}]
+                           {:name (keyword (:name tc))
+                            :args (:args tc)
+                            :result (if rejected? :rejected value)}))
+                    results)
+     :errors (into []
+                   (keep (fn [{:keys [tc error]}]
+                           (when error
+                             {:id (:id tc)
+                              :name (:name tc)
+                              :class (:class error)
+                              :message (:message error)
+                              :tc tc})))
+                   results)
+     :context context}))
+
+(defrecord VirtualThreadToolCallingManager []
+  tool-calling-manager/ToolCallingManager
+  (execute-tool-calls [_ kernel response opts]
+    (let [calls (response/response-tool-calls response)]
+      (execute-batch kernel calls
+                     (:gate opts)
+                     (:tool-context opts)
+                     (:records opts)
+                     (:on-tool-result opts)))))
+
+(defn virtual-thread-tool-calling-manager
+  "缺省 manager：虚拟线程并行，尊重 :serial 声明（现状行为）。"
+  []
+  (->VirtualThreadToolCallingManager))
+
+(defrecord SequentialToolCallingManager []
+  tool-calling-manager/ToolCallingManager
+  (execute-tool-calls [_ kernel response opts]
+    (let [calls (response/response-tool-calls response)]
+      (execute-batch-sequential kernel calls
+                                (:gate opts)
+                                (:tool-context opts)
+                                (:records opts)
+                                (:on-tool-result opts)))))
+
+(defn sequential-tool-calling-manager
+  "全串行 manager：每个工具按序执行，无并发。适合调试或严格副作用场景。"
+  []
+  (->SequentialToolCallingManager))
 
 (defn run-tools
   "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。"
@@ -328,8 +393,14 @@
                                    :tool-calls-made records}))
 
                   :else
-                  (let [{:keys [messages records context errors]}
-                        (execute-batch kernel calls cached-gate tctx records on-tool-result)
+                  (let [batch-opts {:gate cached-gate
+                                    :tool-context tctx
+                                    :records records
+                                    :on-tool-result on-tool-result}
+                        {:keys [messages records context errors]}
+                        (if-let [tm (:tool-manager kernel)]
+                          (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
+                          (execute-batch kernel calls cached-gate tctx records on-tool-result))
                         env-errors (when (= :pause (:on-env-error policy))
                                      (filterv #(= :environment (:class %)) errors))]
                     (cond
@@ -448,9 +519,16 @@
         policy {:on-env-error (or (:on-env-error opts) :pause)}
         chat-opts (build-chat-opts kernel opts)]
     (if (= :retry decision)
-      (let [{:keys [messages records context errors]}
-            (execute-batch kernel failed-calls nil tctx records
-                           (:on-tool-result callbacks))
+      (let [response (response/make-response :tool-calls failed-calls)
+            batch-opts {:gate nil
+                         :tool-context tctx
+                         :records records
+                         :on-tool-result (:on-tool-result callbacks)}
+             {:keys [messages records context errors]}
+             (if-let [tm (:tool-manager kernel)]
+               (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
+              (execute-batch kernel failed-calls nil tctx records
+                             (:on-tool-result callbacks)))
             merged (replace-tool-results batch-messages messages)
             env-errors (when (= :pause (:on-env-error policy))
                          (filterv #(= :environment (:class %)) errors))]
@@ -548,9 +626,16 @@
           ;; 缺省 :rejected：gate 判敏感的拒绝（可带理由）
           (fn [tc] (if (and gate (= :pause (gate tc)))
                      (if-let [m (:message payload)] {:reject m} :reject)
-                     :proceed)))
+                      :proceed)))
+        response (response/make-response :tool-calls tool-calls)
+        batch-opts {:gate resume-gate
+                    :tool-context tctx
+                    :records records
+                    :on-tool-result on-tool-result}
         {:keys [messages records context]}
-        (execute-batch kernel tool-calls resume-gate tctx records on-tool-result)]
+        (if-let [tm (:tool-manager kernel)]
+          (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
+          (execute-batch kernel tool-calls resume-gate tctx records on-tool-result))]
     (run-tool-loop kernel messages remaining records context
                    gate
                    (build-chat-opts kernel opts)
