@@ -144,6 +144,24 @@
     `logging-filter` 只覆盖工具侧，补 LLM 侧请求/响应日志。
   - **`re-reading-filter`（对标 `ReReadingAdvisor`，RE2）**：入口用户问题重复
     一遍附在其后。
+- **ToolCallingManager 协议（`core/tool-calling-manager.clj`，2026-07-15）**：
+  工具执行入口升格为可注入协议。单方法 `execute-tool-calls [this kernel response opts]`
+  （Spring AI 2.0 `ToolCallingManager` 对齐签名，内部抽 tool_calls）。**多 impl 是
+  核心特性**——不同 record 选不同执行策略：
+  `VirtualThreadToolCallingManager`（默认，委托现有 5-arity `execute-batch`，尊重
+  `:serial` 声明）+ `SequentialToolCallingManager`（独立顺序路径，全串行无并发）。
+  `build-kernel` 新增可选 `:tool-manager` 字段（`Kernel` record 第 7 字段，缺省 nil
+  走原路径，**零行为变化**）。`execute-batch` / `execute-single` 退回成每个 record 的
+  **内部 helper**（不是协议方法）——怎么实现完全是 record 自己的选择。
+  **边界契约**（实证测试）：manager 不夺 `:serial` / `:tool` filter / `:writes` 屏障
+  的权——注入 mock manager 仍走 kernel 原语，三条不变量各有测试钉住。
+  **修订 `advisor-alignment-design.md` §1.3**（《ToolCallingManager —— 我们不长这个
+  抽象》旧立场推翻）：通过多 record impl 彻底兑现 §1.3 末尾预测的「executor 可注入」
+  诉求，形状比 §1.3 建议的「kernel :settings 单键注入」更彻底。
+  设计见 `docs/tool-calling-manager-design.md`（v3，含 Oracle review 16 项处置 + 18 条
+  决策记录）。**PR2/PR3（`deftool :backend` 扩展 HTTP/MCP transport）评估后搁置**——
+  没有真实 HTTP/MCP 工具需求时 ROI 不足（用户可在 deftool 内手写 HTTP 包装等价），
+  待真实场景触发；设计文档 §5/§6 已就绪。
 
 ### 🐛 修复
 

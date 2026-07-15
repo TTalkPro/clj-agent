@@ -360,6 +360,40 @@
   （**顺带修既有失效文档**：仍在写 `:order`/`:phase`/`:before`/`:after` 这套
   早已不存在的 API）、CHANGELOG 0.3.0。
 
+## P7 — ToolCallingManager 协议（2026-07-15）✅ PR1 完成
+
+> 来源：借鉴 Spring AI 2.0 `ToolCallingManager`，让工具执行入口升格为可注入协议。
+> 修订 `advisor-alignment-design.md` §1.3《ToolCallingManager —— 我们不长这个
+> 抽象》的旧立场。**权威设计：`docs/tool-calling-manager-design.md`**（v3，
+> 含 Oracle review 16 项处置 + 18 条决策记录）。
+> 测试：292/1194 → **296 tests / 1211 assertions / 0 failures**
+> （+4 tests / +17 assertions，零回归）。
+
+- [x] **协议落地**：`core/tool_calling_manager.clj`（新 ns）定义 `ToolCallingManager`
+  协议，单方法 `execute-tool-calls [this kernel response opts]`（Spring 对齐签名，
+  内部抽 tool_calls）。`Kernel` record 加第 7 字段 `tool-manager`；`build-kernel`
+  接受可选 `:tool-manager`，缺省 nil 走原路径（**零行为变化**——现有 `execute-batch`
+  5-arity 函数完全不动，nil-check fallback）。
+- [x] **多 impl 是核心特性**：`VirtualThreadToolCallingManager`（默认，委托现有
+  execute-batch）+ `SequentialToolCallingManager`（独立顺序路径）。`execute-batch`
+  和 `execute-single` 退回成每个 record 的**内部 helper**——怎么实现完全是 record
+  自己的选择。**多 impl 切换测试实证** VT 并行 vs Sequential 严格串行（相同工具，
+  不同 manager，可观察的执行时间戳差异）。
+- [x] **边界契约测试**（Oracle M4）：注入 mock manager 仍走 kernel 原语
+  （`kernel/invoke-tool` / `kernel/serial-tool?` / `context/apply-writes`），
+  实证 `:tool` filter 仍触发、`:serial` 仍退化、`:writes` 仍折叠——manager 不夺权。
+- [x] **MiniMax live 验证**（`examples/tool_calling_manager_live_test.clj`）：
+  instrumented manager wrapper 跑真实 MiniMax 工具循环，5 项机制断言（manager 被用、
+  ≤2 LLM 调用、tool-call 形状正确、最终响应非空）。只钉机制不钉模型措辞。
+- [x] **§1.3 同步**：`advisor-alignment-design.md` §1.3 末尾加「⚠️ 已修订」block，
+  指向专文 + 推翻理由摘要（多 impl 兑现 executor 可注入 + deftool :backend 独立
+  承担 transport dispatch）。
+- [x] **版本号对齐**：三个 `build.clj` 从 `0.2.%s` 改 `0.3.%s`，与 CHANGELOG
+  `[0.3.0]` 对齐（此前 build 仍停在 0.2，与 CHANGELOG 不一致）。
+- [x] **PR2/PR3 评估后搁置**：`deftool :backend` 扩展（HTTP/MCP transport）标记为
+  ⏸️ 未立项——没有真实 HTTP/MCP 工具需求时 ROI 不足（用户可在 deftool 内手写
+  HTTP 包装 5-10 行等价），待真实场景触发。设计文档 §5/§6 已就绪，重启时按图施工。
+
 ### 📋 历史账本
 
 2026-06 审查（P0/P1/P2 + 测试盲区）与 2026-07 优化轮（P3 + A/B/C 组）全部清零。
