@@ -50,7 +50,8 @@
                    :tools [#'t1 #'t2]
                    :filters [memory-filter retry-filter logging-filter]})"
   (:require [clojure.string]
-            [im.ttalk.agent.model.message :as msg]))
+            [im.ttalk.agent.model.message :as msg]
+            [im.ttalk.agent.model.response :as resp]))
 
 (set! *warn-on-reflection* true)
 
@@ -110,6 +111,130 @@
                                (str (subs r 0 100) "...")
                                (pr-str r))))
                resp)))})
+
+;;; ============================================================
+;;; 内置 filter: LLM 调用日志（:chat）
+;;; ============================================================
+
+(defn logging-chat-filter
+  "LLM 请求/响应日志 filter（对标 Spring AI `SimpleLoggerAdvisor`）。
+
+   `logging-filter` 只覆盖工具侧；本 filter 补上 LLM 侧——工具循环内每轮一次。
+
+   opts:
+   - :log-fn   (fn [line] ...)，缺省 println
+   - :preview  文本预览截断长度（缺省 200；nil 表示不截断）"
+  [& {:keys [log-fn preview] :or {preview 200}}]
+  (let [emit (or log-fn println)
+        clip (fn [s]
+               (let [s (str s)]
+                 (if (and preview (> (count s) preview))
+                   (str (subs s 0 preview) "...")
+                   s)))]
+    {:name :logging-chat
+     :chat (fn [req chain]
+             (emit (str "[Chat] → messages=" (count (:messages req))
+                        " tools=" (count (:tools req))
+                        " tool-choice=" (:tool-choice req)))
+             (let [resp (chain req)
+                   r (:response resp)
+                   calls (resp/response-tool-calls r)]
+               (emit (str "[Chat] ← "
+                          (if (seq calls)
+                            (str "tool-calls=" (pr-str (mapv :name calls)))
+                            (str "text=" (clip (resp/response-text r))))))
+               resp))}))
+
+;;; ============================================================
+;;; 内置 filter: 敏感词短路（:turn）
+;;; ============================================================
+
+(defn- message-text
+  "取消息的纯文本内容（多模态 content 向量取其中的文本片段）。"
+  [m]
+  (let [c (:content m)]
+    (cond
+      (string? c) c
+      (sequential? c) (->> c
+                           (keep #(cond (string? %) % (map? %) (:text %)))
+                           (clojure.string/join " "))
+      :else "")))
+
+(defn safeguard-turn-filter
+  "敏感词短路 filter（对标 Spring AI `SafeGuardAdvisor`）。
+
+   入口消息命中任一敏感词 → **不进循环**，直接返回 failure-response。
+   匹配为**大小写不敏感的子串包含**（Spring 原版大小写敏感；我们放宽，
+   因为大小写绕过是显然的漏网）。
+
+   **为什么挂 :turn 而不是 :chat**：Spring 的 SafeGuard 查的是「用户这次的
+   输入」，在工具循环外只查一次。挂 :chat 会在循环内每轮重查，而第 2 轮起
+   `:messages` 是 memory 拼出的**完整历史 + 工具往返**——既重复告警又会因
+   历史里的旧内容误伤。
+
+   **语义后果（刻意）**：短路发生在 :turn 层，memory filter（:chat，在循环内）
+   压根不会执行——被拦的输入与拒答都不落库。history 里不留有害内容，代价是
+   下一轮模型看不到「用户问过什么、被拒了」。
+
+   resume 天然安全：`:resume?` 进入时 `:messages` 为 nil，无文本可查即放行
+   （延续暂停的 turn，入口消息早在首次进入时查过了）。
+
+   参数:
+   - sensitive-words: 敏感词集合/序列
+   - :failure-response 命中时的回复文本（缺省「抱歉，我无法回应该内容。」）"
+  [sensitive-words & {:keys [failure-response]
+                      :or {failure-response "抱歉，我无法回应该内容。"}}]
+  (let [words (->> sensitive-words
+                   (map (comp clojure.string/lower-case str))
+                   (remove clojure.string/blank?)
+                   set)]
+    {:name :safeguard
+     :turn (fn [req chain]
+             (let [text (->> (:messages req)
+                             (map message-text)
+                             (clojure.string/join " ")
+                             clojure.string/lower-case)
+                   hit (when (seq text)
+                         (first (filter #(clojure.string/includes? text %) words)))]
+               (if hit
+                 {:status :completed
+                  :response (resp/make-response :text failure-response)
+                  :tool-context (:context req)
+                  :tool-calls-made []
+                  :blocked-by :safeguard}      ;; 观察用；调用方可据此计数/告警
+                 (chain req))))}))
+
+;;; ============================================================
+;;; 内置 filter: RE2 重读（:turn）
+;;; ============================================================
+
+(defn re-reading-filter
+  "RE2 重读 filter（对标 Spring AI `ReReadingAdvisor`）。
+
+   把入口的用户问题重复一遍附在其后（\"Read the question again: ...\"），
+   出处：Re-Reading Improves Reasoning in LLMs。
+
+   挂 :turn 且只改写**入口消息**——每 turn 增强一次。挂 :chat 会把循环内每轮
+   的历史都重读一遍（既无意义又污染 transcript）。`:resume?` 时跳过
+   （延续场景没有入口消息可改写，改了也会被忽略）。
+
+   opts:
+   - :template (fn [原问题] -> 重读文本)，缺省
+               「<原问题>\\nRead the question again: <原问题>」"
+  [& {:keys [template]}]
+  (let [render (or template
+                   (fn [q] (str q "\nRead the question again: " q)))]
+    {:name :re-reading
+     :turn (fn [req chain]
+             (if (or (:resume? req) (empty? (:messages req)))
+               (chain req)
+               (chain (update req :messages
+                              (fn [ms]
+                                (mapv (fn [m]
+                                        (if (and (= :user (:role m)) (string? (:content m)))
+                                          (assoc m :content (render (:content m)))
+                                          m))
+                                      ms))))))}))
 
 ;;; ============================================================
 ;;; 内置 filter: 超时控制

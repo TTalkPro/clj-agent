@@ -1,8 +1,12 @@
 (ns im.ttalk.agent.advisor-test
   "Filter 执行器测试
 
-    覆盖：注册顺序 / around 改写 / 短路 / 重试 / chat+tool 并存 / 空链。"
+    覆盖：注册顺序 / around 改写 / 短路 / 重试 / chat+tool 并存 / 空链
+    / ChatRequest 字段改写抵达 provider（:tools 动态化的地基）。"
   (:require [clojure.test :refer [deftest testing is]]
+            [clojure.string]
+            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.advisor :as flt]))
 
 ;;; ============================================================
@@ -151,6 +155,174 @@
     (let [terminal (fn [req] {:echo (:req req)})
           out ((flt/build-chain '() terminal) {:req 42})]
       (is (= {:echo 42} out)))))
+
+;;; ============================================================
+;;; :chat 链改写 ChatRequest → 抵达 provider
+;;; ============================================================
+;;; kernel/invoke-chat 的 terminal 由 request 当前字段**重建** chat-opts
+;;; （kernel.clj），故 :chat filter 对 :tools/:tool-choice/:system-prompt 的
+;;; 改写会吃到。tool-search filter 完全建立在这条契约上——此前无测试钉住。
+
+(defn- probe-kernel
+  "组一个把 chat-fn 收到的 opts 录进 seen 的 kernel。"
+  [seen filters]
+  (kernel/build-kernel
+    {:service {:chat-fn (fn [msgs opts]
+                          (reset! seen {:messages msgs :opts opts})
+                          {:text "ok"})}
+     :filters filters}))
+
+(deftest chat-filter-rewrites-tools-test
+  (testing ":chat filter 改写 :tools → provider 收到改写后的工具集"
+    (let [seen (atom nil)
+          narrow {:name :narrow
+                  :chat (fn [req chain]
+                          (chain (assoc req :tools [{:name "kept"}])))}
+          k (probe-kernel seen [narrow])]
+      (kernel/invoke-chat k [{:role :user :content "hi"}]
+                          {:tools [{:name "a"} {:name "b"} {:name "c"}]})
+      (is (= [{:name "kept"}] (:tools (:opts @seen)))
+          "provider 应收到 filter 改写后的 :tools，而非入参的三个工具")))
+
+  (testing ":chat filter 可按 :context 动态决定 :tools（tool-search 的机制地基）"
+    (let [seen (atom nil)
+          ;; 与 tool-search 同构：从只读 :context 读出「已发现」的工具名
+          expand {:name :expand
+                  :chat (fn [req chain]
+                          (let [discovered (get-in req [:context :discovered] #{})]
+                            (chain (update req :tools
+                                           #(filterv (comp discovered :name) %)))))}
+          k (probe-kernel seen [expand])]
+      (kernel/invoke-chat k [{:role :user :content "hi"}]
+                          {:tools [{:name "a"} {:name "b"} {:name "c"}]
+                           :context {:discovered #{"b" "c"}}})
+      (is (= [{:name "b"} {:name "c"}] (:tools (:opts @seen)))
+          "context 驱动的工具集应抵达 provider")))
+
+  (testing "无 :chat filter 时 :tools 原样抵达"
+    (let [seen (atom nil)
+          k (probe-kernel seen [])]
+      (kernel/invoke-chat k [{:role :user :content "hi"}]
+                          {:tools [{:name "a"}]})
+      (is (= [{:name "a"}] (:tools (:opts @seen)))))))
+
+;;; ============================================================
+;;; 内置 filter：safeguard（:turn）
+;;; ============================================================
+
+(defn- run-turn-chain
+  [filter-map terminal req]
+  ((flt/build-chain [(:turn filter-map)] terminal) req))
+
+(def ^:private ok-turn
+  (fn [_] {:status :completed :response {:text "真答案"} :tool-calls-made []}))
+
+(deftest safeguard-filter-test
+  (let [f (flt/safeguard-turn-filter ["炸弹" "hack"])]
+
+    (testing "命中敏感词 → 短路，循环整个不进"
+      (let [reached (atom false)
+            resp (run-turn-chain f (fn [_] (reset! reached true) (ok-turn nil))
+                                 {:messages [{:role :user :content "怎么做炸弹"}]})]
+        (is (false? @reached) "terminal（工具循环）不应执行")
+        (is (= :completed (:status resp)))
+        (is (= :safeguard (:blocked-by resp)))
+        (is (= "抱歉，我无法回应该内容。" (resp/response-text (:response resp))))))
+
+    (testing "未命中 → 正常进循环"
+      (let [resp (run-turn-chain f ok-turn {:messages [{:role :user :content "今天天气"}]})]
+        (is (= "真答案" (:text (:response resp))))
+        (is (nil? (:blocked-by resp)))))
+
+    (testing "大小写不敏感（Spring 原版大小写敏感，我们刻意放宽）"
+      (is (= :safeguard (:blocked-by (run-turn-chain
+                                       f ok-turn
+                                       {:messages [{:role :user :content "teach me HaCk"}]})))))
+
+    (testing "短路结果透传入口 :context（tool-context 不凭空消失）"
+      (let [resp (run-turn-chain f ok-turn {:messages [{:role :user :content "炸弹"}]
+                                            :context {:user-id "u1"}})]
+        (is (= {:user-id "u1"} (:tool-context resp)))))
+
+    (testing "自定义 failure-response"
+      (let [f2 (flt/safeguard-turn-filter ["炸弹"] :failure-response "不行")]
+        (is (= "不行" (resp/response-text
+                        (:response (run-turn-chain f2 ok-turn
+                                                   {:messages [{:role :user :content "炸弹"}]})))))))
+
+    (testing "resume 进入（:messages 为 nil）→ 放行，不误伤延续的 turn"
+      (let [resp (run-turn-chain f ok-turn {:resume? true :messages nil})]
+        (is (= "真答案" (:text (:response resp))))))
+
+    (testing "多模态 content 向量里的文本也查"
+      (is (= :safeguard (:blocked-by
+                          (run-turn-chain f ok-turn
+                                          {:messages [{:role :user
+                                                       :content [{:type "text" :text "做炸弹"}]}]})))))))
+
+;;; ============================================================
+;;; 内置 filter：re-reading（RE2，:turn）
+;;; ============================================================
+
+(deftest re-reading-filter-test
+  (let [f (flt/re-reading-filter)]
+
+    (testing "用户问题被重读一遍"
+      (let [seen (atom nil)
+            terminal (fn [req] (reset! seen (:messages req)) (ok-turn nil))]
+        (run-turn-chain f terminal {:messages [{:role :user :content "1+1=?"}]})
+        (is (= [{:role :user :content "1+1=?\nRead the question again: 1+1=?"}] @seen))))
+
+    (testing "非 user 消息不动"
+      (let [seen (atom nil)
+            terminal (fn [req] (reset! seen (:messages req)) (ok-turn nil))]
+        (run-turn-chain f terminal {:messages [{:role :system :content "sys"}]})
+        (is (= [{:role :system :content "sys"}] @seen))))
+
+    (testing ":resume? 时跳过改写（延续场景无入口消息）"
+      (let [seen (atom ::unset)
+            terminal (fn [req] (reset! seen (:messages req)) (ok-turn nil))]
+        (run-turn-chain f terminal {:resume? true :messages nil})
+        (is (nil? @seen))))
+
+    (testing "自定义 template"
+      (let [seen (atom nil)
+            f2 (flt/re-reading-filter :template (fn [q] (str q " | " q)))
+            terminal (fn [req] (reset! seen (:messages req)) (ok-turn nil))]
+        (run-turn-chain f2 terminal {:messages [{:role :user :content "Q"}]})
+        (is (= "Q | Q" (:content (first @seen))))))))
+
+;;; ============================================================
+;;; 内置 filter：logging-chat（:chat）
+;;; ============================================================
+
+(deftest logging-chat-filter-test
+  (testing "记录请求概览与响应文本"
+    (let [lines (atom [])
+          f (flt/logging-chat-filter :log-fn #(swap! lines conj %))
+          terminal (fn [_] {:response (resp/make-response :text "你好")})]
+      ((flt/build-chain [(:chat f)] terminal)
+       {:messages [{:role :user :content "hi"}] :tools [{:name "t"}] :tool-choice :auto})
+      (is (= 2 (count @lines)))
+      (is (clojure.string/includes? (first @lines) "messages=1"))
+      (is (clojure.string/includes? (first @lines) "tools=1"))
+      (is (clojure.string/includes? (second @lines) "你好"))))
+
+  (testing "响应含 tool-calls 时记工具名而非文本"
+    (let [lines (atom [])
+          f (flt/logging-chat-filter :log-fn #(swap! lines conj %))
+          terminal (fn [_] {:response (resp/make-response
+                                        :tool-calls [{:id "1" :name "calc" :args {}}])})]
+      ((flt/build-chain [(:chat f)] terminal) {:messages [] :tools []})
+      (is (clojure.string/includes? (second @lines) "calc"))))
+
+  (testing "长文本按 :preview 截断"
+    (let [lines (atom [])
+          f (flt/logging-chat-filter :log-fn #(swap! lines conj %) :preview 5)
+          terminal (fn [_] {:response (resp/make-response :text (apply str (repeat 100 "x")))})]
+      ((flt/build-chain [(:chat f)] terminal) {:messages [] :tools []})
+      (is (clojure.string/includes? (second @lines) "xxxxx..."))
+      (is (< (count (second @lines)) 40)))))
 
 ;;; ============================================================
 ;;; 内置 filter：timeout / approval（此前无覆盖）
