@@ -130,23 +130,28 @@
                           owner      (get ctx :conversation-id)]
                       (if (empty? tasks)
                         "错误：tasks 不能为空"
-                        (let [;; 并发 spawn 所有子 agent
-                              spawn-ids (mapv (fn [task]
-                                               (let [spec {:subagent-config (subagent-fn (assoc args :task task) ctx)
-                                                           :prompt          (compose-prompt seed background task)
-                                                           :result-fn       result-fn
-                                                           :owner           owner}]
-                                                 (:ok (mgr/spawn! spec))))
-                                             tasks)
-                              deadline  (deadline-ms timeout)
-                              ;; 共享截止时间，顺序 await（总等待时间 ≤ timeout）
-                              outcomes  (mapv (fn [spawn-id]
-                                               (let [remain (or (remaining-ms deadline) 0)
-                                                     o (mgr/await! spawn-id remain)]
-                                                 (when (= {:error :timeout} o) (mgr/kill! spawn-id))
-                                                 (mgr/drop! spawn-id)
-                                                 o))
-                                             spawn-ids)
+                         (let [;; 并发 spawn 所有子 agent
+                               spawn-ids (mapv (fn [task]
+                                                (let [spec {:subagent-config (subagent-fn (assoc args :task task) ctx)
+                                                            :prompt          (compose-prompt seed background task)
+                                                            :result-fn       result-fn
+                                                            :owner           owner}]
+                                                  (:ok (mgr/spawn! spec))))
+                                              tasks)
+                               deadline  (deadline-ms timeout)
+                               ;; 共享截止时间，顺序 await（总等待时间 ≤ timeout）
+                               ;; R6: try/finally 保 drop! — 与 run-sync 同款，
+                               ;; 被引擎超时 interrupt 时 await! 抛 InterruptedException，
+                               ;; 无 finally 则当前及后续 spawn-id 泄漏
+                               outcomes  (mapv (fn [spawn-id]
+                                                (try
+                                                  (let [remain (or (remaining-ms deadline) 0)
+                                                        o (mgr/await! spawn-id remain)]
+                                                    (when (= {:error :timeout} o) (mgr/kill! spawn-id))
+                                                    o)
+                                                  (finally
+                                                    (mgr/drop! spawn-id))))
+                                              spawn-ids)
                               entries   (mapv (fn [task outcome]
                                                (str "任务: " task "\n结果: " (safe-result-str outcome)))
                                              tasks outcomes)]
