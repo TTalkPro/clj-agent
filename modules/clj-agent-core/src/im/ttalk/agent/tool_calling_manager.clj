@@ -32,3 +32,15 @@
    自定义实现没有该字段即 nil，自然退化为「不设缺省」。"
   [m]
   (when m (:timeout m)))
+
+(def ^:dynamic *active-manager-timeout*
+  "**当前正在执行的工具批**所用的引擎缺省超时（毫秒），nil = 无引擎缺省。
+
+   由各 `ToolCallingManager` record 的 `execute-tool-calls` 在入口处 `binding`
+   为自身的 `:timeout`，使 `kernel/effective-tool-timeout` 能读到**实际执行的**
+   manager 的超时——而非从 kernel 的 `:tool-manager` 字段回读（R4: 回读会在
+   manager 被 wrap 时读错对象，如 instrumented wrapper 或独立传入的 manager）。
+
+   直接调 `kernel/invoke-tool`（不经 manager）时此 var 为根值 nil，
+   `effective-tool-timeout` 回落到 `(manager-timeout (:tool-manager kernel))`。"
+  nil)

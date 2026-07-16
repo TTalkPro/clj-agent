@@ -117,7 +117,14 @@
         compiled-inline-tools (mapv #(dissoc % :handler) inline-tools)
         inline-handler-map    (into {} (mapv #(vector (keyword (:name %)) (:handler %))
                                              inline-tools))
-        _ (validate-tool-timeouts! var-map inline-tools)]
+        _ (validate-tool-timeouts! var-map inline-tools)
+        _ (when (some? tool-manager)
+            (let [mt (:timeout tool-manager)]
+              (when-not (tool/valid-timeout? mt)
+                (throw (ex-info (str ":tool-manager 的 :timeout 必须为正整数毫秒，实为 "
+                                     (pr-str mt))
+                                {:timeout mt})))))]
+
     (->Kernel service
               (vec filters)
               (into compiled-var-tools compiled-inline-tools)
@@ -219,9 +226,16 @@
    工具声明最优先——它最清楚自己要跑多久（长任务的逃生舱就是「声明一个大的」）；
    引擎缺省次之，让部署方能整体封顶而不必逐个改工具。
 
-   由 `invoke-tool` 消费并强制（见 `run-chain`）：**开箱即生效，不需要挂任何 filter**。"
+   引擎缺省的读取优先走 `*active-manager-timeout*`（**当前正在执行的** manager
+   的值，R4），回落到 kernel 的 `:tool-manager` 字段（直调 invoke-tool 不经
+   manager 时）。
+
+   由 `invoke-tool` 的 terminal 消费并强制：**开箱即生效，不需要挂任何 filter**。
+   超时只包裹工具本体（terminal 内），不包裹 filter 链——审批等待不再吃掉超时
+   预算（R1）。"
   [kernel fn-name]
   (or (tool-timeout kernel fn-name)
+      tcm/*active-manager-timeout*
       (tcm/manager-timeout (:tool-manager kernel))))
 
 ;;; ============================================================
@@ -235,39 +249,42 @@
    对内联工具静默失效的根因（`:serial`/`:retry`/`:return-direct` 都有 inline
    分支，独 `:timeout` 漏了）。新增字段请只加在这里。"
   [fn-name tool-var]
-  ;; 超时不在此列：它由 run-chain 在 filter 链**之外**强制（工具声明 > 引擎缺省），
-  ;; filter 里没有它的消费者——曾有的 :timeout 字段随 timeout-filter 一并删除，
-  ;; 没有读者的字段就是下一个死选项。
+  ;; 超时不在此列：它由 terminal 在 filter 链**之内**强制（只包裹工具本体，
+  ;; 不包裹 filter 链——R1: 审批等待不再吃掉超时预算）。
   {:name      fn-name
    :schema    (when tool-var (:tool/schema (meta tool-var)))
    :sensitive (boolean (when tool-var (:tool/sensitive (meta tool-var))))})
 
-(defn- run-chain
-  "跑 tool filter 链；**生效超时**（工具声明 > 引擎缺省）非 nil 则**在此强制**。
+(defn- timeout-result
+  "超时时 terminal 返回的结果形状。`:transient` 类故可被 `:retry` 重试；
+   不带 `:writes`（事务性）。"
+  [t-ms]
+  {:result (str "工具调用超时（" t-ms "ms）")
+   :error  {:class :transient
+            :message (str "timeout " t-ms "ms")}})
 
-   **为什么在 invoke-tool 这一层**（而不是像 `:retry`/`:serial`/`:return-direct`
-   那样在 react）：那三个都是**循环 / 批次**策略——重试几次、能否并发、要不要
-   回灌，天然属于循环的职责。而 `:timeout` 界定的是**单次工具调用**的时间上限，
-   那正是 invoke-tool 自己的职责。放这里的收益是**不需要任何协调**：谁调
-   invoke-tool 谁就拿到超时（react、手搓循环、`run-tools`、直调皆然），
-   `timeout-filter` 只要见到声明就让位即可，不必反过来猜调用方是不是 react。
+(defn- exec-with-timeout
+  "在超时保护下执行工具本体 `body`（无参函数，返回 terminal 形状 map）。
 
-   **缺省不超时 → 零开销**：既没声明、引擎也没给缺省时不起线程，与「没有超时机制」
-   逐字相同。框架不替调用方决定何时放弃。
+   **超时只包裹工具本体，不包裹 filter 链**（R1/R3）——此前 `run-chain` 把整条
+   filter 链（含 approval-filter 的阻塞 read）一起计时，操作员审批慢一点就超时。
 
-   超时结果用 filter 链的形状（`{:result :error}`），由调用方统一映射成
-   `{:value ...}`；`:transient` 类故可被 `:retry` 重试；不带 `:writes`（事务性）。"
-  [kernel fn-key chain req]
-  (let [t-ms (effective-tool-timeout kernel fn-key)]
-    (if-not t-ms
-      (chain req)
-      (let [[tag v] (tool/call-with-timeout t-ms #(chain req))]
-        (case tag
-          :ok      v
-          :err     (throw ^Throwable v)
-          :timeout {:result (str "工具调用超时（" t-ms "ms）")
-                    :error  {:class :transient
-                             :message (str "timeout " t-ms "ms")}})))))
+   有 `t-ms` 时在虚拟线程上跑 body（`call-with-timeout`），到点 interrupt。
+   body 自身的 try/catch 已处理非致命 Error 收敛 + 致命原样重抛——若 body 重抛了
+   致命 Throwable，`call-with-timeout` 会收到 `[:err t]`，这里的 `:err` 分支再抛
+   出去。
+
+   **R2 诚实降级**：有超时即起 VT，与引擎线程模型无关——Sequential 的「调用方线程」
+   与 ThreadPool 的「池线程」承诺在有超时时均不成立（VT 做活、引擎线程等 deref）。
+   未声明超时（大多数工具）则零开销直接跑，引擎承诺照常。"
+  [t-ms body]
+  (if-not t-ms
+    (body)
+    (let [[tag v] (tool/call-with-timeout t-ms body)]
+      (case tag
+        :ok      v
+        :err     (throw ^Throwable v)
+        :timeout (timeout-result t-ms)))))
 
 (defn invoke-tool
   "调用 Kernel 中注册的函数（经 tool filter 洋葱链）
@@ -296,24 +313,26 @@
     (if-let [inline-handler (get (:inline-handlers kernel) fn-key)]
       ;; 内联工具（由 delegate-tool 等构建）：通过同一 filter 链执行
       (let [func-def (build-func-def fn-key nil)
+            t-ms     (effective-tool-timeout kernel fn-key)
             terminal (fn [req]
-                       (try
-                         (let [raw (inline-handler (:args req) (:context req))
-                               [res writes] (if (and (map? raw) (contains? raw :writes))
-                                              [(:result raw) (:writes raw)]
-                                              [raw nil])]
-                           (cond-> {:result (if (string? res) res (pr-str res))}
-                             (seq writes) (assoc :writes writes)))
-                         ;; Throwable 而非 Exception：内联工具的 Error（如深递归的
-                         ;; StackOverflowError）此前逃逸并打死整轮。致命的仍上抛。
-                         (catch Throwable t
-                           (when (err/fatal-throwable? t) (throw t))
-                           (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
-                             {:result (str "错误: " m)
-                              :error  {:class (err/classify-exception t) :message m}}))))
+                       (exec-with-timeout t-ms
+                         (fn []
+                           (try
+                             (let [raw (inline-handler (:args req) (:context req))
+                                   [res writes] (if (and (map? raw) (contains? raw :writes))
+                                                  [(:result raw) (:writes raw)]
+                                                  [raw nil])]
+                               (cond-> {:result (if (string? res) res (pr-str res))}
+                                 (seq writes) (assoc :writes writes)))
+                             ;; Throwable 而非 Exception：内联工具的 Error（如深递归的
+                             ;; StackOverflowError）此前逃逸并打死整轮。致命的仍上抛。
+                             (catch Throwable t
+                               (when (err/fatal-throwable? t) (throw t))
+                               (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
+                                 {:result (str "错误: " m)
+                                  :error  {:class (err/classify-exception t) :message m}}))))))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
-            out   (run-chain kernel fn-key chain
-                             {:function func-def :args args :context context})]
+            out   (chain {:function func-def :args args :context context})]
         (cond-> {:value (:result out)}
           (:writes out) (assoc :writes (:writes out))
           (:error out)  (assoc :error (:error out))))
@@ -326,25 +345,27 @@
                                  :available (list-functions kernel)})))
             {:keys [tool-var]} found
             func-def (build-func-def fn-key tool-var)
+            t-ms     (effective-tool-timeout kernel fn-key)
             terminal (fn [req]
-                       (let [exec (try (tool/invoke tool-var (:args req) (:context req))
-                                       ;; tool/invoke 自己已收 Throwable；这里是
-                                       ;; 它之外（arity 不符等）的兜底，同样放行致命
-                                       (catch Throwable t
-                                         (when (err/fatal-throwable? t) (throw t))
-                                         {:success false
-                                          :error (or (not-empty (.getMessage t))
-                                                     (.getName (class t)))
-                                          :error-class (err/classify-exception t)}))]
-                         (if (:success exec)
-                           (cond-> {:result (:result exec)}
-                             (:writes exec) (assoc :writes (:writes exec)))
-                           {:result (str "错误: " (:error exec))
-                            :error  {:class (or (:error-class exec) :semantic)
-                                     :message (:error exec)}})))
+                       (exec-with-timeout t-ms
+                         (fn []
+                           (let [exec (try (tool/invoke tool-var (:args req) (:context req))
+                                           ;; tool/invoke 自己已收 Throwable；这里是
+                                           ;; 它之外（arity 不符等）的兜底，同样放行致命
+                                           (catch Throwable t
+                                             (when (err/fatal-throwable? t) (throw t))
+                                             {:success false
+                                              :error (or (not-empty (.getMessage t))
+                                                         (.getName (class t)))
+                                              :error-class (err/classify-exception t)}))]
+                             (if (:success exec)
+                               (cond-> {:result (:result exec)}
+                                 (:writes exec) (assoc :writes (:writes exec)))
+                               {:result (str "错误: " (:error exec))
+                                :error  {:class (or (:error-class exec) :semantic)
+                                         :message (:error exec)}})))))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
-            out   (run-chain kernel fn-key chain
-                             {:function func-def :args args :context context})]
+            out   (chain {:function func-def :args args :context context})]
         (cond-> {:value (:result out)}
           (:writes out) (assoc :writes (:writes out))
           (:error out)  (assoc :error (:error out)))))))

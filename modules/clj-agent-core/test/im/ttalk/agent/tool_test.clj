@@ -61,10 +61,11 @@
   (testing ":timeout 选项生成 :tool/timeout 元数据（回归：曾是死选项——白名单收下、元数据不产、全库零读取）"
     (is (= 500 (:tool/timeout (meta #'declares-timeout))))
     (is (= 500 (tool/timeout-spec #'declares-timeout))))
-  (testing "未声明 → nil（timeout-filter 据此回落自己的缺省值）"
+  (testing "未声明 → nil（invoke-tool 据此回落引擎缺省或不超时）"
     (is (nil? (tool/timeout-spec #'round-num)))
     (is (nil? (tool/timeout-spec #'greet-ctx))))
-  (testing "声明本身无强制力：不挂 timeout-filter 的裸 invoke 不超时（语义钉子，防误解为 invoke 内置）"
+  (testing "裸 tool/invoke（不经 kernel）不超时——超时由 kernel/invoke-tool 强制，
+            tool/invoke 是更内层的原语，不消费 :timeout 声明（语义钉子）"
     (let [r (tool/invoke #'declares-timeout {:x "ok"})]
       (is (:success r))
       (is (= "ok" (:result r))))))

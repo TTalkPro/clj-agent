@@ -491,6 +491,62 @@
     (is (some? (kernel/build-kernel {:service {} :tools [(inline-sleepy "none")]})))
     (is (some? (kernel/build-kernel {:service {} :tools [#'sleepy-declared]})))))
 
+(deftest manager-timeout-validated-at-build-kernel-test
+  (testing "R5: :tool-manager 的坏 :timeout 在装配期即拒（与工具声明的校验对称）"
+    (doseq [bad ["5s" -1 0 2.7]]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #":tool-manager 的 :timeout 必须为正整数毫秒"
+            (kernel/build-kernel {:service {}
+                                  :tools [(inline-sleepy "ok")]
+                                  :tool-manager {:timeout bad}}))
+          (str "应拒绝 " (pr-str bad)))))
+
+  (testing "合法的 :tool-manager :timeout 照常通过"
+    (is (some? (kernel/build-kernel {:service {}
+                                     :tools [(inline-sleepy "ok")]
+                                     :tool-manager {:timeout 500}}))))
+
+  (testing "无 :timeout 字段的 :tool-manager 不受影响（reify/自定义实现）"
+    (is (some? (kernel/build-kernel {:service {}
+                                     :tools [(inline-sleepy "ok")]
+                                     :tool-manager {}})))))
+
+(deftool instant-tool
+  "瞬间返回的工具（R1 测试用：审批耗时应排除在超时预算外）"
+  [[x :string "输入" :default "v"]]
+  {:timeout 300}
+  (str "done:" x))
+
+(deftest approval-outside-timeout-budget-test
+  (testing "R1: 审批等待**不**吃工具的超时预算——超时只包裹工具本体，不包裹 filter 链
+            （回归：run-chain 曾把整条 filter 链一起计时，操作员审批慢一点就超时）"
+    (let [;; 审批 filter：睡 800ms 后放行（模拟人工审批延迟）
+          slow-approval {:name :slow-approval
+                         :tool (fn [req chain]
+                                 (Thread/sleep 800)  ;; 远超工具声明的 300ms 超时
+                                 (chain req))}
+          ;; 工具声明 300ms 超时，但工具本体瞬间返回
+          k (kernel/build-kernel {:service {}
+                                  :tools [#'instant-tool]
+                                  :filters [slow-approval]})
+          t0 (System/currentTimeMillis)
+          r (kernel/invoke-tool k :instant-tool {:x "ok"} nil)
+          dt (- (System/currentTimeMillis) t0)]
+      ;; 修复后：审批 800ms 在计时区外，工具本体瞬间完成 → 不超时
+      (is (= "done:ok" (:value r))
+          "工具本体瞬间完成——800ms 审批不应触发 300ms 超时")
+      (is (nil? (:error r)) "不应有超时错误")
+      (is (> dt 700) "确实等了审批（> 800ms），证明审批在链上执行了")))
+
+  (testing "对照：工具本体慢 → 超时照常触发（证明超时确实在终端内生效）"
+    (let [slow-tool {:name :slow
+                     :description "慢工具"
+                     :input_schema {:type "object" :properties {} :required []}
+                     :timeout 200
+                     :handler (fn [_ _] (Thread/sleep 60000) "never")}
+          k (kernel/build-kernel {:service {} :tools [slow-tool]})]
+      (is (clojure.string/includes? (:value (kernel/invoke-tool k :slow {} nil)) "超时")))))
+
 (deftest approval-filter-test
   (testing "敏感工具 + 批准 → 执行下游"
     (let [asked (atom nil)
