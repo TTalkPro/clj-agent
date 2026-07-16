@@ -241,26 +241,45 @@
 ;;; ============================================================
 
 (defn timeout-filter
-  "超时控制 filter 工厂：下游执行超过 timeout-ms 则返回超时结果（不抛异常）。
+  "超时控制 filter 工厂：下游执行超过时限则返回超时结果（不抛异常）。
 
-   超时后会中断（future-cancel）后台任务，避免工作线程泄漏 ——
-   前提是下游工具对线程中断敏感（阻塞 IO/Thread.sleep 等可被打断）；
-   纯 CPU 死循环无法中断，需工具自身配合。"
+   时限解析优先级：**工具自己声明的 `:timeout`**（deftool 选项，经
+   `:function :timeout` 抵达）> 本 filter 构造时的 timeout-ms 缺省值。
+   工具最清楚自己要跑多久；filter 值是没声明时的整体缺省。
+   inline 工具（delegate 等）无 var 元数据，恒取 filter 缺省值。
+
+   **语义如实声明：超时 = 放弃等待，不是终止执行。**JVM 没有强杀原语
+   （Thread.stop 已移除），超时后只能 interrupt 下游线程：
+   - 阻塞在 Thread/sleep、可中断 IO 上的工具会被打断；
+   - 纯 CPU 循环、普通 socket read（绝大多数 HTTP 客户端）**打不断**——
+     工具会继续跑完，其外部副作用可能在超时结果返回**之后**才落地。
+   超时归类 :transient：声明 :retry 的工具会被自动重试——重试发起时
+   **上一次调用可能仍在执行**，故声明 :retry 的超时工具必须幂等。
+
+   下游跑在**虚拟线程**上（不用 clojure.core/future 的 send-off 平台
+   线程池）：被放弃的执行只占几 KB 虚拟线程栈，且不破坏
+   ToolCallingManager 各引擎的线程模型（工具函数体不被搬去平台线程）。
+
+   超时结果不带 :writes——被超时调用的写意图不生效（事务性）。"
   [timeout-ms]
   {:name :timeout
    :tool (fn [req chain]
-           (let [f (future (chain req))
-                 r (deref f timeout-ms ::timeout)]
-             (if (= r ::timeout)
-               (do
-                 ;; 取消并尝试中断后台线程，释放资源。
-                 ;; 超时结果不带 :writes——被超时调用的写意图不生效（事务性）。
-                 ;; 分类 :transient：声明了 :retry 的幂等工具可自动重试。
-                 (future-cancel f)
-                 {:result (str "工具调用超时（" timeout-ms "ms）")
-                  :error  {:class :transient
-                           :message (str "timeout " timeout-ms "ms")}})
-               r)))})
+           (let [t-ms (or (get-in req [:function :timeout]) timeout-ms)
+                 p    (promise)
+                 th   (Thread/startVirtualThread
+                        (fn []
+                          (deliver p (try {:ok (chain req)}
+                                          (catch Throwable e {:err e})))))
+                 r    (deref p t-ms ::timeout)]
+             (cond
+               (= r ::timeout)
+               (do (.interrupt th)
+                   {:result (str "工具调用超时（" t-ms "ms）")
+                    :error  {:class :transient
+                             :message (str "timeout " t-ms "ms")}})
+
+               (:err r) (throw ^Throwable (:err r))
+               :else    (:ok r))))})
 
 ;;; ============================================================
 ;;; 内置 filter: 敏感工具审批

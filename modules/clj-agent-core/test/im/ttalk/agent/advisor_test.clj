@@ -7,6 +7,7 @@
             [clojure.string]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.response :as resp]
+            [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.advisor :as flt]))
 
 ;;; ============================================================
@@ -358,6 +359,79 @@
                       {:function {:name :slow} :args {} :context nil})
       (is (true? (deref interrupted? 2000 :timeout))
           "慢工具线程应收到中断，不泄漏工作线程"))))
+
+(deftest timeout-filter-priority-test
+  (testing "工具声明的 :timeout（经 :function :timeout 抵达）优先于 filter 缺省——声明更紧则更早超时"
+    (let [slow (fn [_] (Thread/sleep 60000) {:result "never"})
+          resp (run-tool-chain (flt/timeout-filter 60000) slow
+                               {:function {:name :slow :timeout 100} :args {} :context nil})]
+      (is (clojure.string/includes? (:result resp) "超时"))
+      (is (clojure.string/includes? (:result resp) "100ms")
+          "超时消息报的是工具声明值，不是 filter 缺省")))
+
+  (testing "声明更宽也以声明为准——filter 缺省很紧不打断长任务"
+    (let [slowish (fn [_] (Thread/sleep 300) {:result "ok"})
+          resp (run-tool-chain (flt/timeout-filter 50) slowish
+                               {:function {:name :slowish :timeout 5000} :args {} :context nil})]
+      (is (= "ok" (:result resp)))))
+
+  (testing "未声明（:timeout 缺席/nil）→ 回落 filter 缺省"
+    (let [slow (fn [_] (Thread/sleep 60000) {:result "never"})
+          resp (run-tool-chain (flt/timeout-filter 100) slow
+                               {:function {:name :slow :timeout nil} :args {} :context nil})]
+      (is (clojure.string/includes? (:result resp) "超时")))))
+
+(deftest timeout-filter-thread-model-test
+  (testing "下游跑在虚拟线程上（回归：曾用 clojure.core/future = send-off 平台线程，把工具函数体搬离引擎的线程模型）"
+    (let [virtual? (atom nil)
+          probe (fn [_]
+                  (reset! virtual? (.isVirtual (Thread/currentThread)))
+                  {:result "ok"})]
+      (run-tool-chain (flt/timeout-filter 5000) probe
+                      {:function {:name :probe} :args {} :context nil})
+      (is (true? @virtual?))))
+
+  (testing "下游抛异常 → 原样重抛（不包 ExecutionException，上游 catch 拿到原异常）"
+    (let [boom (fn [_] (throw (ex-info "boom" {:k 1})))]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"boom"
+            (run-tool-chain (flt/timeout-filter 5000) boom
+                            {:function {:name :boom} :args {} :context nil}))))))
+
+(deftest timeout-abandons-not-kills-test
+  (testing "诚实语义：CPU 忙循环打不断——超时结果返回后工具仍在后台跑（JVM 无 kill 原语，超时=放弃等待≠终止执行）"
+    (let [stop  (atom false)
+          beats (atom 0)
+          busy  (fn [_]
+                  (while (not @stop) (swap! beats inc))
+                  {:result "done"})
+          resp  (run-tool-chain (flt/timeout-filter 100) busy
+                                {:function {:name :busy} :args {} :context nil})]
+      (is (clojure.string/includes? (:result resp) "超时"))
+      (let [b1 @beats]
+        (Thread/sleep 100)
+        (is (> @beats b1)
+            "超时结果已返回而忙循环仍在跳动——本测试钉住真实语义，防后人误以为有 kill"))
+      (reset! stop true))))
+
+(deftool sleepy-declared
+  "声明 200ms 超时但睡 60s 的工具（端到端测试用）"
+  [[x :string "输入" :default "v"]]
+  {:timeout 200}
+  (Thread/sleep 60000)
+  x)
+
+(deftest tool-declared-timeout-end-to-end-test
+  (testing "deftool :timeout 经 build-func-def 抵达 timeout-filter（回归：:timeout 曾是死选项——白名单收下、元数据不产、零强制力）"
+    (let [k  (kernel/build-kernel {:service {}
+                                   :tools [#'sleepy-declared]
+                                   :filters [(flt/timeout-filter 60000)]})
+          t0 (System/currentTimeMillis)
+          r  (kernel/invoke-tool k :sleepy-declared {} nil)
+          dt (- (System/currentTimeMillis) t0)]
+      (is (clojure.string/includes? (:value r) "超时"))
+      (is (= :transient (get-in r [:error :class])))
+      (is (< dt 5000) "以工具声明的 200ms 为准，而非 filter 的 60s 缺省——修复前此调用睡满 60s")
+      (is (nil? (:writes r))))))
 
 (deftest approval-filter-test
   (testing "敏感工具 + 批准 → 执行下游"

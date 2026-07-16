@@ -180,7 +180,11 @@
     {:name      fn-name
      :schema    schema
      :sensitive (when tool-var
-                  (boolean (:tool/sensitive (meta tool-var))))}))
+                  (boolean (:tool/sensitive (meta tool-var))))
+     ;; 工具声明的超时毫秒（nil = 未声明）；由 timeout-filter 消费，
+     ;; 优先于 filter 构造时的缺省值。inline 工具无 var 无此声明。
+     :timeout   (when tool-var
+                  (tool/timeout-spec tool-var))}))
 
 (defn invoke-tool
   "调用 Kernel 中注册的函数（经 tool filter 洋葱链）

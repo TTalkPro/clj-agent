@@ -198,6 +198,9 @@
    - :tool/params    参数定义列表
    - :tool/sensitive 是否为敏感工具
    - :tool/serial    是否串行工具（批内并行时整批退化）
+   - :tool/timeout   超时毫秒（可选）。**仅当 kernel 挂了 timeout-filter 时生效**，
+                     且语义为「放弃等待」而非「终止执行」——超时后工具可能仍在
+                     后台跑完并产生外部副作用（见 advisor/timeout-filter 文档）
    - :tool/category  工具分类
    - :tool/context   是否需要（只读）context
    - :tool/tags      标签集合（用于过滤）
@@ -242,6 +245,7 @@
             :tool/serial    ~(boolean (:serial opts))
             :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
+            :tool/timeout   ~(:timeout opts)
             :tool/category  ~(:category opts :general)
             :tool/context   true
             :tool/tags      ~tags-set
@@ -256,6 +260,7 @@
             :tool/serial    ~(boolean (:serial opts))
             :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
+            :tool/timeout   ~(:timeout opts)
             :tool/category  ~(:category opts :general)
             :tool/context   true
             :tool/tags      ~tags-set
@@ -272,6 +277,7 @@
             :tool/serial    ~(boolean (:serial opts))
             :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
+            :tool/timeout   ~(:timeout opts)
             :tool/category  ~(:category opts :general)
             :tool/context   false
             :tool/tags      ~tags-set
@@ -286,6 +292,7 @@
             :tool/serial    ~(boolean (:serial opts))
             :tool/return-direct ~(boolean (:return-direct opts))
             :tool/retry     ~(:retry opts)
+            :tool/timeout   ~(:timeout opts)
             :tool/category  ~(:category opts :general)
             :tool/context   false
             :tool/tags      ~tags-set
@@ -354,6 +361,17 @@
    返回: nil（未声明）| true | {:max-retries n :initial-delay-ms ms}"
   [v]
   (:tool/retry (meta v)))
+
+(defn timeout-spec
+  "读取 tool function 的 :timeout 声明（deftool 选项，毫秒）。
+
+   声明本身不产生任何强制力——由挂在 kernel 上的 timeout-filter 消费
+   （优先级：工具声明 > filter 构造时的缺省值）。不挂 filter 即无超时。
+   语义注意：JVM 上超时 = 放弃等待 ≠ 终止执行，详见 advisor/timeout-filter。
+
+   返回: nil（未声明）| 正整数毫秒"
+  [v]
+  (:tool/timeout (meta v)))
 
 (defn get-tags
   "获取 tool function 的标签集合

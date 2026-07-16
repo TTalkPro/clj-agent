@@ -50,3 +50,21 @@
       (is (= "北京 晴" (:result r)))))
   (testing "带 :default 的参数省略不算缺参"
     (is (:success (tool/invoke #'round-num {:x 1})))))
+
+(deftool declares-timeout
+  "声明超时的工具"
+  [[x :string "输入"]]
+  {:timeout 500}
+  x)
+
+(deftest timeout-option-emits-metadata
+  (testing ":timeout 选项生成 :tool/timeout 元数据（回归：曾是死选项——白名单收下、元数据不产、全库零读取）"
+    (is (= 500 (:tool/timeout (meta #'declares-timeout))))
+    (is (= 500 (tool/timeout-spec #'declares-timeout))))
+  (testing "未声明 → nil（timeout-filter 据此回落自己的缺省值）"
+    (is (nil? (tool/timeout-spec #'round-num)))
+    (is (nil? (tool/timeout-spec #'greet-ctx))))
+  (testing "声明本身无强制力：不挂 timeout-filter 的裸 invoke 不超时（语义钉子，防误解为 invoke 内置）"
+    (let [r (tool/invoke #'declares-timeout {:x "ok"})]
+      (is (:success r))
+      (is (= "ok" (:result r))))))
