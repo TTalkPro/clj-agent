@@ -150,12 +150,18 @@
         tool-calls decisions))
 
 (defn- run-on-executor
-  "map 阶段：全部提交给 executor 后按原序收齐（屏障）。"
+  "map 阶段：全部提交给 executor 后按原序收齐（屏障）。
+
+   任务用 `bound-fn*` 包装：把调用方的**动态绑定帧**带进工作线程。不带的话，
+   同一个工具会因「这批里有几个 tool-call」（run-inline vs 本函数，**由 LLM 临场
+   决定**）而看到不同的 `binding` 值——引擎与批次大小本不该改变「跑的是什么」。
+   与 `clojure.core/future` / `pmap` 的传导语义一致。"
   [^ExecutorService executor kernel tool-calls decisions tool-context on-tool-result]
   (let [futs (mapv (fn [tc d]
                      (.submit executor
                               ^Callable
-                              (fn [] (invoke-one kernel tc d tool-context on-tool-result))))
+                              (bound-fn* (fn [] (invoke-one kernel tc d tool-context
+                                                            on-tool-result)))))
                    tool-calls decisions)]
     (mapv (fn [^Future f] (.get f)) futs)))
 

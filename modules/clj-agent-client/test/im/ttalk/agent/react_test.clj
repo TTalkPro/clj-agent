@@ -12,6 +12,7 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.advisor :as flt]
             [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.tool-calling-manager :as tcm]
             [im.ttalk.agent.react :as agent-loop]))
 
 ;;; ============================================================
@@ -375,6 +376,33 @@
                                        :retry {:max-retries 3 :initial-delay-ms 1})])]
       (agent-loop/execute-batch kernel [(tc "1" "bad")] nil {} [])
       (is (= 1 @attempts)))))
+
+(def ^:dynamic *tenant* :none)
+
+(deftest binding-conveyance-across-batch-shapes-test
+  (testing "动态绑定对工具可见，且**不随批次大小改变**（回归：executor 路径曾丢绑定——
+            同一工具因 LLM 临场决定发 1 个还是 2 个 tool-call 而看到不同的 binding）"
+    (let [probe (fn [_ _] (str *tenant*))
+          kernel (batch-kernel [(inline-tool "a" probe) (inline-tool "b" probe)])]
+      (binding [*tenant* :acme]
+        (let [one (mapv :content (:messages (agent-loop/execute-batch
+                                              kernel [(tc "1" "a")] nil {} [])))
+              two (mapv :content (:messages (agent-loop/execute-batch
+                                              kernel [(tc "1" "a") (tc "2" "b")] nil {} [])))]
+          (is (= [":acme"] one) "批内 1 个 call（内联路径）")
+          (is (= [":acme" ":acme"] two) "批内 2 个 call（executor 路径）——修复前这里是 :none")))))
+
+  (testing "换引擎不改变工具看到的 binding（引擎只决定「怎么跑」，不决定「跑的是什么」）"
+    (let [probe (fn [_ _] (str *tenant*))
+          kernel (batch-kernel [(inline-tool "a" probe) (inline-tool "b" probe)])
+          calls [(tc "1" "a") (tc "2" "b")]
+          resp (response/make-response :text nil :tool-calls calls)
+          opts {:tool-context {} :records []}
+          run (fn [m] (mapv :content (:messages (tcm/execute-tool-calls m kernel resp opts))))]
+      (binding [*tenant* :acme]
+        (is (= (run (agent-loop/sequential-tool-calling-manager))
+               (run (agent-loop/virtual-thread-tool-calling-manager)))
+            "Sequential 与 VirtualThread 引擎须给出相同结果")))))
 
 (deftest timeout-transient-retry-test
   (testing "timeout-filter 超时 → :transient → 声明 :retry 的工具被重试，第二次按时完成（链路断言：此前各环节单测有、整链无钉）"
