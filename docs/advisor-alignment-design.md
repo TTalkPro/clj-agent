@@ -164,17 +164,24 @@ Spring 把「执行一批 tool-call」抽成 `ToolCallingManager`，由 `ToolCal
 **而不是引入 manager 对象**——两个可替换点已各有更好的落点，manager 只会与
 `:serial` / `:tool` filter 链重叠。
 
-> **⚠️ 已修订（2026-07-15）**：本节判断**已被推翻**——见专文
-> [`tool-calling-manager-design.md`](tool-calling-manager-design.md)。
+> **⚠️ 已修订（2026-07-15 推翻，2026-07-16 校准理由）**：见专文
+> [`tool-calling-manager-design.md`](tool-calling-manager-design.md)（v5）。
+> **本节判断已被推翻**，但推翻的理由与 2026-07-15 写的那版不同——逐条对账：
 >
-> 推翻理由摘要：deftool 要支持 HTTP/MCP backend（多 transport）的需求兑现了
-> §1.3 末尾的「真实需求」条件；而 §1.3 推荐的「executor 可注入」形状只能换
-> 线程池（kernel 级），不能换 transport（per-tool）。新设计用 **`ToolCallingManager`
-> 协议 + 多 record 实现**（`VirtualThreadToolCallingManager` / `SequentialToolCallingManager`
-> / `ThreadPoolToolCallingManager`）——既是「executor 可注入」的彻底兑现（多 impl 而非
-> 单键注入），又通过 `deftool :backend` 元数据独立承担 transport dispatch（不与
-> manager 重叠）。**§1.3 当初担心的「manager 与 :serial / :tool filter 重叠」通过
-> 严格边界契约避免**（详见专文 §3 对账表与 §11 决策 #14-#17）。
+> | 本节论点 | 现状 |
+> |---|---|
+> | manager 会与 `:serial` / `:tool` filter 链重叠 | ❌ **已推翻**。`:serial` 是**单个工具的声明**（"我不能与人并行"），它决定不了**整批用什么线程模型、在什么隔离边界内跑**——那是部署方的引擎选型，不是工具作者的声明。两者层次不同，非重叠。`:tool` filter 是单工具 around，manager 是批编排，同理 |
+> | 形状应是「executor 可注入」（`:settings` 单键），不是 manager 对象 | ❌ **已推翻**（**理由已于 2026-07-16 更换**）。旧理由「单键换不了 per-tool transport」随 `deftool :backend` 否决而作废；**新理由更硬**：`:settings` 单键换的是**线程从哪来**，manager 换的是**执行引擎**。三条能力级差异见专文 §2.2——(a) 调度决策 `(if (or serial? (<= count 1)) ...)`（`react.clj:167`）硬编码在框架里，`Executor` 接口够不着；(b) `SequentialToolCallingManager` **不构造 Future**（`react.clj:207`），same-thread executor 模拟不出；(c) 池的生命周期须与策略打包。**本节低估了要换的东西：要换的是引擎，不是线程池** |
+> | 立项判据：出现真实需求再抽 | ✅ **仍然成立且已兑现**——需求是**隔离与线程模型可换**（本节自己把「需要优先级队列的池」列为触发条件之一）。现状缺口：`react.clj` 的 VT executor 是**进程全局 `def`**，所有 kernel 共享，无舱壁 / 无限流 / 无可关停边界。**本条已提为项目级硬约束**：见 [`design-principles.md`](design-principles.md) §1《无真实需求不建》（四问判据 + 落地约束 + 案例法）——**本节就是它的出处**，但它在专文里被反复重新发现（毙 `deftool :backend`、毙 PR2/PR3、拆掉一个防御性保护），故抽为可援引的原则，不再散在个案里 |
+>
+> **已落地**：`ToolCallingManager` 协议 + 多 record 实现
+> （`VirtualThreadToolCallingManager` / `SequentialToolCallingManager` /
+> `ThreadPoolToolCallingManager`），PR1 零行为变化。
+>
+> **定位一句话**：manager 管「**怎么执行**」（线程模型 + 隔离边界 + 调度策略）；
+> 被否决的 `deftool :backend` 想管「**执行的是什么**」（HTTP / MCP transport）——
+> 后者是工具函数体内部的事，框架不该知道。**两件事不相干**，故 `:backend` 否决
+> 不影响 manager。详见专文 §2 与 §11 决策 #19 / #21。
 
 ---
 
