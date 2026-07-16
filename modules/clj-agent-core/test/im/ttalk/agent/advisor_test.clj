@@ -381,6 +381,23 @@
                                {:function {:name :slow :timeout nil} :args {} :context nil})]
       (is (clojure.string/includes? (:result resp) "超时")))))
 
+(def ^:dynamic *tenant* :none)
+
+(deftest timeout-filter-binding-conveyance-test
+  (testing "调用方的动态绑定对下游可见（回归：改用虚拟线程时丢了 clojure.core/future 的绑定传导——静默给根值）"
+    (let [probe (fn [_] {:result (str *tenant*)})]
+      (binding [*tenant* :acme]
+        (is (= ":acme" (:result (run-tool-chain (flt/timeout-filter 5000) probe
+                                                {:function {:name :probe} :args {} :context nil})))))))
+
+  (testing "挂不挂 timeout-filter 不改变工具看到的 binding（与内联路径一致）"
+    (let [probe (fn [_] {:result (str *tenant*)})
+          terminal-only #((flt/build-chain [] probe) %)]
+      (binding [*tenant* :acme]
+        (is (= (:result (terminal-only {:function {:name :probe}}))
+               (:result (run-tool-chain (flt/timeout-filter 5000) probe
+                                        {:function {:name :probe} :args {} :context nil}))))))))
+
 (deftest timeout-filter-thread-model-test
   (testing "下游跑在虚拟线程上（回归：曾用 clojure.core/future = send-off 平台线程，把工具函数体搬离引擎的线程模型）"
     (let [virtual? (atom nil)

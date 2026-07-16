@@ -250,15 +250,23 @@
 
    **语义如实声明：超时 = 放弃等待，不是终止执行。**JVM 没有强杀原语
    （Thread.stop 已移除），超时后只能 interrupt 下游线程：
-   - 阻塞在 Thread/sleep、可中断 IO 上的工具会被打断；
-   - 纯 CPU 循环、普通 socket read（绝大多数 HTTP 客户端）**打不断**——
-     工具会继续跑完，其外部副作用可能在超时结果返回**之后**才落地。
+   - Thread/sleep、阻塞 IO（socket read 等）会被真正打断——下游跑在虚拟
+     线程上，JDK 会关闭 socket 并抛 `SocketException: Closed by interrupt`
+     （JEP 353 起 java.net.Socket 基于 NIO；实测 JDK 25 确认）。故「工具卡在
+     外部 API 上」这个最常见的形态**能干净取消**，副作用不落地；
+   - 但**不检查中断标志的代码打不断**（纯 CPU 循环为主，另有 native 调用、
+     吞掉 InterruptedException 的代码）——它会继续跑完，其外部副作用可能在
+     超时结果返回**之后**才落地。这是残余风险，框架消不掉。
    超时归类 :transient：声明 :retry 的工具会被自动重试——重试发起时
-   **上一次调用可能仍在执行**，故声明 :retry 的超时工具必须幂等。
+   **上一次调用可能仍在执行**（就上面那种打不断的情形），故声明 :retry 的
+   超时工具必须幂等。
 
    下游跑在**虚拟线程**上（不用 clojure.core/future 的 send-off 平台
-   线程池）：被放弃的执行只占几 KB 虚拟线程栈，且不破坏
+   线程池），两个理由：(1) 阻塞 IO 因此**真的可取消**（见上，平台线程会无视
+   interrupt 把请求读完）；(2) 被放弃的执行只占几 KB 栈，且不破坏
    ToolCallingManager 各引擎的线程模型（工具函数体不被搬去平台线程）。
+   任务用 `bound-fn*` 包装，调用方的**动态绑定照常可见**——与 `future` 的传导
+   语义一致，挂不挂本 filter 不改变工具看到的 `binding`。
 
    超时结果不带 :writes——被超时调用的写意图不生效（事务性）。"
   [timeout-ms]
@@ -266,10 +274,11 @@
    :tool (fn [req chain]
            (let [t-ms (or (get-in req [:function :timeout]) timeout-ms)
                  p    (promise)
-                 th   (Thread/startVirtualThread
-                        (fn []
-                          (deliver p (try {:ok (chain req)}
-                                          (catch Throwable e {:err e})))))
+                 ;; bound-fn* 在**调用方的**绑定帧内求值，故须在 startVirtualThread 之外
+                 task (bound-fn* (fn []
+                                   (deliver p (try {:ok (chain req)}
+                                                   (catch Throwable e {:err e})))))
+                 th   (Thread/startVirtualThread task)
                  r    (deref p t-ms ::timeout)]
              (cond
                (= r ::timeout)
