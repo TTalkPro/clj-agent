@@ -544,9 +544,13 @@
 
 ### ✅ 落地（2026-07-16 拍板后当日完成；两项均为**修既有承诺**，不长新抽象，不触发 §1）
 
-> 测试：300/1227 → **309 tests / 1256 assertions / 0 failures**（+9 tests / +29
-> assertions，core 95/353 + client 108/409 + provider 106/494，零回归，零反射告警）。
-> 另有 MiniMax live 20 项断言（连跑 3 遍稳定）。
+> **终态：314 tests / 1295 assertions / 0 failures**（起点 300/1227；core 96/363 +
+> client 112/438 + provider 106/494，零反射告警，5 条墓碑）。MiniMax live 20 项断言，
+> **四遍稳定**（含 filter 删除后的复验；场景 4 的 abandon 差值四次实测
+> 1701/1702/1700/1700ms——恒定 ≈ CPU 循环 2500ms − 超时 800ms，测量可信）。
+> 本节的演进弧：分析 → P0/P1 落地 → live 推翻 §2.2 → 修 2 个绑定 bug → §3 提级
+> → code review 5 项 → 缺省机制定调（不超时 / 串行）→ timeout-filter 删除。
+> 各阶段的独立计数见各小节（记录当时状态，不回改）。
 
 - [x] **P0 修 `:timeout` 死选项**（方案 a：照抄 `:retry` 的现成路径）：
   - [x] P0-1 `deftool` 发出 `:tool/timeout` 元数据（四个 defn 分支，`tool.clj`）
@@ -635,6 +639,128 @@
   （超时变纯 opt-in，层 3 退为纯隔离层）——从对方侧独立佐证了否决层 2/层 3 的判断：
   那两层的价值从来不在缺省截止，而在 BEAM 特有的隔离与 kill；两个体系收敛到同一
   形态：**超时是声明出来的策略，不是框架强加的缺省**。
+
+### ✅ Code review 自查（2026-07-16，/code-review high）——5 条发现，全部实跑确认
+
+> 测试：311/1259 → **314 tests / 1275 assertions / 0 failures**。
+> **最重的两条打在自己身上**：#1「只修了一半」、#4「把 bug 挪了一步」。
+
+- [x] **#1 内联工具的 `:timeout` 仍是死选项——只修了 var 那一半**：根因是**两个
+  func-def 构造点**（var 走 `build-func-def`、inline 在 `kernel.clj` 另行硬编码）。
+  实测 inline `{:timeout 300}` 跑满 3006ms 返回 "done"，而 inline 的 `:serial`/
+  `:retry` 一直生效。讽刺的是 **`delegate-tool` 恰恰是内联、且跑整个子 agent**——
+  最需要超时的正是拿不到超时的。**修**：新增 `kernel/tool-timeout`（var + inline，
+  与 `serial-tool?`/`retry-policy`/`return-direct-tool?` 逐字同款）；
+  **两个 func-def 构造点合并为一个**（新增字段只加一处，杜绝再漏）。
+- [x] **#4 `:timeout` 是唯一不「开箱即生效」的 deftool 选项——等于把刚修的 bug
+  挪了一步**：`:serial`/`:retry`/`:return-direct` 都由 kernel/react 直接消费，
+  独 `:timeout` 要用户手动挂 filter，否则「编译通过、无警告、零效果」——
+  **与死选项 bug 的可观察症状逐字相同**，只是从「白名单收下但没人读」变成
+  「元数据发出但没人读」。**修**：强制力落到 **`kernel/invoke-tool`**（`run-chain`），
+  **仅在声明时起线程**（未声明零开销）；`timeout-filter` 退为纯缺省——只管未声明的
+  工具，**见到声明即让位**（优先级由让位实现，不比大小，同一 deadline 不套两层线程，
+  实测 1 根线程）。**层次判断**：`:retry`/`:serial`/`:return-direct` 是**循环/批次**
+  策略故属 react；`:timeout` 界定**单次调用**的时间上限故属 invoke-tool——放对层
+  就不需要协调（实施中一度放进 react，随即发现 invoke-tool 直调没超时了：
+  filter 已让位、react 又不在场。**放错层的代价就是要发明协调**）。
+  推翻了设计文档 §3.5 对「方案 C」的否决（该否的只是「无条件起线程」，不是「下沉到
+  调用原语」；且其另一条论据「换来打不断的超时」已被 §2.2 推翻）——已加修订块，
+  是 §1.3「论据倒了一条 → 重新称剩下的」的一次实践。
+- [x] **#3 `:timeout` 值零校验**：实测 `"5s"` → 每次调用抛 ClassCastException；
+  `-1` → 每次**静默立刻超时**（工具永远跑不了，错误只说「超时」）；`2.7` → 静默截断。
+  此前是死选项故写错也无害，**改活的同时就得为它的值负责**。**修**：
+  `tool/valid-timeout?` + `kernel/build-kernel` 装配期校验（var 与 inline 汇合、
+  尚未执行的最早时点），坏值在造 kernel 时就炸且报错点名。
+- [x] **#2 §3「边界内一致」表述过宽，字面上禁掉了 filter 体系本身**：初稿把
+  「filter 挂载」与批次大小、引擎选型并列写进禁令——但改变行为**正是 filter 的
+  本职**（approval-filter 决定跑不跑、timeout-filter 决定超不超时），照字面援引会把
+  这两个内置 filter 双双判为违反，而本轮工作恰恰依赖「挂了才有缺省超时」。
+  **修**：新增 §3.2.1——**「一致」管执行环境（ambient state），不管行为**；
+  真正要禁的是「filter 改了它**没声明**要改的东西」（如 timeout-filter 顺手弄丢
+  `binding`）。判据一句话：挂上 filter，工具**该**看到它声明的效果，**不该**发现
+  自己的 `binding` 没了、线程模型变了。§3.3 加 filter 行、§3.4 加两条判例。
+  **教训**：原则要能判定违反才算硬约束——会把合法设计判成违反的表述，援引者只能
+  靠猜哪条算数，等于没有判据。
+- [x] **#5 工具抛 Error 会打死整个工具循环 —— 已修**（2026-07-16 用户拍板收敛非致命
+  Error）：四个 catch 点（`tool/invoke`、kernel 的 inline/var terminal、
+  `react/invoke-one`）此前一律 `catch Exception`，于是 `Error` 全部逃逸——一个工具的
+  深递归 `StackOverflowError` 打死整轮，而分层错误路由的全部意义就是「一个工具坏了
+  不牵连别人」。实测有无 timeout-filter 都一样，故非本轮引入（旧 `(future ...)` 曾靠
+  FutureTask 把 Throwable 包成 ExecutionException 意外收敛过它，改原样重抛后这一处
+  也没了）。
+  **修法的核心是判据，不是无差别 catch Throwable**（吞掉 OOM 只会掩盖真因，且收敛
+  动作本身还要分配内存，多半当场再炸）：新增 `model.error/fatal-throwable?`——
+  **致命（放行）**= `VirtualMachineError` 中除 StackOverflowError 外的那些
+  （OOM/InternalError/UnknownError）+ `ThreadDeath`；**其余收敛**，经
+  `classify-exception` 归类（缺省 :semantic——工具自身 bug 重试无意义）。
+  **与 Scala `NonFatal` 的有意分歧**：它把整个 `VirtualMachineError` 划为致命，
+  但那是通用库的保守取舍；这里的 Throwable 来自**用户工具函数体**，栈溢出是它最常见
+  的自伤方式，栈一退就恢复，正是最该收敛成「这一个工具失败」的那类。
+  **+1 test / +11 assertions**（6 组）：三类非致命 Error 收敛（StackOverflow/
+  Assertion/NoClassDefFound）、**真·深递归**（非手工 throw）、**同批一个溢出不牵连
+  另一个**、filter 抛的 Error 也收敛（invoke-one 是完备边界）、**OOM 仍原样上抛**。
+  全套 **315 tests / 1286 assertions / 0 failures**。
+  **顺带修文档**：`tool-timeout-design.md` §3.4 原写「`invoke-one` 的 try/catch
+  **已经**是完备的错误边界」——**当时并不完备**（只 catch Exception）。这是我在论证
+  「不需要 beamai 层 3」时对自家防线的过度自信；结论不变（层 3 防的是 BEAM 的 link
+  传播，我们确实没有），但支撑它的那条事实当时是错的。已加修订块，现在这句才成立。
+- [x] **测试**：+3 tests / +16 assertions。`declared-timeout-works-without-any-filter-test`
+  （裸 kernel 零 filter 声明即生效 + 未声明零开销不被砍）、
+  `inline-tool-declared-timeout-test`（内联声明生效 + 未声明对称）、
+  `declared-timeout-beats-filter-default-test`（声明更宽/更紧两向都胜出 filter 缺省、
+  未声明吃缺省）、`timeout-validated-at-build-kernel-test`（`"5s"`/`-1`/`0`/`2.7`
+  装配期全拒、合法值通过）；`timeout-filter-priority-test` 改写为
+  `timeout-filter-only-defaults-undeclared-test`——**旧测试钉的是旧设计**
+  （filter 自己实现优先级），现在优先级在 invoke-tool，filter 只负责让位。
+
+### ✅ 缺省机制定调（2026-07-16 用户拍板，两条 💥 破坏性变更）
+
+> 测试：315/1286 → **316 tests / 1301 assertions / 0 failures**；live 20 项仍全过
+> （已改为验新机制）。
+
+- [x] **缺省不超时，两个显式来源**：`工具声明 deftool {:timeout ms} > 引擎缺省
+  (…-tool-calling-manager {:timeout ms}) > 不超时`。三个引擎均接受 `:timeout`
+  （构造期校验正整数）；新增 `tcm/manager-timeout`（读 record 的 `:timeout` 字段而非
+  加协议方法——加方法会让既有 `reify` 实现在调用时抛 AbstractMethodError；自定义
+  实现无该字段即 nil，自然退化）+ `kernel/effective-tool-timeout`（声明 > 引擎）。
+  **时间上限属于执行策略故随引擎构造**，不散落在 filter 里——与 beamai
+  `manager_opts.tool_timeout` 同一立场。都没给则不起线程、零开销。
+  `advisor/timeout-filter` 先退为兜底，随即**整条删除**（见下一节）。
+- [x] **缺省 TCM 改为串行**（反转本版早先的 💥「同一轮 tool-call 并行执行」）：
+  `execute-batch` 的 executor 从 `@tool-executor` 改为 nil（全程内联）。要并发须显式
+  注入 `virtual-thread-tool-calling-manager`。**理由**：并发要求同批工具的副作用彼此
+  无序依赖——那是调用方才知道的性质，框架不替它假定；串行是「无论工具长什么样都
+  成立」的选择。**状态语义与引擎无关**（三个引擎都是轮初快照 + 屏障折叠），故这条
+  只改调度、不改语义。
+- [x] **测试跟着搬，并逮到两处「假通过」**：缺省改串行后，`batch-true-parallel-test`
+  直接失败（钉的是旧默认）；更隐蔽的是 **`batch-serial-degrade-test` 与
+  `batch-snapshot-isolation-test` 会静默假通过**——前者测「批内有 :serial 就退化为
+  按序」，缺省本就串行时它什么都没测；后者的 gate-a/gate-b 握手在串行下退化成靠
+  deref 超时兜底。**一切并发语义的测试现在必须显式选引擎**：新增 `via-manager`
+  helper，三个测试改走 VT 引擎，并给退化测试补了「去掉 :serial 就真并发」的对照组
+  （证明它测的确实是退化）。新增 `default-manager-is-sequential-test`（缺省严格按序
+  无重叠 + 显式注入 VT 才并发）、`manager-default-timeout-test`（缺省不超时 / 引擎
+  缺省生效 / 声明更紧更宽两向都胜出引擎缺省 / 三引擎均接受 :timeout / 坏值构造期拒）。
+- [x] **live 改为验新机制**：`make-agent` 从挂 `timeout-filter` 改为
+  `(sequential-tool-calling-manager {:timeout ms})`，场景 1/3/4 传 nil（不给引擎缺省，
+  证明**声明是唯一来源**也能生效）。20 项全过。
+- [x] **`timeout-filter` 整条删除**（2026-07-16 用户拍板，💥）：待定项结案。
+  两个职责已被接管（强制力→`invoke-tool`、缺省→引擎 `:timeout`），剩下的唯一辩护
+  「按名/标签动态时限」按 §1 四问全落假想列（用户 5 行 `:tool` filter 包
+  `call-with-timeout` 即等价）；三层优先级是复杂度税（beamai 也只有两个来源）。
+  连带删除：`build-func-def` 的 `:timeout` 字段（唯一读者就是该 filter，
+  没有读者的字段就是下一个死选项；函数签名退回 `[fn-name tool-var]`）。
+  保留：机制本体 `tool/call-with-timeout`（`invoke-tool` 消费），其机制测试
+  从 filter 形态改写为直打本体（`call-with-timeout-mechanism-test` /
+  `-environment-test` / `timeout-abandons-not-kills-test`）；kernel 级优先级
+  测试改用引擎缺省桩。**墓碑已登记并经变异验证**（README 里复活它 CI 会逮住）。
+  文档同步：filter-chain-design §3 表改删除记录、advisor-alignment 两处、
+  agent-loop-concurrency 一处、三个 README 的教学段、tool-timeout-design §3
+  终态块。**复盘一则**：变异验证时用 `git checkout README.md` 恢复，把本会话
+  未提交的 README 改动一并冲掉（靠 grep 发现并重做）——变异测试的恢复手段
+  应该用「删掉刚 append 的行」而非整文件回滚。
+  全套 **314 tests / 1295 assertions / 0 failures**（净 -2 tests：filter 自身
+  测试删除多于新增），live 20 项全过，5 条墓碑。
 
 ### 📋 历史账本
 

@@ -8,9 +8,38 @@
 
 ### 💥 破坏性变更
 
+- **缺省的 ToolCallingManager 改为串行**（2026-07-16 用户拍板）。不指定
+  `:tool-manager` 时，同一轮的多个 tool-call **按调用序依次执行**。
+  **要并发须显式注入** `(virtual-thread-tool-calling-manager)`（或 thread-pool 版）。
+  *（这一条修正了本版早先的默认——见下条：并行曾是缺省。）*
+  **理由**：并发要求同批工具的副作用彼此无序依赖——那是**调用方才知道**的性质，
+  框架不该替它假定。串行是「无论工具长什么样都成立」的那个选择：顺序可预期、
+  可调试、不会因为 LLM 某轮多发一个 tool-call 就把副作用交错起来。
+  **状态语义不受影响**：三个引擎都是轮初快照 + `:writes` 屏障折叠。
+- **工具超时缺省为「不超时」**，两个显式来源（2026-07-16 用户拍板）：
+
+      工具声明 deftool {:timeout ms}  >  引擎缺省 (…-tool-calling-manager
+      {:timeout ms})  >  不超时
+
+  **时间上限属于执行策略，故随引擎构造**（三个引擎均接受 `:timeout`），
+  而不是散落在 filter 里——与 beamai `manager_opts.tool_timeout` 同一立场。
+  两者都由 `kernel/invoke-tool` 强制，**开箱即生效**；都没给则不起线程、
+  零开销。框架不替调用方决定何时放弃。
+- **`advisor/timeout-filter` 删除**（2026-07-16 用户拍板，紧随上条）：它的两个
+  职责已分别被接管——强制力在 `kernel/invoke-tool`、整体缺省在引擎 `{:timeout ms}`；
+  剩下的唯一辩护「按工具名/标签动态决定时限」按 §1 四问全落假想列（真要时自己写
+  5 行 `:tool` filter 包 `tool/call-with-timeout` 即等价），且第三层优先级是纯粹的
+  复杂度税（beamai 同样只有 tool_spec + manager opts 两个来源）。
+  `build-func-def` 的 `:timeout` 字段随之删除（唯一读者就是该 filter——没有读者的
+  字段就是下一个死选项）。机制本体 `tool/call-with-timeout` 保留并有直接单测。
+  已入 `check_docs` 墓碑（经变异验证：README 里复活它会被 CI 逮住）。
+  **迁移**：`(timeout-filter 5000)` → 引擎 `(…-tool-calling-manager {:timeout 5000})`。
 - **同一轮的多个 tool-call 并行执行**（虚拟线程；批内任一工具声明
   `{:serial true}` 时整批退化为按序执行）。工具的执行环境从「批内穿线」
   改为「轮初快照」：同批工具互相看不到对方的写（此前语义全仓库零真实使用者）。
+  **⚠️ 本条的「并行」部分已被上面第一条改回串行缺省**——并行机制仍在
+  （`virtual-thread-tool-calling-manager`），只是不再是缺省；「轮初快照 + 屏障折叠」
+  的状态语义**保持不变**，与选哪个引擎无关。
 - **ToolContext 对工具/filter 只读**。工具写共享状态改走返回值
   `{:result r :writes {k v}}`（任意工具均可，不再要求 `{:context true}`）；
   屏障处按 tool-call 原始序经 `build-kernel` 新增的 `:state-slots` 槽级
@@ -346,6 +375,35 @@
   →`:retry` 重试整链；同批部分结果（慢者超时不殃及快者）；**诚实测试**——
   CPU 忙循环在超时结果返回后仍在跳（钉住「放弃等待 ≠ 终止执行」的真实语义，
   防后人误以为有 kill）。
+- **工具抛 `Error` 会打死整个工具循环**（2026-07-16）：`tool/invoke`、
+  `kernel/invoke-tool` 的两个 terminal、`react/invoke-one` 四处一律 `catch Exception`，
+  于是 `Error` 全部逃逸——一个工具的深递归 `StackOverflowError` 整轮死，而分层错误
+  路由（`:semantic`/`:transient`/`:environment`）的全部意义就是「一个工具坏了不牵连
+  别人」。现四处改收 `Throwable`：**非致命 Error 收敛**为该工具的错误结果（经
+  `classify-exception` 归类，缺省 `:semantic`），**致命的仍原样上抛**——判据见新增的
+  `model.error/fatal-throwable?`：致命 = `VirtualMachineError` 中除
+  `StackOverflowError` 外的那些（`OutOfMemoryError`/`InternalError`/`UnknownError`）
+  + `ThreadDeath`。吞掉 OOM 只会掩盖真因，且收敛动作本身还要分配内存。
+  与 Scala `NonFatal` 的**有意分歧**：它把整个 `VirtualMachineError` 划为致命，
+  但这里的 Throwable 来自**用户工具函数体**——栈溢出是它最常见的自伤方式，
+  栈一退就恢复，正是最该收敛成「这一个工具失败」的那类。
+- **`deftool :timeout` 只有挂 filter 才生效 / 内联工具完全无效 / 值零校验**
+  （2026-07-16 code review）——三条都是上一条 `:timeout` 修复没做完的部分：
+  - **内联工具的 `:timeout` 仍被静默忽略**：根因是**两个 func-def 构造点**（var 走
+    `build-func-def`、inline 另行硬编码），而 inline 的 `:serial`/`:retry` 一直生效。
+    现新增 `kernel/tool-timeout`（var + inline 双分支，与 `serial-tool?`/`retry-policy`/
+    `return-direct-tool?` 同款），**两个构造点合并为一**（新增字段只加一处）。
+    `delegate-tool` 恰恰是内联且跑整个子 agent——最需要超时的正是拿不到超时的。
+  - **`:timeout` 是唯一不「开箱即生效」的 `deftool` 选项**（`:serial`/`:retry`/
+    `:return-direct` 都由 kernel/react 直接消费）：用户写下 `{:timeout 5000}` 不挂
+    filter → 编译通过、无警告、零效果，**与死选项 bug 的症状逐字相同**。现强制力落到
+    **`kernel/invoke-tool`**（单次调用的时间上限是它的职责；`:retry`/`:serial` 那些是
+    循环/批次策略故属 react），**仅在声明时起线程**（未声明零开销）。
+    `timeout-filter` 相应**退为纯缺省**：只管未声明的工具，**见到声明即让位**——
+    优先级「声明 > filter 缺省」由让位实现，不比大小，同一 deadline 不套两层线程。
+  - **`:timeout` 值零校验**：`"5s"` 曾每次调用抛 `ClassCastException`、`-1` 曾让工具
+    每次**静默立刻超时**、`2.7` 被静默截断。现 `build-kernel` **装配期**校验
+    （var 与 inline 汇合、尚未执行的最早时点），坏值在造 kernel 时就炸且报错点名。
 - **工具执行丢失调用方的动态绑定**（2026-07-16，两处，均为**静默**给根值——
   无报错、只是悄悄读错）：
   - **`run-on-executor` 从不传导绑定帧**（既有 bug）：于是同一个工具会因
@@ -360,8 +418,12 @@
   四条路径（内联 / executor / Sequential / VirtualThread）行为一致，挂不挂
   `timeout-filter` 也不再改变工具看到的 `binding`。回归测试钉住批次大小与引擎
   两个维度。
+- **工具超时批次终态**：全套 **314 tests / 1295 assertions / 0 failures**
+  （超时/绑定/Error 收敛/缺省机制/filter 删除各阶段的独立计数见 TASK P8 各节）。
 - **工具超时 live 验证（`examples/tool_timeout_live_test.clj`，MiniMax 真实
-  provider）**：20 项行为断言，连跑 3 遍稳定。慢后端是本地裸 TCP（零依赖不联网），
+  provider）**：20 项行为断言，**四遍稳定**（含 timeout-filter 删除后以
+  「引擎缺省 + 声明」新机制的复验；场景 4 abandon 差值四次实测
+  1701/1702/1700/1700ms，恒定 ≈ CPU 循环 2500ms − 超时 800ms）。慢后端是本地裸 TCP（零依赖不联网），
   只有 LLM 是真的。四场景：超时→模型理解错误→循环存活作答 / 对照组（同为 3s 的
   活儿，声明 6s 救活 vs 未声明被 800ms 缺省杀死）/ `:retry` 透明重试（实跑 2 次、
   模型只见成功结果）/ abandon 残余风险（CPU 忙循环副作用晚 1.7s 落地）。
