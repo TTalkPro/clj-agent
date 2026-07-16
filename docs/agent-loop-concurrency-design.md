@@ -394,7 +394,8 @@ conflict 告警；`:writes` 单 arity 工具可用。
 传播链：tool/invoke 与 kernel 两条 terminal 折错误时附带
 `:error {:class :message}` → `invoke-tool` 返回值透出 → `execute-batch`
 返回新增 `:errors [{:id :name :class :message :tc}]`（重试耗尽仍失败的才在此）。
-timeout-filter 的超时结果也标 `:transient`（超时正是重试有意义的类别）。
+内建超时机制（`deftool {:timeout ms}` / 引擎缺省，2026-07-16 起非 filter）的
+超时结果也标 `:transient`（超时正是重试有意义的类别）。
 
 ### 10.2 瞬态重试（map 任务内，对模型透明）
 

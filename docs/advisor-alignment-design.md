@@ -138,8 +138,11 @@ Spring 把「执行一批 tool-call」抽成 `ToolCallingManager`，由 `ToolCal
   工具声明 `:retry` 则指数退避；`:environment` 且 `:on-env-error :pause` 则
   暂停等人修好再 resume。缺省 `:proceed`（转文本回传，与 Spring/cl-agent
   默认一致）。
-- **限流 / 熔断 / 超时 → 落在 `:tool` filter 链**（`timeout-filter` /
-  `approval-filter`），不在 manager。
+- **限流 / 熔断 → 落在 `:tool` filter 链**（如 `approval-filter`），不在 manager。
+  ~~超时也曾在此列（`timeout-filter`）~~——**2026-07-16 修订**：超时已改为内建
+  机制且缺省来源恰恰**在 manager**（`deftool {:timeout ms}` > 引擎
+  `{:timeout ms}` > 不超时，`kernel/invoke-tool` 强制；filter 已删）。
+  时间上限属于执行策略，见 `tool-timeout-design.md` §3 终态修订。
 
 **更本质的一条：concurrent manager 有一半在管线程池生命周期**——`pool-size`、
 双检锁懒创建 lparallel kernel、幂等 shutdown。我们用虚拟线程：
@@ -489,8 +492,8 @@ grounding 指令拼成一条增强消息）而非检索本身。这块编排每�
                (rag/qa-turn-filter retriever :top-k 4)         ;; :turn，每 turn 注入一次
                (flt/validation-turn-filter                     ;; :turn，答案校验重试
                  (so/validate-fn schema :parse-fn #(json/parse-string % true)))
-               (flt/timeout-filter 5000)                       ;; :tool
                flt/logging-filter]                             ;; :tool
+     ;; （超时不走 filter：deftool {:timeout ms} / 引擎 {:timeout ms} 即生效）
      :eligibility-fn (fn [_resp ctx] (pos? (ctx/get-var ctx :budget 1)))}
     {:index (ts/keyword-tool-index) :limit 5}))
 ```

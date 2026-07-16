@@ -57,7 +57,8 @@
   {":build-result-msgs" "service map 的历史键，已移除（见 model/service.clj）；现为 :chat-fn + :stream-fn"
    "model.types"        "从未存在的 ns（model 下只有 message/response/error/service）"
    ":assistant-msg"     "chat-fn 返回值的历史字段；现返回归一化 ILLMResponse"
-   "create-filter :name :chat :order" "filter 的 :order/:phase 早已移除——执行顺序 = :filters 向量注册顺序"})
+   "create-filter :name :chat :order" "filter 的 :order/:phase 早已移除——执行顺序 = :filters 向量注册顺序"
+   "timeout-filter" "2026-07-16 删除。超时是内建机制：deftool {:timeout ms} > 引擎 (…-tool-calling-manager {:timeout ms}) > 不超时，由 kernel/invoke-tool 强制、开箱即生效；机制本体 tool/call-with-timeout"})
 
 (def ^:private doc-files
   ["README.md" "README_EN.md" "modules/README.md"

@@ -80,8 +80,8 @@ ToolResponse {:result (:writes) (:error {:class :message})}
   ——响应侧无 `:context`，短路分支不需要（也不应）回传（曾经的易错点已消除，
   演进见 agent-loop-concurrency-design.md §4.6）；
 - 短路语义：不带 `:writes` 的响应 = 该调用的写意图不生效（事务性）；
-  带 `:error {:class ...}` 可参与屏障处的分层路由（timeout-filter 标
-  `:transient` 即此用法）；
+  带 `:error {:class ...}` 可参与屏障处的分层路由（内建超时机制标
+  `:transient` 即此用法——超时本身已非 filter，见 §3 表）；
 - **警示**：`:tool` 链运行在并行任务内——交互式审批放 agent 的
   `:tool-gate`（批前串行预判），勿放 tool filter（会并发弹提示）。
 
@@ -162,7 +162,7 @@ terminal (fn [treq]
 | filter | 链 | 说明 |
 |---|---|---|
 | `logging-filter` | :tool | 调用前后日志 |
-| `(timeout-filter ms)` | :tool | 超时短路 + future-cancel 中断；超时结果标 `:error {:class :transient}`（声明 `:retry` 的幂等工具可自动重试） |
+| ~~`(timeout-filter ms)`~~ | — | **已删除（2026-07-16）**：超时是内建机制，不是 filter——`deftool {:timeout ms}` > 引擎 `(…-tool-calling-manager {:timeout ms})` > 不超时，由 `kernel/invoke-tool` 在 filter 链**之外**强制（机制本体 `tool/call-with-timeout`）。超时结果仍标 `:error {:class :transient}`（`:retry` 可自动重试）。见 `tool-timeout-design.md` |
 | `(approval-filter fn?)` | :tool | 敏感工具审批，拒绝短路（交互式场景请改用 gate） |
 | `(logging-chat-filter :log-fn f :preview n)` | :chat | LLM 请求/响应日志（对标 Spring `SimpleLoggerAdvisor`；`logging-filter` 的 LLM 侧对应物） |
 | `(validation-turn-filter validate-fn :max-retries n)` | :turn | 最终答案校验：不合格把原因作反馈消息重入循环；耗尽原样返回；非 :completed 透传。对标 Spring AI `StructuredOutputValidationAdvisor`，配 provider 原生 json_schema 使用；判据可用 `advisor/structured-output` 生成 |
@@ -215,9 +215,9 @@ terminal (fn [treq]
                       (chain (update req :messages
                                      #(into [(msg/system (retrieve (:messages req)))] %))))}
              (filters/validation-turn-filter must-be-json)   ;; :turn，答案校验重试
-             (filters/timeout-filter 5000)                   ;; :tool，单工具超时
              filters/logging-filter]})                       ;; :tool，日志
-;; turn 洋葱：rag → validation → [循环: memory → LLM；timeout → logging → 工具]
+;; turn 洋葱：rag → validation → [循环: memory → LLM；logging → 工具]
+;; （单工具超时不走 filter：deftool {:timeout ms} / 引擎 {:timeout ms} 即生效）
 ```
 
 ## 相关文档
