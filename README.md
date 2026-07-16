@@ -106,7 +106,7 @@ clj-agent/
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent)，依赖 core
 │   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
 ├── examples/              # 使用示例
-├── docs/                  # 设计文档
+├── docs/                  # 设计文档（索引见 docs/README.md；design-principles.md = 项目级硬约束，先读它）
 ├── scripts/               # 开发脚本
 └── deps.edn               # 根依赖配置
 ```
@@ -332,7 +332,9 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
   {:sensitive true    ;; 可选：标记为敏感操作（SimpleAgent 配置 :on-pause 时会暂停审批）
    :context true      ;; 可选：读取 Context（函数签名多一个只读 ctx 参数）
    :serial true       ;; 可选：副作用工具——同批含 serial 工具时整批退化为按序执行
-   :retry true}       ;; 可选：幂等工具 opt-in——:transient 类失败自动指数退避重试
+   :retry true        ;; 可选：幂等工具 opt-in——:transient 类失败自动指数退避重试
+   :timeout 5000}     ;; 可选：超时毫秒——由 timeout-filter 强制（优先于其缺省值）；
+                      ;; 注意语义是「放弃等待」而非「终止执行」，超时工具声明 :retry 须幂等
                       ;;（或 {:max-retries 2 :initial-delay-ms 200}）
   (body ...))
 
@@ -417,7 +419,8 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 ;; 内置 filter
 filters/logging-filter        ;; 调用前后日志（:tool）
 (filters/logging-chat-filter) ;; LLM 请求/响应日志（:chat，对标 SimpleLoggerAdvisor）
-(filters/timeout-filter 5000) ;; 超时控制（ms，around；超时标 :transient 可触发重试）
+(filters/timeout-filter 5000) ;; 超时控制（ms，around；超时标 :transient 可触发重试；
+                              ;; deftool {:timeout ms} 声明优先于此缺省值）
 (filters/approval-filter)     ;; 敏感工具审批（拒绝则短路）
 (filters/validation-turn-filter validate-fn :max-retries 2)
                               ;; 最终答案校验（:turn）：不合格带反馈重入循环重试
@@ -538,7 +541,7 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 > caching / web_search / citations / skills、DeepSeek 推理与前缀续写等）详见
 > [`clj-agent-provider` README](modules/clj-agent-provider/README.md)。
 >
-> **关于流式**：真增量 SSE 传输基于 JDK `java.net.http`（见 `design/streaming-async-design.md`），
+> **关于流式**：真增量 SSE 传输基于 JDK `java.net.http`（见 `docs/streaming-async-design.md`），
 > 已接入主链路——`client/chat-stream` 在 ReAct 循环里逐 token 流出、`on-complete` 落库，
 > 与同步对话历史不分叉，并支持取消令牌（断连即停）。**所有内置 provider 均支持流式**
 > （含 DashScope 原生 SSE：`X-DashScope-SSE` + `incremental_output`）；个别 provider 若不支持，

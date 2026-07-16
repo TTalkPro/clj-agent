@@ -149,19 +149,88 @@
   （Spring AI 2.0 `ToolCallingManager` 对齐签名，内部抽 tool_calls）。**多 impl 是
   核心特性**——不同 record 选不同执行策略：
   `VirtualThreadToolCallingManager`（默认，委托现有 5-arity `execute-batch`，尊重
-  `:serial` 声明）+ `SequentialToolCallingManager`（独立顺序路径，全串行无并发）。
+  `:serial` 声明）+ `SequentialToolCallingManager`（独立顺序路径，全串行无并发）
+  + `ThreadPoolToolCallingManager`（有界平台线程池，见下）。
   `build-kernel` 新增可选 `:tool-manager` 字段（`Kernel` record 第 7 字段，缺省 nil
   走原路径，**零行为变化**）。`execute-batch` / `execute-single` 退回成每个 record 的
   **内部 helper**（不是协议方法）——怎么实现完全是 record 自己的选择。
   **边界契约**（实证测试）：manager 不夺 `:serial` / `:tool` filter / `:writes` 屏障
   的权——注入 mock manager 仍走 kernel 原语，三条不变量各有测试钉住。
-  **修订 `advisor-alignment-design.md` §1.3**（《ToolCallingManager —— 我们不长这个
-  抽象》旧立场推翻）：通过多 record impl 彻底兑现 §1.3 末尾预测的「executor 可注入」
-  诉求，形状比 §1.3 建议的「kernel :settings 单键注入」更彻底。
-  设计见 `docs/tool-calling-manager-design.md`（v3，含 Oracle review 16 项处置 + 18 条
-  决策记录）。**PR2/PR3（`deftool :backend` 扩展 HTTP/MCP transport）评估后搁置**——
-  没有真实 HTTP/MCP 工具需求时 ROI 不足（用户可在 deftool 内手写 HTTP 包装等价），
-  待真实场景触发；设计文档 §5/§6 已就绪。
+  **定位：manager 是 clj-agent 的工具执行引擎**——拿到一批已批准的 tool-call，
+  决定怎么把它们跑完：**线程模型 + 隔离边界 + 调度策略**。换 manager = 换引擎。
+  **修订 `advisor-alignment-design.md` §1.3**（《ToolCallingManager —— 我们不长
+  这个抽象》旧立场推翻）：§1.3 的落点建议（kernel `:settings` 注入 executor）
+  **低估了要换的东西**——单键换的是「线程从哪来」，manager 换的是引擎。
+  三条能力级差异：(a) 调度决策（`react.clj:167` 的 `(if (or serial? (<= count 1)) ...)`）
+  硬编码在框架里，`Executor` 接口够不着；(b) `SequentialToolCallingManager`
+  **全程不构造 `Future`**（`react.clj:207` 独立路径），same-thread executor 模拟不出
+  （仍会背上 `.submit`/`.get` 的包装与中断语义）；(c) 池的生命周期须与策略打包
+  （Sequential 无资源、ThreadPool 持可关停的池），单键收下别人造的 executor 后
+  生命周期无人认领。**隔离缺口**：`react.clj:66` 的虚拟线程 executor 是
+  **进程全局 `def` + `delay`**，同 JVM 所有 kernel / agent / 子 agent 共享——
+  无舱壁、无限流、无可关停边界；`ThreadPoolToolCallingManager`（每实例一个有界池）
+  正是为此留的位置。
+  设计见 `docs/tool-calling-manager-design.md`（v5，含 Oracle review 16 项处置 + 23 条
+  决策记录 + §0.5 设计原则）。
+- **文档体系整理：原则提取 + 目录合并 + 索引**（无代码变更）。
+  - **新增 `docs/design-principles.md`——项目级设计原则的唯一出处**（硬约束）：
+    原则散在个案里的下场是下一份设计文档再把它重新推导一遍，故抽出集中收录，
+    各设计文档改为**回指不重述**。首批两条——**§1《无真实需求不建》**（新提）：
+    抽象要由真实需求触发，不由对齐别人 / 对称性 / 「以后可能要」触发；用户几行
+    代码就能等价做到的事，框架不长字段、不开 seam、不加协议。本是
+    `advisor-alignment-design.md` §1.3 的「立项判据」，因在
+    `tool-calling-manager-design.md` 里被反复重新发现（毙 `deftool :backend`、
+    毙 PR2/PR3、拆掉一个防御性保护）而提为原则；含四问判据、落地约束、案例法
+    （含 `ToolCallingManager` 自己险些踩中：立项两条腿里「多 transport」那条是
+    假想的，且当时看起来比真实那条更有说服力）。**§2《框架无关》**：收录自
+    `streaming-async-design.md` §0.5，内容不变。两条分工——§1 管纵向（抽象该不该
+    存在），§2 管横向（依赖该不该跨进来）。
+  - **`design/` 并入 `docs/`，不再分两处**：7 份文档经 `git mv` 迁移（rename 历史
+    保留，内容不变），`design/` 删除。那条界线是历史形成的（`design/` 早期放专题/
+    重构笔记，`docs/` 放主设计文档），但两边都在长，且「这份算专题还是主文档」没有
+    可判定的标准；跨目录相对链接（`../docs/…`）也是纯粹的税。全仓 13 处路径引用
+    同步更新（含 `provider/anthropic.clj`、`provider/http/client.clj` 两个 docstring
+    与 `examples/streaming/README.md`）。老路径 `design/xxx.md` → `docs/xxx.md`
+    一一对应，无重命名。
+  - **新增 `docs/README.md` 索引**：按「权威参考 / 已实施专题 / 进行中 / 已废弃留档」
+    分组，16 份全部收录；沿用各文档头部既有的 `状态：` 行作为「当下是否算数」的判据
+    ——对 process V1/V2/Timeline 那三份废弃留档尤其要紧（讲得头头是道但不代表现状）。
+- **新增 `ThreadPoolToolCallingManager`——有界池引擎（舱壁隔离）**：
+  `(react/thread-pool-tool-calling-manager {:pool-size 8 :thread-name-prefix "..."})`，
+  缺省 pool-size = `availableProcessors`。工具批在**本实例自己的池**里跑，
+  并发上限 = pool-size，不与其他 kernel 互挤——这是默认 VT 引擎给不了的
+  （后者用进程全局无界 executor）。线程为 daemon（用户忘记关停也不吊住 JVM 退出）。
+  **池的生命周期归持有者**：record 实现 `java.io.Closeable`，可直接 `with-open`，
+  或调 `react/shutdown-tool-calling-manager!`（对无资源的引擎是 no-op）；
+  关停后再执行工具批抛 `ex-info`（`:error-class :environment`），不静默失败。
+  **不变量：一个引擎属于一个 kernel，不跨 delegate 边界**——子 agent 自有引擎，
+  这本来就是默认，框架里没有共享路径（`delegate` 的 subagent-config 全部来自用户的
+  `:subagent-fn`，父 kernel 的 `:tool-manager` 流不进去）。⚠️ 别绕过默认去踩：
+  亲手把同一个有界实例塞进 `subagent-config` 会死锁（`delegate-tool` 是
+  spawn→await→drop，父批工具占着池线程等子 agent，子 agent 的批又要同一个池的线程，
+  互等）；同理别在某工具函数体里再拿同一实例跑一批。**框架不为此设防**——跨 delegate
+  的情形线程局部标记根本测不到，同线程的情形无真实需求，不变量本身就是答案。
+  子 agent 要限流请给它自己的实例；不需要就留默认 VT 引擎。
+- **重构（内部，行为不变）**：三个引擎的 map + 屏障骨架抽成 `execute-batch-via`——
+  gate 预判、`:serial` 整批退化、`ctx/apply-writes` 折叠、messages/records/errors
+  按原序排回，**一处实现**；引擎只负责挑 executor（nil = 全程内联，不构造 `Future`）。
+  此前 VT 与 Sequential 各持一份拷贝，契约靠两边同步维持。公开 `react/execute-batch`
+  的 5/6-arity 签名与行为不变。
+- **`deftool :backend`（HTTP / MCP transport 声明）❌ 否决，不会实施**（2026-07-16
+  用户拍板）：**工具走 HTTP 还是 MCP 是函数体内部实现**——既不影响 LLM 怎么用这个
+  工具，也不影响框架怎么调度它（gate / 并行 / 重试 / writes 折叠待遇完全相同），
+  框架不该知道。Clojure 里函数是一等值，Spring `ToolCallback` 用接口承担的 transport
+  多态，在这里由**函数体本身**承担；再加一层 `:backend` defmulti 是把宿主语言已经
+  免费提供的能力重新实现一遍。代价（`deftool` 宏多 5 个字段 + 2 条编译期检查、
+  `invoke-backend` defmulti 成永久公开 API 面、core/client 跨模块耦合、kernel 加
+  `:mcp-clients` 字段、inline tools 路径天生接不上、声明式配置表达力反而弱于手写）
+  远超收益（省 5-10 行 HTTP 包装）。此前（2026-07-15）标记为「⏸️ 搁置待真实需求」，
+  现改为**否决**——即使出现 HTTP/MCP 需求也不按此设计做，`deftool` 内直接写
+  `(http/post ...)` / `(mcp/call-tool ...)` 即可。**`deftool` / `tool/invoke` /
+  `Kernel` 均无改动**。否决理由与唯一可能重开的场景（远端动态工具发现，且届时
+  应重新设计）见设计文档 §5。**对 `ToolCallingManager` 零影响**——manager 管
+  「怎么执行」（线程模型 / 隔离 / 调度），`:backend` 想管「执行的是什么」
+  （transport），两件事不相干。
 
 ### 🐛 修复
 
@@ -169,6 +238,21 @@
   conversation-id 的裸 context 续跑，S1 的 `:writes` 折叠结果跨 resume 即失
   （S1 之前 context 无内容故无感）。现 resume context 恢复自暂停态的
   `:tool-context`（本进程与跨重启两路径同修）。
+- **`deftool :timeout` 曾是死选项**（2026-07-16，设计见
+  `docs/tool-timeout-design.md`）：`:timeout` 在 opts 白名单里却从不生成
+  `:tool/timeout` 元数据、全库零读取——声明 `{:timeout 500}` 编译通过、无警告、
+  零效果（实测睡 3s 的工具跑满全程）。现经 `tool/timeout-spec` →
+  `kernel/build-func-def` 透传，由 `timeout-filter` 消费，优先级：
+  **工具声明 > filter 构造缺省**（对齐 beamai `resolve_timeout` 的策略层）。
+  仍为 opt-in：不挂 timeout-filter 即无超时。
+- **`timeout-filter` 把工具搬去平台线程**（同上设计文档 §4）：曾用
+  `clojure.core/future`（send-off 无界平台线程池）包裹下游——挂了该 filter，
+  VirtualThread 引擎的工具实际跑在平台线程上，且超时被弃的任务在 send-off 池
+  无界堆积、ThreadPool 引擎的舱壁 bound 不住。现改 `Thread/startVirtualThread`；
+  顺带下游异常**原样重抛**（不再包 `ExecutionException`）。
+  docstring 同步如实声明语义：**JVM 上超时 = 放弃等待 ≠ 终止执行**（无 kill
+  原语；CPU 循环/普通 socket read 打不断，副作用可能在超时结果返回后落地；
+  声明 `:retry` 的超时工具必须幂等——重试时上一次调用可能仍在跑）。
 
 ### 🔧 内部 / 测试
 
@@ -255,6 +339,13 @@
     的 `tool-name` 契约是**字符串**，脚本却拿 keyword 比较——scenario 1 断言
     直接失败，scenario 2 更严重：gate 的 `(= :send-email n)` 永不相等 → 永不
     中断 → 中断/恢复整条链路静默失效。`callbacks.clj` 文档补上类型说明防复发。
+- **工具超时批次测试（2026-07-16）**：300/1227 → **307 tests / 1251 assertions /
+  0 failures**（+7 tests / +24 assertions，零回归）。元数据回归钉 + 端到端穿
+  `build-func-def`（修复前该用例睡满 60s）+「裸 `invoke` 不超时」语义钉；
+  优先级三分支；虚拟线程 `.isVirtual` 断言 + 异常原样重抛；超时→`:transient`
+  →`:retry` 重试整链；同批部分结果（慢者超时不殃及快者）；**诚实测试**——
+  CPU 忙循环在超时结果返回后仍在跳（钉住「放弃等待 ≠ 终止执行」的真实语义，
+  防后人误以为有 kill）。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 
