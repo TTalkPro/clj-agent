@@ -198,9 +198,10 @@
    - :tool/params    参数定义列表
    - :tool/sensitive 是否为敏感工具
    - :tool/serial    是否串行工具（批内并行时整批退化）
-   - :tool/timeout   超时毫秒（可选）。**仅当 kernel 挂了 timeout-filter 时生效**，
-                     且语义为「放弃等待」而非「终止执行」——超时后工具可能仍在
-                     后台跑完并产生外部副作用（见 advisor/timeout-filter 文档）
+   - :tool/timeout   超时毫秒（可选）。经 kernel 调用时**开箱即生效**（缺省不超时；
+                     优先级：本声明 > 引擎 {:timeout ms}）。语义为「放弃等待」而非
+                     「终止执行」——超时后工具可能仍在后台跑完并产生外部副作用
+                     （见 call-with-timeout 文档）
    - :tool/category  工具分类
    - :tool/context   是否需要（只读）context
    - :tool/tags      标签集合（用于过滤）
@@ -365,13 +366,60 @@
 (defn timeout-spec
   "读取 tool function 的 :timeout 声明（deftool 选项，毫秒）。
 
-   声明本身不产生任何强制力——由挂在 kernel 上的 timeout-filter 消费
-   （优先级：工具声明 > filter 构造时的缺省值）。不挂 filter 即无超时。
-   语义注意：JVM 上超时 = 放弃等待 ≠ 终止执行，详见 advisor/timeout-filter。
+   与 `:serial` / `:retry` / `:return-direct` 同款——经 kernel 调用时**开箱即生效**，
+   由 `kernel/invoke-tool` 强制。缺省不超时；引擎可给整体缺省
+   `(…-tool-calling-manager {:timeout ms})`，本声明恒优先。
+
+   内联工具的同名声明经 `kernel/tool-timeout` 读取（本函数只管 var）。
+   语义注意：JVM 上超时 = 放弃等待 ≠ 终止执行，详见 `call-with-timeout`。
 
    返回: nil（未声明）| 正整数毫秒"
   [v]
   (:tool/timeout (meta v)))
+
+(defn valid-timeout?
+  "`:timeout` 声明是否合法：nil（未声明）或正整数毫秒。
+
+   非正整数一律拒绝——`\"5s\"` 会在 deref 处抛 ClassCastException，`-1` 会让该
+   工具每次调用都立刻超时（静默、无从排查），`2.7` 会被静默截断。由
+   `kernel/build-kernel` 在装配期校验（var 与内联工具汇合、尚未开始执行的最早时点）。"
+  [t]
+  (or (nil? t) (pos-int? t)))
+
+(defn call-with-timeout
+  "在**虚拟线程**上跑 f，最多等 timeout-ms 毫秒。
+
+   返回 `[:ok v]` | `[:err throwable]` | `[:timeout]`——**不**替调用方决定结果
+   形状，由调用点自行翻译。这是超时机制的**唯一实现**，消费者是
+   `kernel/invoke-tool`（强制「工具声明 > 引擎缺省」的生效超时）。
+
+   **语义如实声明：超时 = 放弃等待，不是终止执行。**JVM 没有强杀原语
+   （`Thread.stop` 已移除），到点只能 interrupt：
+   - `Thread/sleep`、阻塞 IO（socket read 等）**会被真正打断**——虚拟线程上 JDK
+     关闭 socket 并抛 `SocketException: Closed by interrupt`（JEP 353 起
+     `java.net.Socket` 基于 NIO；实测 JDK 25 确认）。故「工具卡在外部 API 上」
+     这个最常见的形态能干净取消，副作用不落地；
+   - 但**不检查中断标志的代码打不断**（纯 CPU 循环为主，另有 native 调用、吞掉
+     `InterruptedException` 的代码）——它会继续跑完，其副作用可能在超时**之后**
+     才落地。这是残余风险，框架消不掉。
+
+   用虚拟线程而非 `clojure.core/future`（send-off 平台线程池）的两个理由：
+   (1) 阻塞 IO 因此真的可取消（平台线程会无视 interrupt 把请求读完）；
+   (2) 被放弃的执行只占几 KB 栈，且不破坏 ToolCallingManager 各引擎的线程模型。
+
+   `bound-fn*` 包装：调用方的动态绑定对 f 照常可见（与 `future` 的传导语义一致）——
+   见设计原则 §3「边界内一致」。"
+  [timeout-ms f]
+  (let [p    (promise)
+        ;; bound-fn* 须在**调用方的**绑定帧内求值，故不能挪进 startVirtualThread
+        task (bound-fn* (fn []
+                          (deliver p (try [:ok (f)]
+                                          (catch Throwable e [:err e])))))
+        th   (Thread/startVirtualThread task)
+        r    (deref p timeout-ms ::timeout)]
+    (if (= r ::timeout)
+      (do (.interrupt th) [:timeout])
+      r)))
 
 (defn get-tags
   "获取 tool function 的标签集合
@@ -454,11 +502,15 @@
            (cond-> {:success true
                     :result (if (string? result) result (pr-str result))}
              (seq writes) (assoc :writes writes)))
-         (catch Exception e
+         ;; 收 Throwable 而非 Exception：工具的 StackOverflowError（深递归 bug）
+         ;; 此前会逃逸并打死整个 agent 循环。致命的（OOM 等）仍原样上抛，
+         ;; 判据见 err/fatal-throwable?
+         (catch Throwable t
+           (when (err/fatal-throwable? t) (throw t))
            {:success false
             ;; NPE 等异常 getMessage 为 nil，直接用会喂给 LLM 空错误 "错误: "；
             ;; 回退异常类名，保证错误可读。
-            :error (or (not-empty (.getMessage e))
-                       (.getName (class e)))
+            :error (or (not-empty (.getMessage t))
+                       (.getName (class t)))
             ;; 故障类别（S2 屏障路由）：:semantic | :transient | :environment
-            :error-class (err/classify-exception e)}))))))
+            :error-class (err/classify-exception t)}))))))

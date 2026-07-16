@@ -7,7 +7,7 @@
             [clojure.string]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.tool :refer [deftool]]
+            [im.ttalk.agent.tool :as tool :refer [deftool]]
             [im.ttalk.agent.advisor :as flt]))
 
 ;;; ============================================================
@@ -326,7 +326,12 @@
       (is (< (count (second @lines)) 40)))))
 
 ;;; ============================================================
-;;; 内置 filter：timeout / approval（此前无覆盖）
+;;; 超时机制（tool/call-with-timeout —— 唯一实现，kernel/invoke-tool 消费）
+;;; + 内置 filter：approval
+;;;
+;;; 注：timeout-filter 已删除（2026-07-16）——超时是内建机制：工具声明 >
+;;; 引擎缺省 > 不超时，由 invoke-tool 强制。下面的机制测试直接打
+;;; call-with-timeout 本体；端到端（声明/引擎缺省/优先级）见 kernel 级测试。
 ;;; ============================================================
 
 (defn- run-tool-chain
@@ -334,100 +339,49 @@
   [filter-map terminal req]
   ((flt/build-chain [(:tool filter-map)] terminal) req))
 
-(deftest timeout-filter-test
-  (testing "下游超时 → 返回超时结果（不抛异常），且不带 :writes（写意图不生效）"
-    (let [slow (fn [_req] (Thread/sleep 60000) {:result "never" :writes {:x 1}})
-          resp (run-tool-chain (flt/timeout-filter 100) slow
-                               {:function {:name :slow} :args {} :context {:k 1}})]
-      (is (clojure.string/includes? (:result resp) "超时"))
-      (is (nil? (:writes resp)))))
-
-  (testing "下游按时完成 → 原样透传（含 :writes）"
-    (let [fast (fn [_req] {:result "ok" :writes {:x 1}})
-          resp (run-tool-chain (flt/timeout-filter 5000) fast
-                               {:function {:name :fast} :args {} :context :ctx})]
-      (is (= "ok" (:result resp)))
-      (is (= {:x 1} (:writes resp)))))
-
-  (testing "超时后后台任务被中断（future-cancel 生效）"
+(deftest call-with-timeout-mechanism-test
+  (testing "超时 → [:timeout]，且下游线程收到中断（可中断的阻塞不泄漏）"
     (let [interrupted? (promise)
-          slow (fn [_]
-                 (try (Thread/sleep 60000)
-                      (catch InterruptedException _ (deliver interrupted? true)))
-                 {:result "never"})]
-      (run-tool-chain (flt/timeout-filter 100) slow
-                      {:function {:name :slow} :args {} :context nil})
+          r (tool/call-with-timeout 100
+              (fn [] (try (Thread/sleep 60000)
+                          (catch InterruptedException _ (deliver interrupted? true)))
+                  "never"))]
+      (is (= [:timeout] r))
       (is (true? (deref interrupted? 2000 :timeout))
-          "慢工具线程应收到中断，不泄漏工作线程"))))
+          "慢任务线程应收到中断，不泄漏工作线程")))
 
-(deftest timeout-filter-priority-test
-  (testing "工具声明的 :timeout（经 :function :timeout 抵达）优先于 filter 缺省——声明更紧则更早超时"
-    (let [slow (fn [_] (Thread/sleep 60000) {:result "never"})
-          resp (run-tool-chain (flt/timeout-filter 60000) slow
-                               {:function {:name :slow :timeout 100} :args {} :context nil})]
-      (is (clojure.string/includes? (:result resp) "超时"))
-      (is (clojure.string/includes? (:result resp) "100ms")
-          "超时消息报的是工具声明值，不是 filter 缺省")))
+  (testing "按时完成 → [:ok v] 原样透传"
+    (is (= [:ok {:result "ok" :writes {:x 1}}]
+           (tool/call-with-timeout 5000 (fn [] {:result "ok" :writes {:x 1}})))))
 
-  (testing "声明更宽也以声明为准——filter 缺省很紧不打断长任务"
-    (let [slowish (fn [_] (Thread/sleep 300) {:result "ok"})
-          resp (run-tool-chain (flt/timeout-filter 50) slowish
-                               {:function {:name :slowish :timeout 5000} :args {} :context nil})]
-      (is (= "ok" (:result resp)))))
-
-  (testing "未声明（:timeout 缺席/nil）→ 回落 filter 缺省"
-    (let [slow (fn [_] (Thread/sleep 60000) {:result "never"})
-          resp (run-tool-chain (flt/timeout-filter 100) slow
-                               {:function {:name :slow :timeout nil} :args {} :context nil})]
-      (is (clojure.string/includes? (:result resp) "超时")))))
+  (testing "f 抛异常 → [:err 原异常]（不包 ExecutionException，调用方拿到原对象）"
+    (let [e (ex-info "boom" {:k 1})
+          [tag t] (tool/call-with-timeout 5000 (fn [] (throw e)))]
+      (is (= :err tag))
+      (is (identical? e t)))))
 
 (def ^:dynamic *tenant* :none)
 
-(deftest timeout-filter-binding-conveyance-test
-  (testing "调用方的动态绑定对下游可见（回归：改用虚拟线程时丢了 clojure.core/future 的绑定传导——静默给根值）"
-    (let [probe (fn [_] {:result (str *tenant*)})]
-      (binding [*tenant* :acme]
-        (is (= ":acme" (:result (run-tool-chain (flt/timeout-filter 5000) probe
-                                                {:function {:name :probe} :args {} :context nil})))))))
+(deftest call-with-timeout-environment-test
+  (testing "调用方的动态绑定对 f 可见（回归：改用虚拟线程时曾丢掉 clojure.core/future 的绑定传导——静默给根值）"
+    (binding [*tenant* :acme]
+      (is (= [:ok :acme] (tool/call-with-timeout 5000 (fn [] *tenant*))))))
 
-  (testing "挂不挂 timeout-filter 不改变工具看到的 binding（与内联路径一致）"
-    (let [probe (fn [_] {:result (str *tenant*)})
-          terminal-only #((flt/build-chain [] probe) %)]
-      (binding [*tenant* :acme]
-        (is (= (:result (terminal-only {:function {:name :probe}}))
-               (:result (run-tool-chain (flt/timeout-filter 5000) probe
-                                        {:function {:name :probe} :args {} :context nil}))))))))
-
-(deftest timeout-filter-thread-model-test
-  (testing "下游跑在虚拟线程上（回归：曾用 clojure.core/future = send-off 平台线程，把工具函数体搬离引擎的线程模型）"
-    (let [virtual? (atom nil)
-          probe (fn [_]
-                  (reset! virtual? (.isVirtual (Thread/currentThread)))
-                  {:result "ok"})]
-      (run-tool-chain (flt/timeout-filter 5000) probe
-                      {:function {:name :probe} :args {} :context nil})
-      (is (true? @virtual?))))
-
-  (testing "下游抛异常 → 原样重抛（不包 ExecutionException，上游 catch 拿到原异常）"
-    (let [boom (fn [_] (throw (ex-info "boom" {:k 1})))]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"boom"
-            (run-tool-chain (flt/timeout-filter 5000) boom
-                            {:function {:name :boom} :args {} :context nil}))))))
+  (testing "f 跑在虚拟线程上（回归：曾用 clojure.core/future = send-off 平台线程——毁掉引擎线程模型，且平台线程上 socket read 无视 interrupt）"
+    (is (= [:ok true]
+           (tool/call-with-timeout 5000 (fn [] (.isVirtual (Thread/currentThread))))))))
 
 (deftest timeout-abandons-not-kills-test
-  (testing "诚实语义：CPU 忙循环打不断——超时结果返回后工具仍在后台跑（JVM 无 kill 原语，超时=放弃等待≠终止执行）"
+  (testing "诚实语义：CPU 忙循环打不断——[:timeout] 返回后任务仍在后台跑（JVM 无 kill 原语，超时=放弃等待≠终止执行）"
     (let [stop  (atom false)
           beats (atom 0)
-          busy  (fn [_]
-                  (while (not @stop) (swap! beats inc))
-                  {:result "done"})
-          resp  (run-tool-chain (flt/timeout-filter 100) busy
-                                {:function {:name :busy} :args {} :context nil})]
-      (is (clojure.string/includes? (:result resp) "超时"))
+          r (tool/call-with-timeout 100
+              (fn [] (while (not @stop) (swap! beats inc)) "done"))]
+      (is (= [:timeout] r))
       (let [b1 @beats]
         (Thread/sleep 100)
         (is (> @beats b1)
-            "超时结果已返回而忙循环仍在跳动——本测试钉住真实语义，防后人误以为有 kill"))
+            "超时已返回而忙循环仍在跳动——本测试钉住真实语义，防后人误以为有 kill"))
       (reset! stop true))))
 
 (deftool sleepy-declared
@@ -437,18 +391,105 @@
   (Thread/sleep 60000)
   x)
 
-(deftest tool-declared-timeout-end-to-end-test
-  (testing "deftool :timeout 经 build-func-def 抵达 timeout-filter（回归：:timeout 曾是死选项——白名单收下、元数据不产、零强制力）"
-    (let [k  (kernel/build-kernel {:service {}
-                                   :tools [#'sleepy-declared]
-                                   :filters [(flt/timeout-filter 60000)]})
+(deftool sleepy-plain
+  "睡 60s 但不声明超时（对照组）"
+  [[x :string "输入" :default "v"]]
+  (Thread/sleep 60000)
+  x)
+
+(defn- inline-sleepy
+  "内联工具：睡 60s，可带 :timeout 声明（对照 :serial/:retry 也是这么声明的）"
+  [nm & {:keys [timeout]}]
+  (cond-> {:name nm :description nm
+           :input_schema {:type "object" :properties {} :required []}
+           :handler (fn [_ _] (Thread/sleep 60000) "done")}
+    timeout (assoc :timeout timeout)))
+
+(deftest declared-timeout-works-without-any-filter-test
+  (testing "**开箱即生效**：裸 kernel、零 filter，deftool :timeout 照样强制
+            （回归 review#4：曾经唯独 :timeout 要用户手动挂 filter 才生效，
+             而 :serial / :retry / :return-direct 都是 react/kernel 直接消费——
+             用户写下声明却静默无效，正是我们要修的那个 bug 换了个位置）"
+    (let [k  (kernel/build-kernel {:service {} :tools [#'sleepy-declared]})
           t0 (System/currentTimeMillis)
           r  (kernel/invoke-tool k :sleepy-declared {} nil)
           dt (- (System/currentTimeMillis) t0)]
       (is (clojure.string/includes? (:value r) "超时"))
+      (is (= :transient (get-in r [:error :class])) "归 :transient → 声明 :retry 的工具可重试")
+      (is (< dt 5000) "声明的 200ms 生效——修复前无 filter 时睡满 60s")
+      (is (nil? (:writes r)) "超时结果不带 writes（事务性）")))
+
+  (testing "未声明 → 不超时、零开销（不起线程，与从前逐字相同）"
+    (let [k (kernel/build-kernel {:service {} :tools [#'sleepy-plain]})
+          done (promise)]
+      (.start (Thread. ^Runnable (fn [] (kernel/invoke-tool k :sleepy-plain {} nil)
+                                   (deliver done :finished))))
+      (is (= :still-running (deref done 600 :still-running))
+          "没有声明就没有超时——不该被任何缺省砍掉"))))
+
+(deftest inline-tool-declared-timeout-test
+  (testing "**内联工具的 :timeout 同样生效**（回归 review#1：曾只修了 var 工具那一半——
+            两个 func-def 构造点分头维护，inline 那个硬编码没带 :timeout；
+            而 inline 的 :serial / :retry 一直是生效的，独 :timeout 静默失效。
+            delegate-tool 恰恰是内联且跑整个子 agent，最需要超时的就是它）"
+    (let [k  (kernel/build-kernel {:service {} :tools [(inline-sleepy "slow" :timeout 200)]})
+          t0 (System/currentTimeMillis)
+          r  (kernel/invoke-tool k :slow {} nil)
+          dt (- (System/currentTimeMillis) t0)]
+      (is (clojure.string/includes? (:value r) "超时"))
       (is (= :transient (get-in r [:error :class])))
-      (is (< dt 5000) "以工具声明的 200ms 为准，而非 filter 的 60s 缺省——修复前此调用睡满 60s")
-      (is (nil? (:writes r))))))
+      (is (< dt 5000) "修复前：睡满 60s")))
+
+  (testing "内联工具未声明 → 不超时（与 var 工具对称）"
+    (let [k (kernel/build-kernel {:service {} :tools [(inline-sleepy "plain")]})]
+      (is (nil? (kernel/tool-timeout k :plain))))))
+
+(deftest declared-timeout-beats-engine-default-test
+  ;; 引擎缺省经 tcm/manager-timeout 读 :tool-manager 的 :timeout 字段——
+  ;; 按其契约，任何带该字段的值都可（invoke-tool 路径只读不执行），
+  ;; 故这里用 {:timeout ms} 桩即可，不必造真引擎（真引擎的测试在 client 模块）。
+  (testing "优先级：工具声明 > 引擎缺省（声明更**宽**时引擎缺省不砍它）"
+    (let [slowish (assoc (inline-sleepy "s" :timeout 5000)
+                         :handler (fn [_ _] (Thread/sleep 300) "done"))
+          k (kernel/build-kernel {:service {} :tools [slowish]
+                                  :tool-manager {:timeout 100}})]
+      (is (= "done" (:value (kernel/invoke-tool k :s {} nil)))
+          "引擎缺省 100ms < 下游 300ms，但声明 5000ms 胜出")))
+
+  (testing "优先级：工具声明 > 引擎缺省（声明更**紧**时提前超时，报的是声明值）"
+    (let [k (kernel/build-kernel {:service {}
+                                  :tools [#'sleepy-declared]
+                                  :tool-manager {:timeout 60000}})
+          r (kernel/invoke-tool k :sleepy-declared {} nil)]
+      (is (clojure.string/includes? (:value r) "200ms")
+          "报的是工具声明的 200ms，不是引擎的 60000ms")))
+
+  (testing "未声明的工具吃引擎缺省"
+    (let [k (kernel/build-kernel {:service {}
+                                  :tools [#'sleepy-plain]
+                                  :tool-manager {:timeout 150}})
+          r (kernel/invoke-tool k :sleepy-plain {} nil)]
+      (is (clojure.string/includes? (:value r) "150ms"))))
+
+  (testing "都没给 → 不超时（缺省语义）"
+    (let [quick (assoc (inline-sleepy "q")
+                       :handler (fn [_ _] (Thread/sleep 200) "done"))
+          k (kernel/build-kernel {:service {} :tools [quick]})]
+      (is (= "done" (:value (kernel/invoke-tool k :q {} nil)))))))
+
+(deftest timeout-validated-at-build-kernel-test
+  (testing "坏 :timeout 在**装配期**就炸，而非执行期（回归 review#3：
+            \"5s\" 曾每次调用抛 ClassCastException，-1 曾让工具每次静默立刻超时）"
+    (doseq [bad ["5s" -1 0 2.7]]
+      (is (thrown-with-msg?
+            clojure.lang.ExceptionInfo #":timeout 必须为正整数毫秒"
+            (kernel/build-kernel {:service {} :tools [(inline-sleepy "bad" :timeout bad)]}))
+          (str "应拒绝 " (pr-str bad)))))
+
+  (testing "合法值与未声明照常通过"
+    (is (some? (kernel/build-kernel {:service {} :tools [(inline-sleepy "ok" :timeout 500)]})))
+    (is (some? (kernel/build-kernel {:service {} :tools [(inline-sleepy "none")]})))
+    (is (some? (kernel/build-kernel {:service {} :tools [#'sleepy-declared]})))))
 
 (deftest approval-filter-test
   (testing "敏感工具 + 批准 → 执行下游"

@@ -112,6 +112,33 @@
           (instance? java.net.http.HttpTimeoutException e)) :transient
       :else :semantic)))
 
+(defn fatal-throwable?
+  "该 Throwable 是否**不该被收敛为工具错误**，必须原样上抛。
+
+   背景：工具执行的各层此前一律 `catch Exception`，于是 `Error` 全部逃逸——
+   一个工具的深递归 `StackOverflowError` 会打死整个 agent 循环，而分层错误路由
+   （:semantic/:transient/:environment）的全部意义就是「一个工具坏了不牵连别人」。
+   但也不能无差别 `catch Throwable`：吞掉 OOM 只会掩盖真因，且收敛动作本身还要
+   分配内存，多半当场再炸。故要一条判据。
+
+   **致命（放行）**：`VirtualMachineError` 中除 StackOverflowError 之外的那些
+   （`OutOfMemoryError` / `InternalError` / `UnknownError`——JVM 自身已坏，
+   继续跑工具没有意义）、`ThreadDeath`。
+
+   **不致命（收敛）**：其余一切，尤其是
+   - `StackOverflowError`——**工具自己的递归 bug**，栈一退就恢复，正是最该被
+     收敛成「这一个工具失败」的那类。这是我们与 Scala `NonFatal` 的**有意分歧**：
+     它把整个 `VirtualMachineError` 划为致命，但那是通用库的保守取舍；这里的
+     Throwable 来自**用户工具函数体**，栈溢出是它最常见的自伤方式。
+   - `AssertionError`（工具里的 `assert`）、`LinkageError` / `NoClassDefFoundError`
+     （该工具缺可选依赖）——都只说明**这个工具**不可用，不该牵连整轮。
+
+   收敛后经 `classify-exception` 归类（缺省 :semantic：工具 bug 重试无意义）。"
+  [^Throwable t]
+  (or (and (instance? VirtualMachineError t)
+           (not (instance? StackOverflowError t)))
+      (instance? ThreadDeath t)))
+
 ;;; ============================================================
 ;;; 错误判断
 ;;; ============================================================

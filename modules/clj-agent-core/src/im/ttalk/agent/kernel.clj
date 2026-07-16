@@ -38,7 +38,8 @@
   (:require [im.ttalk.agent.advisor :as filters]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.error :as err]
-            [im.ttalk.agent.tool :as tool]))
+            [im.ttalk.agent.tool :as tool]
+            [im.ttalk.agent.tool-calling-manager :as tcm]))
 
 (set! *warn-on-reflection* true)
 
@@ -53,6 +54,29 @@
 ;;; ============================================================
 ;;; Build API
 ;;; ============================================================
+
+(defn- validate-tool-timeouts!
+  "工具声明的 `:timeout` 必须是正整数毫秒，否则装配期即抛。
+
+   **为什么校验在这里**：这是 var 工具与内联工具汇合、且尚未开始执行的最早时点。
+   坏值若放行到执行期，症状极难排查——`\"5s\"` 每次调用抛 ClassCastException
+   （deref 要 long），`-1` 让该工具每次都**静默立刻超时**（永远跑不了，且错误
+   信息只说「超时」），`2.7` 被静默截断成 2ms。`:timeout` 刚从死选项改活，
+   把它的值一并管起来才算改完。
+
+   注：`tool/invoke` 直调（不经 kernel）不校验也无妨——没有 kernel 就没有 react
+   与 filter，声明本就无人消费，坏值伤不到人。"
+  [var-map inline-tools]
+  (doseq [[fn-key v] var-map
+          :let [t (tool/timeout-spec v)]
+          :when (not (tool/valid-timeout? t))]
+    (throw (ex-info (str "工具 " fn-key " 的 :timeout 必须为正整数毫秒，实为 " (pr-str t))
+                    {:tool fn-key :timeout t})))
+  (doseq [{:keys [name timeout]} inline-tools
+          :when (not (tool/valid-timeout? timeout))]
+    (throw (ex-info (str "内联工具 " name " 的 :timeout 必须为正整数毫秒，实为 "
+                         (pr-str timeout))
+                    {:tool name :timeout timeout}))))
 
 (defn build-kernel
   "构建 Kernel 实例
@@ -92,7 +116,8 @@
         ;; 内联工具：schema 去掉 :handler，handler 单独存入 inline-handlers
         compiled-inline-tools (mapv #(dissoc % :handler) inline-tools)
         inline-handler-map    (into {} (mapv #(vector (keyword (:name %)) (:handler %))
-                                             inline-tools))]
+                                             inline-tools))
+        _ (validate-tool-timeouts! var-map inline-tools)]
     (->Kernel service
               (vec filters)
               (into compiled-var-tools compiled-inline-tools)
@@ -168,23 +193,81 @@
     (when spec
       (merge default-retry-policy (when (map? spec) spec)))))
 
+(defn tool-timeout
+  "工具**自己声明**的 `:timeout`（毫秒）。var 工具查 `:tool/timeout` 元数据；
+   **内联工具查其配置 map 的 `:timeout` 键**——与 `serial-tool?` / `retry-policy` /
+   `return-direct-tool?` 逐字同款。
+
+   只答「这个工具声明了什么」，不含引擎缺省——那一层见 `effective-tool-timeout`。
+
+   返回: nil（未声明）| 正整数毫秒"
+  [kernel fn-name]
+  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
+    (if-let [v (get (:tool-vars kernel) fn-key)]
+      (tool/timeout-spec v)
+      (:timeout (some #(when (= fn-key (keyword (:name %))) %)
+                      (:tools kernel))))))
+
+(defn effective-tool-timeout
+  "该工具**实际生效**的超时（毫秒），nil = 不超时。
+
+   **缺省不超时**——框架不替调用方决定何时放弃。要限时须显式给出，两个来源：
+
+     工具声明 `deftool {:timeout ms}`  >  引擎缺省 `(...-tool-calling-manager
+     {:timeout ms})`  >  **不超时**
+
+   工具声明最优先——它最清楚自己要跑多久（长任务的逃生舱就是「声明一个大的」）；
+   引擎缺省次之，让部署方能整体封顶而不必逐个改工具。
+
+   由 `invoke-tool` 消费并强制（见 `run-chain`）：**开箱即生效，不需要挂任何 filter**。"
+  [kernel fn-name]
+  (or (tool-timeout kernel fn-name)
+      (tcm/manager-timeout (:tool-manager kernel))))
+
 ;;; ============================================================
 ;;; Invoke API - invoke-tool（函数调用，经过 Filter 管道）
 ;;; ============================================================
 
 (defn- build-func-def
-  "构建 ToolRequest 的 :function 信息（供 tool filter 读取）"
+  "构建 ToolRequest 的 :function 信息（供 tool filter 读取）。
+
+   **var 工具与内联工具共用本函数**——曾经两个构造点分头维护，正是 `:timeout`
+   对内联工具静默失效的根因（`:serial`/`:retry`/`:return-direct` 都有 inline
+   分支，独 `:timeout` 漏了）。新增字段请只加在这里。"
   [fn-name tool-var]
-  (let [schema (when tool-var
-                 (:tool/schema (meta tool-var)))]
-    {:name      fn-name
-     :schema    schema
-     :sensitive (when tool-var
-                  (boolean (:tool/sensitive (meta tool-var))))
-     ;; 工具声明的超时毫秒（nil = 未声明）；由 timeout-filter 消费，
-     ;; 优先于 filter 构造时的缺省值。inline 工具无 var 无此声明。
-     :timeout   (when tool-var
-                  (tool/timeout-spec tool-var))}))
+  ;; 超时不在此列：它由 run-chain 在 filter 链**之外**强制（工具声明 > 引擎缺省），
+  ;; filter 里没有它的消费者——曾有的 :timeout 字段随 timeout-filter 一并删除，
+  ;; 没有读者的字段就是下一个死选项。
+  {:name      fn-name
+   :schema    (when tool-var (:tool/schema (meta tool-var)))
+   :sensitive (boolean (when tool-var (:tool/sensitive (meta tool-var))))})
+
+(defn- run-chain
+  "跑 tool filter 链；**生效超时**（工具声明 > 引擎缺省）非 nil 则**在此强制**。
+
+   **为什么在 invoke-tool 这一层**（而不是像 `:retry`/`:serial`/`:return-direct`
+   那样在 react）：那三个都是**循环 / 批次**策略——重试几次、能否并发、要不要
+   回灌，天然属于循环的职责。而 `:timeout` 界定的是**单次工具调用**的时间上限，
+   那正是 invoke-tool 自己的职责。放这里的收益是**不需要任何协调**：谁调
+   invoke-tool 谁就拿到超时（react、手搓循环、`run-tools`、直调皆然），
+   `timeout-filter` 只要见到声明就让位即可，不必反过来猜调用方是不是 react。
+
+   **缺省不超时 → 零开销**：既没声明、引擎也没给缺省时不起线程，与「没有超时机制」
+   逐字相同。框架不替调用方决定何时放弃。
+
+   超时结果用 filter 链的形状（`{:result :error}`），由调用方统一映射成
+   `{:value ...}`；`:transient` 类故可被 `:retry` 重试；不带 `:writes`（事务性）。"
+  [kernel fn-key chain req]
+  (let [t-ms (effective-tool-timeout kernel fn-key)]
+    (if-not t-ms
+      (chain req)
+      (let [[tag v] (tool/call-with-timeout t-ms #(chain req))]
+        (case tag
+          :ok      v
+          :err     (throw ^Throwable v)
+          :timeout {:result (str "工具调用超时（" t-ms "ms）")
+                    :error  {:class :transient
+                             :message (str "timeout " t-ms "ms")}})))))
 
 (defn invoke-tool
   "调用 Kernel 中注册的函数（经 tool filter 洋葱链）
@@ -212,7 +295,7 @@
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
     (if-let [inline-handler (get (:inline-handlers kernel) fn-key)]
       ;; 内联工具（由 delegate-tool 等构建）：通过同一 filter 链执行
-      (let [func-def {:name fn-key :schema nil :sensitive false}
+      (let [func-def (build-func-def fn-key nil)
             terminal (fn [req]
                        (try
                          (let [raw (inline-handler (:args req) (:context req))
@@ -221,12 +304,16 @@
                                               [raw nil])]
                            (cond-> {:result (if (string? res) res (pr-str res))}
                              (seq writes) (assoc :writes writes)))
-                         (catch Exception e
-                           (let [m (or (not-empty (.getMessage e)) (.getName (class e)))]
+                         ;; Throwable 而非 Exception：内联工具的 Error（如深递归的
+                         ;; StackOverflowError）此前逃逸并打死整轮。致命的仍上抛。
+                         (catch Throwable t
+                           (when (err/fatal-throwable? t) (throw t))
+                           (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
                              {:result (str "错误: " m)
-                              :error  {:class (err/classify-exception e) :message m}}))))
+                              :error  {:class (err/classify-exception t) :message m}}))))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
-            out   (chain {:function func-def :args args :context context})]
+            out   (run-chain kernel fn-key chain
+                             {:function func-def :args args :context context})]
         (cond-> {:value (:result out)}
           (:writes out) (assoc :writes (:writes out))
           (:error out)  (assoc :error (:error out))))
@@ -241,11 +328,14 @@
             func-def (build-func-def fn-key tool-var)
             terminal (fn [req]
                        (let [exec (try (tool/invoke tool-var (:args req) (:context req))
-                                       (catch Exception e
+                                       ;; tool/invoke 自己已收 Throwable；这里是
+                                       ;; 它之外（arity 不符等）的兜底，同样放行致命
+                                       (catch Throwable t
+                                         (when (err/fatal-throwable? t) (throw t))
                                          {:success false
-                                          :error (or (not-empty (.getMessage e))
-                                                     (.getName (class e)))
-                                          :error-class (err/classify-exception e)}))]
+                                          :error (or (not-empty (.getMessage t))
+                                                     (.getName (class t)))
+                                          :error-class (err/classify-exception t)}))]
                          (if (:success exec)
                            (cond-> {:result (:result exec)}
                              (:writes exec) (assoc :writes (:writes exec)))
@@ -253,7 +343,8 @@
                             :error  {:class (or (:error-class exec) :semantic)
                                      :message (:error exec)}})))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
-            out   (chain {:function func-def :args args :context context})]
+            out   (run-chain kernel fn-key chain
+                             {:function func-def :args args :context context})]
         (cond-> {:value (:result out)}
           (:writes out) (assoc :writes (:writes out))
           (:error out)  (assoc :error (:error out)))))))
