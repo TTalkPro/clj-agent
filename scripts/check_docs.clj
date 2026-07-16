@@ -6,7 +6,9 @@
    `:build-result-msgs`：`model/service.clj` 明写它已移除，四个 README 却还在
    头部特性 bullet 里教人用它。这类腐烂靠人肉复查挡不住，所以机器化。
 
-   四项检查：
+   分两组：**README 查内容**（与代码对不对得上），**docs/ 查结构**（记账烂没烂）。
+
+   A 组 —— 六个 README × 代码（内容检查）：
 
    1. **ns 存在**：README 里点名的 `im.ttalk.agent.*` 命名空间必须真的存在
       （抓到过 `im.ttalk.agent.model.types` —— 从来不存在的幽灵）；
@@ -17,9 +19,29 @@
    4. **墓碑**：已删除的 API 不得在文档里复活。map 键、宏选项这类东西没法靠
       resolve 检查，故显式登记——**删 API 时往 tombstones 里加一条**。
 
+   B 组 —— `docs/` 设计文档（结构检查，2026-07-16 加）：
+
+   5. **状态行**：每份设计文档头部必须有 `状态：` + ✅/🚧/🗑️ 之一。
+      这是「这份文档现在还算不算数」的唯一判据（`docs/README.md` 的约定）；
+   6. **跨文档引用**：文档里点名的 `*.md` 必须真的存在——文件移动/改名后没跟就报；
+   7. **索引覆盖**：`docs/` 下每份文档都得被 `docs/README.md` 收录（对标检查 2）。
+
+   **为什么 docs/ 只查结构、不查内容**（重要，别顺手把 A 组套过来）：
+   README 是**教学面**——教人用 API，故不得出现墓碑 API；设计文档是**历史记录**——
+   它的职责恰恰包含「记录某 API 为何被删」。把墓碑/ns 检查套到 `docs/` 会当场
+   自我触发：`response-path-consolidation.md` 一份就踩中 3 条墓碑，因为它就是
+   `:build-result-msgs` / `model.types` / `:assistant-msg` 三者的**死亡证明**。
+
+   动机（B 组）：2026-07-16 复核 TASK 的 6 个 `[~]` 未完成项，发现**没有一个是
+   「正在做」**——2 个活儿干完了没改勾，3 个设计文档里本就是拍板结论、TASK 记成了
+   欠债，还有 2 笔账挂在早已被整个删除的 `converter/` 子系统上。A 组照不到这些：
+   它只查 README。记账腐烂和文档腐烂一样，靠人肉复查挡不住。
+
    设计取舍：**宁可漏报，不可误报**。alias 没在同文件 require 里绑定就跳过
    （Spring 类名、`my-vector-store/search` 这类占位符、`scripts/test-all.sh`
-   这类路径因此天然不参检）。一个会误报的门禁很快就会被加 `|| true` 绕过。
+   这类路径因此天然不参检）；`.md` 引用按「同目录 / 仓库根 / docs/」三处任一命中
+   即放行，散文里的占位符（`docs/xxx.md`）不参检。
+   一个会误报的门禁很快就会被加 `|| true` 绕过。
 
    用法：
      clojure -M scripts/check_docs.clj        # 全部检查，有问题 exit 1"
@@ -46,6 +68,56 @@
 ;;; 允许不被任何 README 提及的 ns（内部实现细节）
 (def ^:private coverage-allowlist
   #{})
+
+;;; ============================================================
+;;; docs/ 设计文档（B 组：结构检查）
+;;; ============================================================
+
+(def ^:private docs-dir "docs")
+
+(def ^:private status-markers
+  "状态行必须带其一——读者据此一眼判断这份文档现在还算不算数。
+   ✅ 已实施 / 🚧 进行中 / 🗑️ 已废弃留档（约定见 docs/README.md）。"
+  ["✅" "🚧" "🗑️"])
+
+(def ^:private status-exempt
+  "{文件 豁免理由}——不是「某项工作的设计记录」，故无状态可言。
+   加豁免前先问：它真的不是设计文档吗？还是只是懒得写状态？"
+  {"docs/README.md"            "索引本身"
+   "docs/design-principles.md" "项目级原则，不随某项工作完成/废弃"})
+
+(def ^:private extra-ref-files
+  "除 docs/ 与六个 README 外，同样参与「跨文档引用」检查的文件。
+   两个账本要查：2026-07-16 的 design/→docs/ 合并就在它俩里留下过一堆死路径。"
+  ["TASK.md" "CHANGELOG.md" "examples/streaming/README.md"])
+
+(defn- design-docs []
+  (->> (.listFiles (io/file docs-dir))
+       (filter #(str/ends-with? (.getName ^java.io.File %) ".md"))
+       (map #(str docs-dir "/" (.getName ^java.io.File %)))
+       sort))
+
+(defn- placeholder-md?
+  "散文里的占位符（如「老路径 `design/xxx.md` → `docs/xxx.md` 一一对应」），
+   不是真引用。宁可漏报：占位符命名一望即知，误放行几个也比误报强。"
+  [basename]
+  (boolean (re-matches #"(?i)(x{2,}|y{2,}|z{2,}|foo|bar|name|<[^>]+>|\*)\.md" basename)))
+
+(defn- md-refs
+  "文件里点名的 .md：markdown 链接 [..](x.md) 与反引号 `x.md` 两种写法。
+   跳过 http(s)、纯锚点与占位符。"
+  [text]
+  (->> (concat (map second (re-seq #"\]\((?!https?:|#)([^)#\s]+\.md)[^)]*\)" text))
+               (map second (re-seq #"`([\w./\-]+\.md)`" text)))
+       (remove #(placeholder-md? (last (str/split % #"/"))))
+       set))
+
+(defn- ref-resolves?
+  "同目录 / 仓库根 / docs/ 三处任一命中即算数（宽松——宁可漏报不误报）。"
+  [from ref]
+  (let [dir (or (.getParent (io/file ^String from)) ".")]
+    (boolean (some #(.exists (io/file ^String %))
+                   [(str (io/file dir ref)) ref (str (io/file docs-dir ref))]))))
 
 ;;; ============================================================
 ;;; 源码 ns 清单
@@ -180,6 +252,43 @@
       (swap! problems conj
              (format "%s: %s/%s 无法 resolve（%s 里没有 %s）" f a s ns-sym s)))))
 
+;;; ---- B 组：docs/ 结构检查 ------------------------------------
+
+(defn- check-doc-status [problems]
+  (doseq [f (design-docs)
+          :when (not (contains? status-exempt f))
+          :let [head (->> (str/split-lines (slurp f)) (take 12) (str/join "\n"))]]
+    (cond
+      (not (re-find #"状态[：:]" head))
+      (swap! problems conj
+             (format "%s: 头部 12 行内没有「状态：」行——docs/README.md 的约定是先看状态再读正文" f))
+
+      (not (some #(str/includes? head %) status-markers))
+      (swap! problems conj
+             (format "%s: 状态行缺 %s 之一——读者无法一眼判断这份文档现在还算不算数"
+                     f (str/join " / " status-markers))))))
+
+(defn- check-doc-refs [problems]
+  (doseq [f (concat (design-docs) doc-files (filter #(.exists (io/file ^String %))
+                                                    extra-ref-files))
+          :let [text (strip-ignored (slurp f))]
+          ref (md-refs text)
+          :when (not (ref-resolves? f ref))]
+    (swap! problems conj
+           (format "%s: 引用了不存在的文档「%s」（文件移动/改名后没跟）" f ref))))
+
+(defn- check-doc-index [problems]
+  (let [index (str docs-dir "/README.md")]
+    (if-not (.exists (io/file index))
+      (swap! problems conj (format "%s 不存在——docs/ 索引是新文档不隐身的唯一保障" index))
+      (let [listed (set (map second (re-seq #"\]\(([\w.\-]+\.md)\)" (slurp index))))]
+        (doseq [f (design-docs)
+                :let [base (.getName (io/file ^String f))]
+                :when (and (not= base "README.md")
+                           (not (contains? listed base)))]
+          (swap! problems conj
+                 (format "%s 存在于 docs/，但 %s 没收录（新文档在索引里隐身）" f index)))))))
+
 ;;; ============================================================
 ;;; main
 ;;; ============================================================
@@ -193,15 +302,21 @@
            (catch Throwable t
              (swap! problems conj (format "无法加载命名空间 %s: %s" n (.getMessage t))))))
 
+    ;; A 组：README × 代码（内容）
     (check-tombstones problems)
     (check-ns-exists problems known)
     (check-ns-coverage problems known)
     (check-symbols problems)
+    ;; B 组：docs/ 设计文档（结构）——**不套 A 组**，理由见 ns docstring
+    (check-doc-status problems)
+    (check-doc-refs problems)
+    (check-doc-index problems)
 
     (println)
     (if (empty? @problems)
       (do (println "✓ 文档与代码一致：" (count doc-files) "个 README，"
                    (count known) "个命名空间，" (count tombstones) "条墓碑")
+          (println "✓ 设计文档结构一致：" (count (design-docs)) "份 docs/（状态行 / 跨文档引用 / 索引覆盖）")
           (System/exit 0))
       (do (println "✗ 发现" (count @problems) "处文档与代码不符：\n")
           (doseq [p (sort @problems)] (println " •" p))
