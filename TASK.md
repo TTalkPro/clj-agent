@@ -762,6 +762,116 @@
   全套 **314 tests / 1295 assertions / 0 failures**（净 -2 tests：filter 自身
   测试删除多于新增），live 20 项全过，5 条墓碑。
 
+## P9 — Code review 第二轮（2026-07-16）✅ 全部完成
+
+> 来源：/code-review high（8 个 finder 角度并行 → 35 候选 → 去重 10 → 3 个独立
+> 验证 agent 逐条核实，**10/10 CONFIRMED**，每条有逐行证据；最重一条被 4 个角度
+> 独立命中）。范围 = P8 全部未提交改动。
+>
+> **终态：316 tests / 1307 assertions / 0 failures**（core 98/373 + client 112/440 +
+> provider 106/494）。MiniMax live 20 项全过（第五遍稳定）。
+> **根因一（R1/R2/R3）一举修掉**：超时从 run-chain（包整条 filter 链）下沉到
+> terminal（只包工具本体）；**根因二（R4/R5）**：manager-timeout 改动态 var
+> 不走 kernel 反向指针 + 装配期校验。R6-R10 各自独立小修。
+>
+> **结构性结论**：10 条几乎全是 P8 最后两个设计动作的连锁后果，不是零散笔误——
+> 根因一 = `run-chain` 把超时包在**整条 filter 链**外面（该包 terminal）；
+> 根因二 = `manager-timeout` 的 **duck-typing 缝**（字段读取 + kernel 反向指针）。
+> 每步局部全绿、但「包链还是包 terminal」「字段还是协议」两个隐含面没被追问。
+> 建议顺序：先两个根因（各自一举修掉 3-4 条），delegate try/finally 与 OOM 拆包
+> 独立小修，文档五处随手。
+
+### 根因一：超时包裹点错——包了整条 filter 链，该只包 terminal（工具本体）
+
+- [x] **R1 审批等待被算进工具超时预算，且 :retry 重复弹审批**（`kernel.clj:264`
+  `run-chain`）：approval-filter 的阻塞 read-line 在 `call-with-timeout` 内——
+  操作员 8s 敲 y，5s 声明的工具从未执行却报「超时」:transient；声明 :retry 则
+  整链重跑、对人重复弹框 max-retries 次，每次同样必死的时钟。旧 timeout-filter
+  时代可把审批注册在计时区外，该控制点已不存在。**修法**：超时下沉到 terminal
+  （beamai 也只计时 handler）——filter 链在计时区外。
+- [x] **R2 任何超时生效即把工具本体搬上新 VT——Sequential「调用方线程」与
+  ThreadPool 舱壁承诺双双静默失效**（`react.clj:330/380` + `kernel.clj:264`）：
+  Java ThreadLocal/MDC 丢失（bound-fn* 只传 Clojure 动态绑定）；池线程只在 deref
+  上等，pool-size 只 bound 住 deref 不 bound 真干活的线程，舱壁退化成信号量；
+  引擎级缺省下每个快调用都付 VT+promise+bound-fn 开销。**修法**：与 R1 同源——
+  有 executor 的引擎在**它自己拥有的线程**上执行并用 `Future.get(ms)` 计时，
+  仅无 executor 的串行路径才起 VT；或如实降级文档承诺。
+- [x] **R3 超时结果在链外合成——任何 :tool filter（日志/指标/审计）永远观察不到
+  超时**（`kernel.clj:267`）：旧 filter 在洋葱内产出结果、外层可见（live 脚本的
+  witness 探针即此写法——删 filter 当天它被迫改回调，**就是本缺陷的第一个受害者，
+  当时没认出来**）；且被弃链可能在被 interrupt 的 VT 上跑完，外层 filter 对已丢弃
+  结果照常 post 处理，审计日志记「成功」而 LLM 收到「超时」。**修法**：随 R1
+  下沉后超时结果天然在链内产生，此条自动消除。
+
+### 根因二：`manager-timeout` 的 duck-typing 缝
+
+- [x] **R4 引擎 :timeout 读 kernel 反向指针而非实际执行的 manager**
+  （`kernel.clj:225` `effective-tool-timeout`）：instrumented wrapper
+  （reify 委派——live 脚本自己的先例模式）→ manager-timeout 返 nil，30s 部署
+  封顶静默失效；独立 manager 直接跑批次 → 它自己的 :timeout 被忽略。现有测试
+  把同一 tm 同时传 build-kernel 与 via-manager，遮住了分岔。**修法**：超时随
+  执行路径传递（execute-tool-calls opts 或协议方法），不走 kernel 字段回读。
+- [x] **R5 duck-typed :timeout 零校验 + map 桩先例是陷阱**（`kernel.clj:120`）：
+  `check-timeout-opt!` 只覆盖三个 react 构造器；`:tool-manager {:timeout 0}`
+  （0 truthy）→ 每次调用瞬时超时、`"5s"` → 每次 CCE——正是装配期校验声称要
+  消灭的病，隔一个字段重现。核心测试立的 `{:timeout 150}` map 桩进真实 react
+  循环会在 execute-tool-calls 抛 No implementation of method。**修法**：
+  build-kernel 对 `:tool-manager` 的 `:timeout` 一并过 `valid-timeout?`（或
+  随 R4 协议化后由构造器统一收口）；测试桩改用真引擎或 reify。
+
+### 独立修复
+
+- [x] **R6 delegate 被引擎超时打断 → kill!/drop! 永不执行——子 agent 泄漏且
+  继续烧 token**（`delegate.clj:48`）：await! 的 promise deref（底层
+  CountDownLatch.await）被 interrupt 时抛 InterruptedException，run-sync 的
+  后续绑定跳过；且 delegate 的 :timeout 配置只喂 await!、未上报为 inline map
+  的 :timeout 声明，引擎缺省因此能砍它。**修法**：run-sync 用 try/finally 保
+  kill!/drop!；delegate-tool 把 :timeout 同时写进 inline map（声明恒优先）。
+- [x] **R7 executor 路径上致命 Throwable 被 Future.get 洗成 ExecutionException**
+  （`react.clj:177`）：invoke-one 忠实重抛的 OOM 被 FutureTask 捕获、`.get` 抛
+  ExecutionException（普通 Exception）——逃逸类型随引擎而变（串行=裸 OOM，
+  并发=EE），违反 §3「引擎不改变可观察语义」；新测试只走内联路径。**修法**：
+  `.get` 处 catch ExecutionException 拆 cause，致命原样重抛；补 executor 路径
+  的 OOM 测试。
+- [x] **R8 run-tools 半应用引擎**（`react.clj:426`）：调度恒串行（无视
+  :tool-manager，这半是文档记录过的刊式决定），但同一 manager 的 :timeout 却经
+  invoke-tool 生效——不对称是 P8 新引入。**修法**（最小）：docstring 如实写明
+  「恒串行不看引擎；但吃引擎的 :timeout 缺省」；（彻底）run-tools 接受可选
+  manager。
+
+### 文档/测试陈述与实现相反（随根因修复顺手改）
+
+- [x] **R9 ThreadPool :timeout docstring 因果倒置**（`react.clj:380`）：写「被
+  超时放弃的工具永久占池槽」——实际被超时的恰恰不占（跑在 VT 上、槽在 deadline
+  释放），真占槽的是**无**超时的内联卡死。按此文案做容量规划/告警的运维会盯着
+  健康的池、看不见池外堆积。（若 R2 改回池内执行计时，本条文案反而变对——
+  与 R2 联动改。）
+- [x] **R10 三处源码/测试陈述过时**（墓碑门禁只扫 README 管不到）：
+  `tool_test.clj:67`「声明本身无强制力：不挂 timeout-filter 的裸 invoke 不超时」
+  ——与「开箱即生效」直接矛盾（断言仅因裸 invoke 绕过 kernel 才碰巧通过）；
+  `kernel.clj:253` run-chain docstring 现在时引用已删的 timeout-filter；
+  `react.clj:69` tool-executor docstring 仍称承载所有工具批（现仅 VT 引擎用）。
+
+### 次级（10 条上限挤出的 cleanup 候选，finder 发现、未过独立验证）
+
+> **未做**——均为 cleanup 候选（helper 提取 / 消息串去重 / 预计算 map /
+> :retry 校验 / live 冗余），无行为影响。留给下一轮优化。
+
+- [ ] catch-Throwable 收敛块 4 处手抄（tool.clj / kernel.clj ×2 / react.clj）→
+  提一个 `err/contain-throwable` helper，防三元组（fatal 检查/nil-message 回退/
+  分类）漂移
+- [ ] 「:timeout 必须为正整数毫秒」消息串 3 处手抄且被两个模块的测试用正则钉住 →
+  提 `tool/check-timeout!` helper
+- [ ] 内联工具 by-name 线性扫的第 4 份拷贝（tool-timeout）+ 每次 invoke 的 O(n)
+  热路径扫描 → build-kernel 装配期预计算 `{fn-key timeout}` map（validate 已在
+  同一时点遍历过全部工具）
+- [ ] :retry 声明无装配期校验（与 :timeout 校验不对称）：`{:max-retries "3"}`
+  运行期在 `(long ...)` 抛 CCE 且被收敛成指向工具的 :semantic 错误——症状偏离
+  病因，正是装配期校验要防的类别
+- [ ] 杂项：live 脚本 `(cond-> {} default-ms ...)` 冗余（`{:timeout nil}` 合法）；
+  优先级矩阵测试跨模块重复（kernel 层已钉，client 只需构造器透传断言）；
+  react_test「缺省不超时」400ms sleep 可减半
+
 ### 📋 历史账本
 
 2026-06 审查（P0/P1/P2 + 测试盲区）与 2026-07 优化轮（P3 + A/B/C 组）全部清零。
