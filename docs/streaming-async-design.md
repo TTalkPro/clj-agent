@@ -1,8 +1,11 @@
 # BUG2 真流式 + 异步框架整合方案
 
-> 状态：✅ **全部落地**（2026-07-10 核对：传输层、anthropic + openai_compat 两条路径、
-> kernel/client `chat-stream` 接入均完成，见下方「已落地」清单；唯一待续项为按需的
-> Undertow WebSocket 示例）。
+> 状态：✅ **全部落地，无待续项**（2026-07-10 核对：传输层、anthropic + openai_compat
+> 两条路径、kernel/client `chat-stream` 接入均完成，见下方「已落地」清单）。
+> **2026-07-16 复核**：原状态行所称「唯一待续项为按需的 Undertow WebSocket 示例」
+> **已过期**——`examples/streaming/undertow_example.clj` 含完整 WebSocket 段
+> （ring-undertow-adapter 一等支持），四个 server（http-kit / Undertow / Jetty / Aleph）
+> 的 WS + SSE 示例齐备。
 >
 > **2026-07-10 优化轮补记**：
 > - 三处流式同步编排（openai_compat / anthropic / dashscope 各自手写 promise 对 + cancel
@@ -58,36 +61,21 @@ Web 框架整合（Luminus/Undertow 等）只作 `examples/` 示例，**不进 c
 
 ---
 
-## 0.5 设计原则：框架无关（硬约束，不可违反）
+## 0.5 适用的设计原则
+
+本文遵循 **[`design-principles.md`](design-principles.md) §2《框架无关》**
+（硬约束）：
 
 > **agent 框架是一个库，不是 web 应用。core 永远不依赖、不捆绑任何 web 框架
 > （Luminus / Ring / Undertow / Jetty / Aleph / http-kit-server 一律不行）。**
 
-理由：
+**本文是该原则的出处**。理由（依赖方向 / 回调原语即解耦边界 / 越薄的边界越长寿）、
+落地约束（库本体零 web 依赖、集成代码只进 examples、不挑框架站队、适配器须独立可选
+模块）与现状核对**不在本文重述**，见 `design-principles.md` §2。
 
-1. **依赖方向**：web 应用**依赖**本库，不能反过来。core 一旦依赖某 web 框架，等于强迫所有
-   使用者都用它——而 agent 的场景远不止 web（CLI、桌面、批处理、MQ 消费者、非 Luminus 的 web 栈…）。
-2. **回调原语就是解耦边界**：`on-token / on-complete / on-error + cancel` 是最小的 push 契约，
-   任何 sink 都能接（http-kit `send!` / Undertow `ServerSentEventConnection.send` / Aleph manifold
-   stream / Jetty async body / 终端 print / core.async channel…）。**框架特定的东西全在适配那一层，
-   core 一无所知。**
-3. **越薄的边界越长寿**：web 框架会换（Luminus 默认 server 就在 http-kit→Immutant→Undertow 间换过几轮），
-   JDK `java.net.http` + 一个回调契约不会。绑死某框架 = 跟着它的生命周期走。
-
-落地约束：
-
-| 层 | 约束 |
-|---|---|
-| **库本体**（clj-agent-core / clj-agent-client / clj-agent-provider 的 src） | 零 web 框架依赖。只暴露回调原语（`chat-stream` + on-token/cancel）。传输用 JDK `java.net.http`（非 web 框架） |
-| **集成代码** | 只放 `examples/`（文档级、可跑）；**不进 src、不进核心 `:deps`**。web 依赖只在该 example 的 alias 里 |
-| **不挑框架站队** | 不做"我们集成 Luminus"这种定位。要给示例就**覆盖多个**（http-kit / Undertow-SSE / Aleph）或讲**通用模式**（"拿到 token 往你的 sink 写"） |
-| **若真要发适配器** | 单独的可选模块 + web 依赖标 `provided`/optional，绝不污染 core |
-
-现状核对（已满足）：`chat-stream` 只认回调原语、`stream_client` 用 JDK `java.net.http`、
-`deps.edn` 无任何 Ring/Luminus/Undertow/web-server 依赖。**本原则是"守住现状"，不是"待改造"。**
-
-> 注：下文第 3–4 节给出的 Ring SSE / Undertow / core.async 适配器代码，全部属于"**示例 / 可选**"
-> 范畴，**不是 core 的一部分**——按本原则它们只应出现在 `examples/` 或独立可选模块中。
+> **对本文的直接约束**：下文第 3–4 节给出的 Ring SSE / Undertow / core.async
+> 适配器代码，全部属于「**示例 / 可选**」范畴，**不是 core 的一部分**——
+> 按本原则它们只应出现在 `examples/` 或独立可选模块中。
 
 ---
 
