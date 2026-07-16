@@ -24,7 +24,9 @@
             [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.tool-calling-manager :as tool-calling-manager]
             [taoensso.timbre :as log])
-  (:import [java.util.concurrent Callable ExecutorService Executors Future]))
+  (:import [java.io Closeable]
+           [java.util.concurrent Callable ExecutorService Executors Future
+            ThreadFactory]))
 
 (set! *warn-on-reflection* true)
 
@@ -64,7 +66,11 @@
       (:cancel-token opts) (assoc :cancel-token (:cancel-token opts)))))
 
 (def ^:private tool-executor
-  "工具批次 map 阶段的共享虚拟线程 executor（与 subagent/manager 同款先例）。"
+  "工具批次 map 阶段的共享虚拟线程 executor（与 subagent/manager 同款先例）。
+
+   注意这是**进程全局**单例：同 JVM 所有 kernel 的工具批共享它。虚拟线程无界，
+   故不会「耗尽」，但也没有舱壁/限流/可关停边界——需要这些的场景注入
+   ThreadPoolToolCallingManager（每实例一个有界池）。"
   (delay (Executors/newVirtualThreadPerTaskExecutor)))
 
 (defn- invoke-with-retry
@@ -132,6 +138,76 @@
     :text (->> messages (keep :content) (clojure.string/join "\n"))
     :finish-reason :stop))
 
+(defn- gate-decisions
+  "批前串行预判（审批可交互，绝不并发），按原序返回决策。"
+  [gate tool-calls]
+  (mapv #(if gate (gate %) :proceed) tool-calls))
+
+(defn- run-inline
+  "map 阶段：按序内联执行，**不构造 Future**。"
+  [kernel tool-calls decisions tool-context on-tool-result]
+  (mapv (fn [tc d] (invoke-one kernel tc d tool-context on-tool-result))
+        tool-calls decisions))
+
+(defn- run-on-executor
+  "map 阶段：全部提交给 executor 后按原序收齐（屏障）。"
+  [^ExecutorService executor kernel tool-calls decisions tool-context on-tool-result]
+  (let [futs (mapv (fn [tc d]
+                     (.submit executor
+                              ^Callable
+                              (fn [] (invoke-one kernel tc d tool-context on-tool-result))))
+                   tool-calls decisions)]
+    (mapv (fn [^Future f] (.get f)) futs)))
+
+(defn- collect-batch
+  "reduce 阶段（屏障）：writes 按原始序折叠进 context；
+   messages / records / errors 按原始序排回。三个引擎共用，保证返回形状一致。"
+  [kernel tool-context init-records results]
+  (let [{:keys [context conflicts]}
+        (ctx/apply-writes tool-context
+                          (keep :writes results)
+                          (get-in kernel [:settings :state-slots]))]
+    (when (seq conflicts)
+      (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
+                conflicts))
+    ;; :writes 随消息进历史——event-sourcing 元数据，wire 层不发给 LLM；
+    ;; 失败/被拒调用无 writes，历史中自然缺席
+    {:messages (mapv (fn [{:keys [tc value writes]}]
+                       (msg/tool-result (:id tc) (:name tc) value writes))
+                     results)
+     :records  (into init-records
+                     (map (fn [{:keys [tc value rejected?]}]
+                            {:name   (keyword (:name tc))
+                             :args   (:args tc)
+                             :result (if rejected? :rejected value)}))
+                     results)
+     :errors   (into []
+                     (keep (fn [{:keys [tc error]}]
+                             (when error
+                               {:id      (:id tc)
+                                :name    (:name tc)
+                                :class   (:class error)
+                                :message (:message error)
+                                :tc      tc})))
+                     results)
+     :context  context}))
+
+(defn- execute-batch-via
+  "map + 屏障骨架，三个 manager 实现共用。
+
+   executor 为 nil → 全程内联（Sequential 引擎：从不构造 Future）。
+   executor 非 nil → 并行提交，但下列两种情形仍退化为内联：
+   - 批内任一工具声明 :serial（整批退化按序，声明级契约，manager 不得违反）
+   - 批内只有一个调用（并行无收益）"
+  [executor kernel tool-calls gate tool-context init-records on-tool-result]
+  (let [decisions (gate-decisions gate tool-calls)
+        serial?   (boolean (some #(kernel/serial-tool? kernel (:name %)) tool-calls))
+        results   (if (or (nil? executor) serial? (<= (count tool-calls) 1))
+                    (run-inline kernel tool-calls decisions tool-context on-tool-result)
+                    (run-on-executor executor kernel tool-calls decisions
+                                     tool-context on-tool-result))]
+    (collect-batch kernel tool-context init-records results)))
+
 (defn execute-batch
   "MapReduce 执行一批工具调用（设计见 docs/agent-loop-concurrency-design.md §9）。
 
@@ -160,83 +236,17 @@
   ([kernel tool-calls gate tool-context init-records]
    (execute-batch kernel tool-calls gate tool-context init-records nil))
   ([kernel tool-calls gate tool-context init-records on-tool-result]
-   (let [;; ① gate 预判：串行、按原序（审批可能交互）
-         decisions (mapv #(if gate (gate %) :proceed) tool-calls)
-         serial?   (boolean (some #(kernel/serial-tool? kernel (:name %)) tool-calls))
-         ;; ②③④ map + 屏障：并行（缺省）或整批退化按序
-         results   (if (or serial? (<= (count tool-calls) 1))
-                     (mapv (fn [tc d] (invoke-one kernel tc d tool-context on-tool-result))
-                           tool-calls decisions)
-                     (let [futs (mapv (fn [tc d]
-                                        (.submit ^ExecutorService @tool-executor
-                                                 ^Callable
-                                                 (fn [] (invoke-one kernel tc d tool-context
-                                                                    on-tool-result))))
-                                      tool-calls decisions)]
-                       (mapv (fn [^Future f] (.get f)) futs)))
-         ;; ⑤ reduce：writes 按原始序折叠（collect-all——错误/拒绝无 :writes）
-         {:keys [context conflicts]}
-         (ctx/apply-writes tool-context
-                           (keep :writes results)
-                           (get-in kernel [:settings :state-slots]))]
-     (when (seq conflicts)
-       (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
-                 conflicts))
-     ;; ⑥ messages/records 按原始序排回（:writes 随消息进历史——event-sourcing
-     ;; 元数据，wire 层不发给 LLM；失败/被拒调用无 writes，历史中自然缺席）
-     {:messages (mapv (fn [{:keys [tc value writes]}]
-                        (msg/tool-result (:id tc) (:name tc) value writes))
-                      results)
-      :records  (into init-records
-                      (map (fn [{:keys [tc value rejected?]}]
-                             {:name   (keyword (:name tc))
-                              :args   (:args tc)
-                              :result (if rejected? :rejected value)}))
-                      results)
-      :errors   (into []
-                      (keep (fn [{:keys [tc error]}]
-                              (when error
-                                {:id      (:id tc)
-                                 :name    (:name tc)
-                                 :class   (:class error)
-                                 :message (:message error)
-                                 :tc      tc})))
-                      results)
-       :context  context})))
+   (execute-batch-via @tool-executor kernel tool-calls gate tool-context
+                      init-records on-tool-result)))
 
-(defn- execute-batch-sequential
-  "顺序执行一批工具调用，保持 gate、retry、writes 屏障与返回形状契约。"
-  [kernel tool-calls gate tool-context init-records on-tool-result]
-  (let [decisions (mapv #(if gate (gate %) :proceed) tool-calls)
-        results (mapv (fn [tc d]
-                        (invoke-one kernel tc d tool-context on-tool-result))
-                      tool-calls decisions)
-        {:keys [context conflicts]}
-        (ctx/apply-writes tool-context
-                          (keep :writes results)
-                          (get-in kernel [:settings :state-slots]))]
-    (when (seq conflicts)
-      (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
-                conflicts))
-    {:messages (mapv (fn [{:keys [tc value writes]}]
-                       (msg/tool-result (:id tc) (:name tc) value writes))
-                     results)
-     :records (into init-records
-                    (map (fn [{:keys [tc value rejected?]}]
-                           {:name (keyword (:name tc))
-                            :args (:args tc)
-                            :result (if rejected? :rejected value)}))
-                    results)
-     :errors (into []
-                   (keep (fn [{:keys [tc error]}]
-                           (when error
-                             {:id (:id tc)
-                              :name (:name tc)
-                              :class (:class error)
-                              :message (:message error)
-                              :tc tc})))
-                   results)
-     :context context}))
+;;; ============================================================
+;;; 执行引擎（ToolCallingManager 实现）
+;;;
+;;; 换 manager = 换执行引擎：线程模型 + 隔离边界 + 调度策略。
+;;; 三个实现共用 execute-batch-via 的 map+屏障骨架，故返回形状与
+;;; :serial / :tool filter / :writes 折叠三条契约完全一致——引擎只决定
+;;; 「怎么把这批跑完」，不决定「跑的是什么」。
+;;; ============================================================
 
 (defrecord VirtualThreadToolCallingManager []
   tool-calling-manager/ToolCallingManager
@@ -249,7 +259,11 @@
                      (:on-tool-result opts)))))
 
 (defn virtual-thread-tool-calling-manager
-  "缺省 manager：虚拟线程并行，尊重 :serial 声明（现状行为）。"
+  "缺省引擎：每调用一根虚拟线程，尊重 :serial 声明（现状行为）。
+
+   线程模型：虚拟线程，无界。
+   隔离边界：**无**——用的是进程全局共享 executor（见 tool-executor）。
+   需要舱壁 / 限流 / 可关停边界时改用 thread-pool-tool-calling-manager。"
   []
   (->VirtualThreadToolCallingManager))
 
@@ -257,16 +271,97 @@
   tool-calling-manager/ToolCallingManager
   (execute-tool-calls [_ kernel response opts]
     (let [calls (response/response-tool-calls response)]
-      (execute-batch-sequential kernel calls
-                                (:gate opts)
-                                (:tool-context opts)
-                                (:records opts)
-                                (:on-tool-result opts)))))
+      ;; executor = nil：全程内联，从不构造 Future
+      (execute-batch-via nil kernel calls
+                         (:gate opts)
+                         (:tool-context opts)
+                         (:records opts)
+                         (:on-tool-result opts)))))
 
 (defn sequential-tool-calling-manager
-  "全串行 manager：每个工具按序执行，无并发。适合调试或严格副作用场景。"
+  "全串行引擎：每个工具按调用序在调用方线程执行，无并发。
+   适合调试或严格副作用排查。
+
+   线程模型：调用方线程，**全程不构造 Future**（故不背 ExecutionException 包装
+   与 Future.get 的中断语义——这是它与「给 VT 引擎塞一个 same-thread executor」
+   的本质区别）。
+   隔离边界：不持任何资源，无可争之物。"
   []
   (->SequentialToolCallingManager))
+
+(defn- pool-thread-factory
+  ^ThreadFactory [prefix]
+  (let [counter (atom 0)]
+    (reify ThreadFactory
+      (newThread [_ r]
+        (doto (Thread. ^Runnable r (str prefix (swap! counter inc)))
+          ;; daemon：用户忘记 close 时不至于吊住 JVM 退出
+          (.setDaemon true))))))
+
+(defrecord ThreadPoolToolCallingManager [^ExecutorService pool]
+  tool-calling-manager/ToolCallingManager
+  (execute-tool-calls [_ kernel response opts]
+    (when (.isShutdown pool)
+      (throw (ex-info "ThreadPoolToolCallingManager 的线程池已关闭，无法再执行工具批"
+                      {:error-class :environment})))
+    (let [calls (response/response-tool-calls response)]
+      (execute-batch-via pool kernel calls
+                         (:gate opts)
+                         (:tool-context opts)
+                         (:records opts)
+                         (:on-tool-result opts))))
+
+  Closeable
+  (close [_] (.shutdown pool)))
+
+(defn thread-pool-tool-calling-manager
+  "有界平台线程池引擎：工具批在**本实例自己的池**里跑，形成舱壁隔离。
+
+   线程模型：固定大小的平台线程池（daemon 线程）。
+   隔离边界：每个实例一个池——工具执行的并发上限 = pool-size，不与其他 kernel
+   相互挤占；池随实例关停（见下）。这是 VT 引擎给不了的：后者用进程全局无界池。
+
+   opts:
+   - :pool-size          正整数，缺省 (availableProcessors)
+   - :thread-name-prefix 线程名前缀，缺省 \"clj-agent-tool-\"
+
+   **生命周期由持有者负责**——池不会自己关。实现了 java.io.Closeable：
+
+     (with-open [m (thread-pool-tool-calling-manager {:pool-size 4})]
+       (let [k (kernel/build-kernel {:service svc :tools [...] :tool-manager m})]
+         ...))
+
+   关停后再执行工具批抛 ex-info（:error-class :environment）。
+
+   **不变量：一个引擎属于一个 kernel，不跨 delegate 边界。**
+   子 agent 是独立 agent，自有引擎——这本来就是默认：delegate 的 subagent-config
+   全部来自用户的 :subagent-fn，父 kernel 的 :tool-manager 没有渠道流进去。
+
+   故**不要把同一个实例亲手塞进 subagent-config 复用**（那是绕过默认去踩）：
+   delegate-tool 是 spawn→await→drop，父批的工具会占着池线程阻塞等子 agent 跑完，
+   而子 agent 的批又要同一个池的线程——互等，永久挂起。子 agent 要限流就给它
+   **自己的**实例（各自封顶，互不嵌套）；不需要就留默认 VT 引擎。
+
+   同理，**一个引擎的批不嵌套自己**：别在本引擎某个工具的函数体里，再拿同一个
+   实例去跑一批（同样自锁）。框架不为此设防——不变量本身就是答案。
+
+   顺带一提：有界平台池是给**真正干活**的工具封顶用的。delegate 这类只是阻塞等
+   网络的工具，占一根平台线程停几秒到几分钟，本就不该走有界池。"
+  ([] (thread-pool-tool-calling-manager {}))
+  ([{:keys [pool-size thread-name-prefix]
+     :or   {pool-size          (.availableProcessors (Runtime/getRuntime))
+            thread-name-prefix "clj-agent-tool-"}}]
+   (when-not (pos-int? pool-size)
+     (throw (ex-info "pool-size 必须为正整数" {:pool-size pool-size})))
+   (->ThreadPoolToolCallingManager
+     (Executors/newFixedThreadPool pool-size (pool-thread-factory thread-name-prefix)))))
+
+(defn shutdown-tool-calling-manager!
+  "关停 manager 持有的资源。只有 ThreadPoolToolCallingManager 持有池；
+   VT / Sequential 无资源，调用即 no-op。等价于对 Closeable 实现调 .close。"
+  [m]
+  (when (instance? Closeable m)
+    (.close ^Closeable m)))
 
 (defn run-tools
   "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。"
