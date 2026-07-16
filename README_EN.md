@@ -274,7 +274,8 @@ order (no `:order`/`:phase`) — earlier = outer.
 ;; Built-in filters
 filters/logging-filter          ;; :tool  pre/post-call logging
 (filters/logging-chat-filter)   ;; :chat  LLM request/response logging (~ SimpleLoggerAdvisor)
-(filters/timeout-filter 5000)   ;; :tool  timeout + interrupt, marks :transient
+;; Timeouts are not a filter: deftool {:timeout ms} or an engine-level
+;; (…-tool-calling-manager {:timeout ms}) just works (declaration wins; no default otherwise)
 (filters/approval-filter)       ;; :tool  sensitive-tool approval (short-circuits on reject)
 (filters/validation-turn-filter validate-fn :max-retries 2)
                                 ;; :turn  validate the final answer; re-enter with feedback

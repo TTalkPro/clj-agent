@@ -333,7 +333,9 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
    :context true      ;; 可选：读取 Context（函数签名多一个只读 ctx 参数）
    :serial true       ;; 可选：副作用工具——同批含 serial 工具时整批退化为按序执行
    :retry true        ;; 可选：幂等工具 opt-in——:transient 类失败自动指数退避重试
-   :timeout 5000}     ;; 可选：超时毫秒——由 timeout-filter 强制（优先于其缺省值）；
+   :timeout 5000}     ;; 可选：超时毫秒——**开箱即生效**，无需挂任何 filter。
+                      ;; 缺省不超时；优先级：本声明 > 引擎 {:timeout ms} > 不超时。
+                      ;; 语义是「放弃等待」而非「终止执行」，故声明 :retry 须幂等
                       ;; 注意语义是「放弃等待」而非「终止执行」，超时工具声明 :retry 须幂等
                       ;;（或 {:max-retries 2 :initial-delay-ms 200}）
   (body ...))
@@ -419,8 +421,8 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 ;; 内置 filter
 filters/logging-filter        ;; 调用前后日志（:tool）
 (filters/logging-chat-filter) ;; LLM 请求/响应日志（:chat，对标 SimpleLoggerAdvisor）
-(filters/timeout-filter 5000) ;; 超时控制（ms，around；超时标 :transient 可触发重试；
-                              ;; deftool {:timeout ms} 声明优先于此缺省值）
+;; 超时不是 filter：deftool {:timeout ms} 或引擎 (…-tool-calling-manager {:timeout ms})
+;; 即生效（工具声明优先；都不给则不超时）——见 client README「工具执行引擎」一节
 (filters/approval-filter)     ;; 敏感工具审批（拒绝则短路）
 (filters/validation-turn-filter validate-fn :max-retries 2)
                               ;; 最终答案校验（:turn）：不合格带反馈重入循环重试

@@ -134,7 +134,8 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 
 ;; 支持的参数类型: :string :int :float :boolean :array :object
 ;; 可选项: :sensitive :context :tags :category :serial :retry :return-direct
-;;         :timeout（毫秒；由 timeout-filter 强制，优先于其构造缺省值——不挂该 filter 即无超时）
+;;         :timeout（毫秒；**开箱即生效**，无需挂 filter。缺省不超时；
+;;                   优先级：工具声明 > 引擎 {:timeout ms} > 不超时）
 ;; 生成的 metadata: :tool/schema :tool/params :tool/sensitive :tool/context
 ;;                  :tool/tags :tool/category :tool/serial :tool/retry
 ;;                  :tool/return-direct :tool/function
@@ -162,9 +163,8 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 ;; 内置 filter
 filters/logging-filter          ;; :tool  调用前后日志
 (filters/logging-chat-filter)   ;; :chat  LLM 请求/响应日志（≈ SimpleLoggerAdvisor）
-(filters/timeout-filter 5000)   ;; :tool  超时短路 + 中断，标 :transient
-                                ;;        （deftool :timeout 声明优先于此缺省值；
-                                ;;         超时=放弃等待≠终止执行，见其 docstring）
+;; 超时不是 filter：deftool {:timeout ms} 或引擎 {:timeout ms} 即生效
+;; （工具声明优先；都不给则不超时。超时=放弃等待≠终止执行，见 tool/call-with-timeout）
 (filters/approval-filter)       ;; :tool  敏感工具人工审批，拒绝则短路
 (filters/validation-turn-filter validate-fn :max-retries 2)
                                 ;; :turn  答案校验，不合格带反馈重入循环

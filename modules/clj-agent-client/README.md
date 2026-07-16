@@ -49,16 +49,34 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 ## 工具执行引擎（ToolCallingManager）
 
 `build-kernel` 的可选 `:tool-manager` 决定**一批工具怎么跑完**——线程模型、
-隔离边界、调度策略。不传等同默认虚拟线程行为。三个引擎都在 `react`：
+隔离边界、调度策略。**不传 = 串行**。三个引擎都在 `react`：
 
 | 引擎 | 线程模型 | 隔离边界 | 资源 |
 |---|---|---|---|
-| `virtual-thread-tool-calling-manager`（默认） | 每调用一根虚拟线程 | **无**：进程全局共享 executor | 不持有 |
-| `sequential-tool-calling-manager` | 调用方线程，无并发 | 无可争之物 | 不持有 |
+| `sequential-tool-calling-manager`（**缺省**） | 调用方线程，无并发 | 无可争之物 | 不持有 |
+| `virtual-thread-tool-calling-manager` | 每调用一根虚拟线程 | **无**：进程全局共享 executor | 不持有 |
 | `thread-pool-tool-calling-manager` | 有界 daemon 平台线程池 | **每实例一个池**，并发上限 = pool-size | **持有池，须关停** |
 
-换引擎**不改变可观察结果**：`:serial` 整批退化、`:tool` filter 链、`:writes` 屏障
-折叠、返回形状由三者共用的骨架统一保证。
+**为什么串行是缺省**：并发要求同批工具的副作用彼此无序依赖——那是**调用方才知道**
+的性质，框架不替它假定。要并发是显式决定：
+
+```clojure
+(kernel/build-kernel {:service svc :tools [...]
+                      :tool-manager (react/virtual-thread-tool-calling-manager)})
+```
+
+换引擎**不改变可观察结果**：轮初快照 + `:writes` 屏障折叠的状态语义、`:serial`
+整批退化、`:tool` filter 链、返回形状，由三者共用的骨架统一保证。引擎只决定
+「**怎么**把这批跑完」，不决定「**跑的是什么**」（设计原则 §3）。
+
+**缺省超时**（可选）：三个引擎都接受 `:timeout`——时间上限属于执行策略，故随引擎
+构造。缺省**不超时**；工具自己的 `deftool {:timeout ms}` 恒优先：
+
+```clojure
+;; 本部署的工具一律封顶 30 秒，个别的自己声明例外
+(react/sequential-tool-calling-manager {:timeout 30000})
+(react/thread-pool-tool-calling-manager {:pool-size 4 :timeout 30000})
+```
 
 ```clojure
 ;; 舱壁隔离 / 限流：池归持有者，record 实现 java.io.Closeable
@@ -75,7 +93,7 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 
 子 agent 是独立 agent，自有引擎——这本来就是默认，框架里没有共享路径：
 `delegate` 的 `subagent-config` 全部来自你自己的 `:subagent-fn`，父 kernel 的
-`:tool-manager` 流不进去。子 agent 要限流就给它**自己的**实例；不需要就留默认 VT。
+`:tool-manager` 流不进去。子 agent 要限流就给它**自己的**实例；不需要就留缺省串行。
 
 ⚠️ 别绕过这个默认去踩：**亲手把同一个有界实例塞进 `subagent-config`** 会死锁——
 `delegate-tool` 是 spawn→await→drop，父批工具占着池线程阻塞等子 agent，
