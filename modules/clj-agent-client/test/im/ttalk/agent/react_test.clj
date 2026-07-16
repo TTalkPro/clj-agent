@@ -10,6 +10,7 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.memory :as memory]
+            [im.ttalk.agent.advisor :as flt]
             [im.ttalk.agent.advisor.memory :as ma]
             [im.ttalk.agent.react :as agent-loop]))
 
@@ -374,6 +375,36 @@
                                        :retry {:max-retries 3 :initial-delay-ms 1})])]
       (agent-loop/execute-batch kernel [(tc "1" "bad")] nil {} [])
       (is (= 1 @attempts)))))
+
+(deftest timeout-transient-retry-test
+  (testing "timeout-filter 超时 → :transient → 声明 :retry 的工具被重试，第二次按时完成（链路断言：此前各环节单测有、整链无钉）"
+    (let [attempts (atom 0)
+          slow-then-fast (fn [_ _]
+                           (if (= 1 (swap! attempts inc))
+                             (do (Thread/sleep 60000) "never")
+                             "第二次很快"))
+          kernel (core/build-kernel
+                   {:tools   [(assoc (inline-tool "flaky" slow-then-fast)
+                                     :retry {:max-retries 2 :initial-delay-ms 1})]
+                    :filters [(flt/timeout-filter 200)]})
+          {:keys [messages errors]} (agent-loop/execute-batch
+                                      kernel [(tc "1" "flaky")] nil {} [])]
+      (is (= 2 @attempts) "第一次超时触发一次重试——注意幂等前提：重试发起时上一次调用可能仍在跑")
+      (is (= "第二次很快" (:content (first messages))))
+      (is (empty? errors)))))
+
+(deftest timeout-partial-batch-test
+  (testing "同批一个工具超时不殃及其它——部分结果是每工具超时的自然结果（对照 beamai 需专门一层 gather deadline 才有）"
+    (let [slow (fn [_ _] (Thread/sleep 60000) "never")
+          fast (fn [_ _] "快的正常返回")
+          kernel (core/build-kernel
+                   {:tools   [(inline-tool "slow" slow) (inline-tool "fast" fast)]
+                    :filters [(flt/timeout-filter 200)]})
+          {:keys [messages errors]} (agent-loop/execute-batch
+                                      kernel [(tc "1" "slow") (tc "2" "fast")] nil {} [])]
+      (is (clojure.string/includes? (:content (first messages)) "超时"))
+      (is (= "快的正常返回" (:content (second messages))))
+      (is (= [:transient] (mapv :class errors)) "只有超时者进 :errors"))))
 
 (deftest env-error-pause-resume-test
   (let [env-ok (atom false)   ;; 模拟环境：false=凭证失效，true=已修复
