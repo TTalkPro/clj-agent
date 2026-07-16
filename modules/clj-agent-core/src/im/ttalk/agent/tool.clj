@@ -386,6 +386,28 @@
   [t]
   (or (nil? t) (pos-int? t)))
 
+(defn check-timeout!
+  "校验 timeout 值，非法则抛 ex-info。label 是出错时点名的对象（如 \"工具 :foo\"）。
+
+   **DRY**：此前 4 处（kernel.clj validate-tool-timeouts! var/inline + build-kernel
+   manager + react.clj check-timeout-opt!）各自手抄 `:timeout 必须为正整数毫秒`
+   消息串——消息串被两个模块的测试用正则钉住，改一处漏一处即出问题。"
+  [label t]
+  (when-not (valid-timeout? t)
+    (throw (ex-info (str label " 的 :timeout 必须为正整数毫秒，实为 " (pr-str t))
+                    {:timeout t}))))
+
+(defn valid-retry?
+  "`:retry` 声明是否合法：nil（未声明）| true（opt-in 用默认）| 正整数 map。
+   与 `valid-timeout?` 对称——`:retry` 此前零校验，`{:max-retries \"3\"}` 在
+   运行期 `(long ...)` 抛 CCE 且被收敛成指向工具的 :semantic 错误——症状偏离病因。"
+  [r]
+  (or (nil? r)
+      (true? r)
+      (and (map? r)
+           (every? #(or (nil? (get r %)) (pos-int? (get r %)))
+                   [:max-retries :initial-delay-ms]))))
+
 (defn call-with-timeout
   "在**虚拟线程**上跑 f，最多等 timeout-ms 毫秒。
 
@@ -502,15 +524,7 @@
            (cond-> {:success true
                     :result (if (string? result) result (pr-str result))}
              (seq writes) (assoc :writes writes)))
-         ;; 收 Throwable 而非 Exception：工具的 StackOverflowError（深递归 bug）
-         ;; 此前会逃逸并打死整个 agent 循环。致命的（OOM 等）仍原样上抛，
-         ;; 判据见 err/fatal-throwable?
-         (catch Throwable t
-           (when (err/fatal-throwable? t) (throw t))
-           {:success false
-            ;; NPE 等异常 getMessage 为 nil，直接用会喂给 LLM 空错误 "错误: "；
-            ;; 回退异常类名，保证错误可读。
-            :error (or (not-empty (.getMessage t))
-                       (.getName (class t)))
-            ;; 故障类别（S2 屏障路由）：:semantic | :transient | :environment
-            :error-class (err/classify-exception t)}))))))
+          (catch Throwable t
+            (let [{:keys [message class]} (err/contain-throwable t)]
+              {:success false :error message :error-class class})))))))
+

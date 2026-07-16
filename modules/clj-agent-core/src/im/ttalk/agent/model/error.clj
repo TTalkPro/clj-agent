@@ -134,10 +134,25 @@
      （该工具缺可选依赖）——都只说明**这个工具**不可用，不该牵连整轮。
 
    收敛后经 `classify-exception` 归类（缺省 :semantic：工具 bug 重试无意义）。"
+   [^Throwable t]
+   (or (and (instance? VirtualMachineError t)
+            (not (instance? StackOverflowError t)))
+       (instance? ThreadDeath t)))
+
+(defn contain-throwable
+  "catch-Throwable 三元组（fatal 检查 / nil-message 回退 / 分类）的统一入口。
+
+   致命的（OOM 等）原样上抛（`fatal-throwable?` 判据）；非致命的返回
+   `{:message m :class c}`——调用方据此组装自己的错误形状（terminal map /
+   success-false map / invoke-one 的 :value+:error）。
+
+   **DRY 4 处手抄**：`tool/invoke`、`kernel/invoke-tool` 两个 terminal、
+   `react/invoke-one` 此前各自重复 fatal-check + nil-message + classify-exception
+   三步，三元组漂移即出 bug。"
   [^Throwable t]
-  (or (and (instance? VirtualMachineError t)
-           (not (instance? StackOverflowError t)))
-      (instance? ThreadDeath t)))
+  (when (fatal-throwable? t) (throw t))
+  (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
+    {:message m :class (classify-exception t)}))
 
 ;;; ============================================================
 ;;; 错误判断

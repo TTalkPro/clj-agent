@@ -49,34 +49,38 @@
 
 ;; inline-handlers: {keyword -> (fn [args ctx] result)} — 内联工具处理函数，
 ;; 由 delegate-tool 等动态构建的工具填充，与 tool-vars（var 引用）互补。
-(defrecord Kernel [service filters tools tool-vars inline-handlers settings tool-manager])
+;; inline-meta: {keyword -> {:serial :retry :timeout :return-direct}} —
+;; 装配期预计算的内联工具声明，消除运行期 by-name O(n) 线性扫描。
+(defrecord Kernel [service filters tools tool-vars inline-handlers inline-meta settings tool-manager])
 
 ;;; ============================================================
 ;;; Build API
 ;;; ============================================================
 
 (defn- validate-tool-timeouts!
-  "工具声明的 `:timeout` 必须是正整数毫秒，否则装配期即抛。
-
-   **为什么校验在这里**：这是 var 工具与内联工具汇合、且尚未开始执行的最早时点。
-   坏值若放行到执行期，症状极难排查——`\"5s\"` 每次调用抛 ClassCastException
-   （deref 要 long），`-1` 让该工具每次都**静默立刻超时**（永远跑不了，且错误
-   信息只说「超时」），`2.7` 被静默截断成 2ms。`:timeout` 刚从死选项改活，
-   把它的值一并管起来才算改完。
-
-   注：`tool/invoke` 直调（不经 kernel）不校验也无妨——没有 kernel 就没有 react
-   与 filter，声明本就无人消费，坏值伤不到人。"
+  "工具声明的 `:timeout` 必须是正整数毫秒，否则装配期即抛（消息串统一走 `tool/check-timeout!`）。"
   [var-map inline-tools]
   (doseq [[fn-key v] var-map
           :let [t (tool/timeout-spec v)]
           :when (not (tool/valid-timeout? t))]
-    (throw (ex-info (str "工具 " fn-key " 的 :timeout 必须为正整数毫秒，实为 " (pr-str t))
-                    {:tool fn-key :timeout t})))
+    (tool/check-timeout! (str "工具 " fn-key) t))
   (doseq [{:keys [name timeout]} inline-tools
           :when (not (tool/valid-timeout? timeout))]
-    (throw (ex-info (str "内联工具 " name " 的 :timeout 必须为正整数毫秒，实为 "
-                         (pr-str timeout))
-                    {:tool name :timeout timeout}))))
+    (tool/check-timeout! (str "内联工具 " name) timeout)))
+
+(defn- validate-tool-retries!
+  "工具声明的 `:retry` 必须合法（nil / true / 正整数 map），否则装配期即抛。
+   与 `validate-tool-timeouts!` 对称——`:retry` 此前零校验。"
+  [var-map inline-tools]
+  (doseq [[fn-key v] var-map
+          :let [r (tool/retry-spec v)]
+          :when (not (tool/valid-retry? r))]
+    (throw (ex-info (str "工具 " fn-key " 的 :retry 必须为 nil / true / 正整数 map，实为 " (pr-str r))
+                    {:tool fn-key :retry r})))
+  (doseq [{:keys [name retry]} inline-tools
+          :when (not (tool/valid-retry? retry))]
+    (throw (ex-info (str "内联工具 " name " 的 :retry 必须为 nil / true / 正整数 map，实为 " (pr-str retry))
+                    {:tool name :retry retry}))))
 
 (defn build-kernel
   "构建 Kernel 实例
@@ -117,23 +121,26 @@
         compiled-inline-tools (mapv #(dissoc % :handler) inline-tools)
         inline-handler-map    (into {} (mapv #(vector (keyword (:name %)) (:handler %))
                                              inline-tools))
+        ;; 装配期预计算内联工具声明 → O(1) 查询（替代 4 处运行期 by-name O(n) 扫描）
+        inline-meta-map       (into {} (mapv (fn [t]
+                                               [(keyword (:name t))
+                                                (select-keys t [:serial :retry :timeout :return-direct])])
+                                             inline-tools))
         _ (validate-tool-timeouts! var-map inline-tools)
+        _ (validate-tool-retries! var-map inline-tools)
         _ (when (some? tool-manager)
-            (let [mt (:timeout tool-manager)]
-              (when-not (tool/valid-timeout? mt)
-                (throw (ex-info (str ":tool-manager 的 :timeout 必须为正整数毫秒，实为 "
-                                     (pr-str mt))
-                                {:timeout mt})))))]
+            (tool/check-timeout! ":tool-manager" (:timeout tool-manager)))]
 
     (->Kernel service
               (vec filters)
               (into compiled-var-tools compiled-inline-tools)
               var-map
               inline-handler-map
-               (cond-> settings
-                 state-slots (assoc :state-slots state-slots)
-                 eligibility-fn (assoc :eligibility-fn eligibility-fn))
-               tool-manager)))
+              inline-meta-map
+              (cond-> settings
+                state-slots (assoc :state-slots state-slots)
+                eligibility-fn (assoc :eligibility-fn eligibility-fn))
+              tool-manager)))
 
 ;;; ============================================================
 ;;; Query API
@@ -163,25 +170,23 @@
 
 (defn serial-tool?
   "工具是否声明 :serial（副作用工具；批内并行时整批退化为按序执行）。
-   var 工具查 :tool/serial 元数据；内联工具查 schema 的 :serial 键。"
+   var 工具查 :tool/serial 元数据；内联工具查 inline-meta 预计算 map（O(1)）。"
   [kernel fn-name]
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
     (if-let [v (get (:tool-vars kernel) fn-key)]
       (tool/serial-tool? v)
-      (boolean (some #(when (= fn-key (keyword (:name %))) (:serial %))
-                     (:tools kernel))))))
+      (boolean (get-in (:inline-meta kernel) [fn-key :serial])))))
 
 (defn return-direct-tool?
   "工具是否声明 :return-direct（结果即最终答案，不再回灌 LLM）。
-   var 工具查 :tool/return-direct 元数据；内联工具查 schema 的 :return-direct 键。
+   var 工具查 :tool/return-direct 元数据；内联工具查 inline-meta 预计算 map（O(1)）。
 
    对标 Spring AI ToolCallingAdvisor 的 return direct。"
   [kernel fn-name]
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
     (if-let [v (get (:tool-vars kernel) fn-key)]
       (tool/return-direct-tool? v)
-      (boolean (some #(when (= fn-key (keyword (:name %))) (:return-direct %))
-                     (:tools kernel))))))
+      (boolean (get-in (:inline-meta kernel) [fn-key :return-direct])))))
 
 (def ^:private default-retry-policy
   {:max-retries 2 :initial-delay-ms 200})
@@ -195,14 +200,13 @@
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))
         spec (if-let [v (get (:tool-vars kernel) fn-key)]
                (tool/retry-spec v)
-               (:retry (some #(when (= fn-key (keyword (:name %))) %)
-                             (:tools kernel))))]
+               (get-in (:inline-meta kernel) [fn-key :retry]))]
     (when spec
       (merge default-retry-policy (when (map? spec) spec)))))
 
 (defn tool-timeout
   "工具**自己声明**的 `:timeout`（毫秒）。var 工具查 `:tool/timeout` 元数据；
-   **内联工具查其配置 map 的 `:timeout` 键**——与 `serial-tool?` / `retry-policy` /
+   **内联工具查 inline-meta 预计算 map（O(1)）**——与 `serial-tool?` / `retry-policy` /
    `return-direct-tool?` 逐字同款。
 
    只答「这个工具声明了什么」，不含引擎缺省——那一层见 `effective-tool-timeout`。
@@ -212,8 +216,7 @@
   (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
     (if-let [v (get (:tool-vars kernel) fn-key)]
       (tool/timeout-spec v)
-      (:timeout (some #(when (= fn-key (keyword (:name %))) %)
-                      (:tools kernel))))))
+      (get-in (:inline-meta kernel) [fn-key :timeout]))))
 
 (defn effective-tool-timeout
   "该工具**实际生效**的超时（毫秒），nil = 不超时。
@@ -314,23 +317,20 @@
       ;; 内联工具（由 delegate-tool 等构建）：通过同一 filter 链执行
       (let [func-def (build-func-def fn-key nil)
             t-ms     (effective-tool-timeout kernel fn-key)
-            terminal (fn [req]
-                       (exec-with-timeout t-ms
-                         (fn []
-                           (try
-                             (let [raw (inline-handler (:args req) (:context req))
-                                   [res writes] (if (and (map? raw) (contains? raw :writes))
-                                                  [(:result raw) (:writes raw)]
-                                                  [raw nil])]
-                               (cond-> {:result (if (string? res) res (pr-str res))}
-                                 (seq writes) (assoc :writes writes)))
-                             ;; Throwable 而非 Exception：内联工具的 Error（如深递归的
-                             ;; StackOverflowError）此前逃逸并打死整轮。致命的仍上抛。
-                             (catch Throwable t
-                               (when (err/fatal-throwable? t) (throw t))
-                               (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
-                                 {:result (str "错误: " m)
-                                  :error  {:class (err/classify-exception t) :message m}}))))))
+             terminal (fn [req]
+                        (exec-with-timeout t-ms
+                          (fn []
+                            (try
+                              (let [raw (inline-handler (:args req) (:context req))
+                                    [res writes] (if (and (map? raw) (contains? raw :writes))
+                                                   [(:result raw) (:writes raw)]
+                                                   [raw nil])]
+                                (cond-> {:result (if (string? res) res (pr-str res))}
+                                  (seq writes) (assoc :writes writes)))
+                              (catch Throwable t
+                                (let [{:keys [message class]} (err/contain-throwable t)]
+                                  {:result (str "错误: " message)
+                                   :error  {:class class :message message}}))))))
             chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
             out   (chain {:function func-def :args args :context context})]
         (cond-> {:value (:result out)}
@@ -349,15 +349,12 @@
             terminal (fn [req]
                        (exec-with-timeout t-ms
                          (fn []
-                           (let [exec (try (tool/invoke tool-var (:args req) (:context req))
-                                           ;; tool/invoke 自己已收 Throwable；这里是
-                                           ;; 它之外（arity 不符等）的兜底，同样放行致命
-                                           (catch Throwable t
-                                             (when (err/fatal-throwable? t) (throw t))
-                                             {:success false
-                                              :error (or (not-empty (.getMessage t))
-                                                         (.getName (class t)))
-                                              :error-class (err/classify-exception t)}))]
+                            (let [exec (try (tool/invoke tool-var (:args req) (:context req))
+                                            (catch Throwable t
+                                              (let [{:keys [message class]} (err/contain-throwable t)]
+                                                {:success false
+                                                 :error message
+                                                 :error-class class})))]
                              (if (:success exec)
                                (cond-> {:result (:result exec)}
                                  (:writes exec) (assoc :writes (:writes exec)))
