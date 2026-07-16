@@ -40,8 +40,18 @@
 协议只有一个方法 `execute-tool-calls`（Spring 对齐签名，带 `response` 参数）。
 
 **换 manager = 换执行引擎**（v3 引入，v5 明确为核心定位）：
-- `VirtualThreadToolCallingManager`（默认，现状行为：每调用一根虚拟线程）
-- `SequentialToolCallingManager`（全串行，调试 / 严格副作用场景，**不构造 Future**）
+- `VirtualThreadToolCallingManager`（每调用一根虚拟线程。**2026-07-16 起不再是缺省**
+  ——缺省改为 Sequential，见下）
+- `SequentialToolCallingManager`（**缺省**，全串行，**不构造 Future**）
+
+> **⚠️ 缺省与超时的定调（2026-07-16 用户拍板，两条 💥）**：
+> ① **缺省引擎改为 Sequential**——并发要求同批工具的副作用彼此无序依赖，那是
+> **调用方才知道**的性质，框架不替它假定；要并发是显式决定（注入 VT / 池引擎）。
+> 状态语义与引擎无关（都是轮初快照 + 屏障折叠），故这条只改调度、不改语义。
+> ② **超时缺省为「不超时」**，两个显式来源：`工具声明 deftool {:timeout ms} >
+> 引擎缺省 (…-tool-calling-manager {:timeout ms}) > 不超时`。**时间上限属于执行
+> 策略，故随引擎构造**（三个引擎均接受 `:timeout`），与 beamai
+> `manager_opts.tool_timeout` 同一立场。详见 [`tool-timeout-design.md`](tool-timeout-design.md)。
 - `ThreadPoolToolCallingManager`（有界平台线程池，限流 / **舱壁隔离**，可配 pool-size）
 
 `execute-batch` 与 `execute-single` 退回成**每个 record 的内部 helper**——
