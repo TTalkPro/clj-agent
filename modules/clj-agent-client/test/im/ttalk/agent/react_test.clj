@@ -642,4 +642,23 @@
           r (agent-loop/invoke kernel store [(msg/user "干活")]
               {:context (context/with-conversation-id (context/create) "env-3")})]
       (is (= :completed (:status r)))
-      (is (= "我看到工具挂了" (get-in r [:response :text]))))))
+      (is (= "我看到工具挂了" (get-in r [:response :text])))))
+
+  (testing "R7: executor 路径上致命 Throwable 被 Future.get 包成 ExecutionException——
+            run-on-executor 拆 cause 原样重抛，逃逸类型不随引擎变（串行=裸 OOM，并发=EE → 修后均为裸 OOM）"
+    (let [oom-tool (fn [_ _] (throw (OutOfMemoryError. "堆爆了")))
+          kernel (batch-kernel [(inline-tool "oom" oom-tool)
+                                (inline-tool "good" (fn [_ _] "我没事"))])
+          tm (agent-loop/virtual-thread-tool-calling-manager)]
+      ;; OOM 是致命的（fatal-throwable? = true），应原样上抛——不被收敛成工具错误。
+      ;; 修复前：VT 引擎的 Future.get 把 OOM 包成 ExecutionException（普通 Exception），
+      ;; invoke-one 的 catch Throwable 看不出它是致命的 → 收敛成 :semantic 错误。
+      ;; 修复后：run-on-executor 拆 cause → 原 OOM 上抛 → invoke-one 的 fatal-throwable? 认出 → 重抛。
+      (is (thrown? OutOfMemoryError
+            (via-manager tm kernel [(tc "1" "oom")])))))
+
+  (testing "R7 对照：串行引擎下同样致命 → 同样上抛（证明不是引擎差异）"
+    (let [oom-tool (fn [_ _] (throw (OutOfMemoryError. "堆爆了")))
+          kernel (batch-kernel [(inline-tool "oom" oom-tool)])]
+      (is (thrown? OutOfMemoryError
+            (agent-loop/execute-batch kernel [(tc "1" "oom")] nil {} []))))))

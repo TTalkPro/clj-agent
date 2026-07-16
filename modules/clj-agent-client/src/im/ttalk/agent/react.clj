@@ -25,9 +25,9 @@
             [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.tool-calling-manager :as tool-calling-manager]
             [taoensso.timbre :as log])
-  (:import [java.io Closeable]
-           [java.util.concurrent Callable ExecutorService Executors Future
-            ThreadFactory]))
+   (:import [java.io Closeable]
+            [java.util.concurrent Callable ExecutorService Executors
+             ThreadFactory]))
 
 (set! *warn-on-reflection* true)
 
@@ -67,11 +67,12 @@
       (:cancel-token opts) (assoc :cancel-token (:cancel-token opts)))))
 
 (def ^:private tool-executor
-  "工具批次 map 阶段的共享虚拟线程 executor（与 subagent/manager 同款先例）。
+  "VirtualThreadToolCallingManager 用的共享虚拟线程 executor。
 
-   注意这是**进程全局**单例：同 JVM 所有 kernel 的工具批共享它。虚拟线程无界，
-   故不会「耗尽」，但也没有舱壁/限流/可关停边界——需要这些的场景注入
-   ThreadPoolToolCallingManager（每实例一个有界池）。"
+   注意这是**进程全局**单例：同 JVM 所有选了 VT 引擎的 kernel 的工具批共享它。
+   虚拟线程无界，故不会「耗尽」，但也没有舱壁/限流/可关停边界——需要这些的场景
+   注入 ThreadPoolToolCallingManager（每实例一个有界池）。**缺省引擎（Sequential）
+   不用此 executor**——全程内联在调用方线程上。"
   (delay (Executors/newVirtualThreadPerTaskExecutor)))
 
 (defn- invoke-with-retry
@@ -166,7 +167,12 @@
    任务用 `bound-fn*` 包装：把调用方的**动态绑定帧**带进工作线程。不带的话，
    同一个工具会因「这批里有几个 tool-call」（run-inline vs 本函数，**由 LLM 临场
    决定**）而看到不同的 `binding` 值——引擎与批次大小本不该改变「跑的是什么」。
-   与 `clojure.core/future` / `pmap` 的传导语义一致。"
+   与 `clojure.core/future` / `pmap` 的传导语义一致。
+
+   **R7: 拆 ExecutionException**——`Future.get` 把 callable 抛的任何 Throwable
+   包成 ExecutionException（普通 Exception）。invoke-one 忠实重抛的 OOM 若被包
+   裹会逃逸类型随引擎而变（串行=裸 OOM，并发=EE），违反 §3「引擎不改变可观察语义」。
+   此处拆 cause 原样重抛。"
   [^ExecutorService executor kernel tool-calls decisions tool-context on-tool-result]
   (let [futs (mapv (fn [tc d]
                      (.submit executor
@@ -174,7 +180,12 @@
                               (bound-fn* (fn [] (invoke-one kernel tc d tool-context
                                                             on-tool-result)))))
                    tool-calls decisions)]
-    (mapv (fn [^Future f] (.get f)) futs)))
+    (mapv (fn [^java.util.concurrent.Future f]
+            (try (.get f)
+                 (catch java.util.concurrent.ExecutionException ee
+                   (let [cause (.getCause ee)]
+                     (throw (if (instance? Throwable cause) cause ee))))))
+          futs)))
 
 (defn- collect-batch
   "reduce 阶段（屏障）：writes 按原始序折叠进 context；
@@ -281,12 +292,13 @@
 (defrecord VirtualThreadToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager
   (execute-tool-calls [_ kernel response opts]
-    (let [calls (response/response-tool-calls response)]
-      (execute-batch-via @tool-executor kernel calls
-                         (:gate opts)
-                         (:tool-context opts)
-                         (:records opts)
-                         (:on-tool-result opts)))))
+    (binding [tool-calling-manager/*active-manager-timeout* timeout]
+      (let [calls (response/response-tool-calls response)]
+        (execute-batch-via @tool-executor kernel calls
+                           (:gate opts)
+                           (:tool-context opts)
+                           (:records opts)
+                           (:on-tool-result opts))))))
 
 (defn virtual-thread-tool-calling-manager
   "并发引擎：每调用一根虚拟线程，尊重 :serial 声明。
@@ -310,13 +322,14 @@
 (defrecord SequentialToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager
   (execute-tool-calls [_ kernel response opts]
-    (let [calls (response/response-tool-calls response)]
-      ;; executor = nil：全程内联，从不构造 Future
-      (execute-batch-via nil kernel calls
-                         (:gate opts)
-                         (:tool-context opts)
-                         (:records opts)
-                         (:on-tool-result opts)))))
+    (binding [tool-calling-manager/*active-manager-timeout* timeout]
+      (let [calls (response/response-tool-calls response)]
+        ;; executor = nil：全程内联，从不构造 Future
+        (execute-batch-via nil kernel calls
+                           (:gate opts)
+                           (:tool-context opts)
+                           (:records opts)
+                           (:on-tool-result opts))))))
 
 (defn sequential-tool-calling-manager
   "**缺省引擎**：每个工具按调用序在调用方线程执行，无并发。
@@ -329,7 +342,10 @@
 
    线程模型：调用方线程，**全程不构造 Future**（故不背 ExecutionException 包装
    与 Future.get 的中断语义——这是它与「给 VT 引擎塞一个 same-thread executor」
-   的本质区别）。
+   的本质区别）。**例外：声明了 `:timeout` 的工具**——超时在 terminal 内由
+   `call-with-timeout` 强制（R1），此时起一根 VT 跑工具本体、调用方线程等 deref，
+   「不构造 Future」承诺在此情形下不成立（R2 诚实降级）。未声明超时的工具（大多数）
+   照常在调用方线程上直接跑。
    隔离边界：不持任何资源，无可争之物。
 
    opts:
@@ -355,12 +371,13 @@
     (when (.isShutdown pool)
       (throw (ex-info "ThreadPoolToolCallingManager 的线程池已关闭，无法再执行工具批"
                       {:error-class :environment})))
-    (let [calls (response/response-tool-calls response)]
-      (execute-batch-via pool kernel calls
-                         (:gate opts)
-                         (:tool-context opts)
-                         (:records opts)
-                         (:on-tool-result opts))))
+    (binding [tool-calling-manager/*active-manager-timeout* timeout]
+      (let [calls (response/response-tool-calls response)]
+        (execute-batch-via pool kernel calls
+                           (:gate opts)
+                           (:tool-context opts)
+                           (:records opts)
+                           (:on-tool-result opts)))))
 
   Closeable
   (close [_] (.shutdown pool)))
@@ -376,9 +393,11 @@
    - :pool-size          正整数，缺省 (availableProcessors)
    - :thread-name-prefix 线程名前缀，缺省 \"clj-agent-tool-\"
    - :timeout            为**没有声明 `:timeout`** 的工具设的缺省超时（毫秒），
-                         缺省 nil = 不超时；工具自己的声明恒优先。
-                         **本引擎尤其值得给一个**：被超时放弃的工具会永久占住一个
-                         池槽（舱壁逐格坏死），而 VT 引擎只漏几 KB 栈
+                          缺省 nil = 不超时；工具自己的声明恒优先。
+                          **本引擎尤其值得给一个**：没有超时的工具若卡死（如无限
+                          循环、socket 挂死），会**永久占住一个池槽**（舱壁逐格坏死）；
+                          有超时则池线程在 deref 超时后释放（但注意 R2：有超时的工具
+                          实际跑在 VT 上、池线程只等 deref，舱壁退化为信号量）
 
    **生命周期由持有者负责**——池不会自己关。实现了 java.io.Closeable：
 
@@ -421,7 +440,12 @@
     (.close ^Closeable m)))
 
 (defn run-tools
-  "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。"
+  "execute-batch 的无 gate 特例：全部执行。供外部手搓工具循环使用。
+
+   **恒串行**（无视 `:tool-manager`）——不复用引擎的调度，但**吃引擎的 `:timeout`
+   缺省**（经 invoke-tool → effective-tool-timeout 读 `:tool-manager`）。
+   不对称是 v0.3 引入的：`:timeout` 在 invoke-tool 强制，而调度在 react——两者
+   分属不同层，run-tools 只走前者。要完整引擎行为（含调度）请用 invoke/resume。"
   [kernel tool-calls tool-context]
   (execute-batch kernel tool-calls nil tool-context []))
 

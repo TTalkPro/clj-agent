@@ -41,13 +41,19 @@
     :else                      (str "未知结果: " (pr-str outcome))))
 
 (defn- run-sync
-  "spawn → await → drop，超时则 kill。返回结果字符串。"
+  "spawn → await → drop，超时则 kill。返回结果字符串。
+
+   **R6: try/finally 保 kill!/drop!**——await! 的底层 deref（CountDownLatch.await）
+   被引擎超时 interrupt 时抛 InterruptedException，若无 finally 则 kill!/drop!
+   跳过、子 agent 泄漏且继续烧 token。"
   [spec timeout-ms]
-  (let [spawn-id (:ok (mgr/spawn! spec))
-        outcome  (mgr/await! spawn-id timeout-ms)
-        _        (when (= {:error :timeout} outcome) (mgr/kill! spawn-id))
-        _        (mgr/drop! spawn-id)]
-    (safe-result-str outcome)))
+  (let [spawn-id (:ok (mgr/spawn! spec))]
+    (try
+      (let [outcome (mgr/await! spawn-id timeout-ms)]
+        (when (= {:error :timeout} outcome) (mgr/kill! spawn-id))
+        (safe-result-str outcome))
+      (finally
+        (mgr/drop! spawn-id)))))
 
 (defn- deadline-ms [timeout-ms]
   (when timeout-ms (+ (System/currentTimeMillis) timeout-ms)))
@@ -79,6 +85,7 @@
     {:name        (:name config)
      :description (or (:description config)
                       "将子任务委派给独立子 Agent 执行。")
+     :timeout     timeout  ;; R6: 写进 inline map → 工具声明恒优先，引擎缺省砍不掉它
      :input_schema {:type       "object"
                     :properties {:task    {:type "string" :description "委派给子 Agent 的任务描述。"}
                                  :context {:type "string" :description "子任务的背景信息（可选）。"}}
@@ -108,6 +115,7 @@
     {:name        (:name config)
      :description (or (:description config)
                       "将多个子任务并发委派给独立子 Agent，汇总所有结果。")
+     :timeout     timeout  ;; R6: 同 delegate-tool
      :input_schema {:type       "object"
                     :properties {:tasks   {:type  "array"
                                            :items {:type "string"}
