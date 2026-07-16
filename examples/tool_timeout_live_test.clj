@@ -3,11 +3,11 @@
 
    运行：clojure -M examples/tool_timeout_live_test.clj（需 MINIMAX_API_KEY）
 
-   **只验单测证明不了的四件事**（单测已覆盖 filter 返回值形状/优先级/线程模型，
+   **只验单测证明不了的四件事**（单测已覆盖返回值形状/优先级/线程模型，
    不在此重复）：
    1. 超时后**真实模型**收到 transient 错误、理解它、循环存活并作答；
    2. **阻塞 IO 真的被取消**——被超时的 socket read 抛 `Closed by interrupt`，
-      副作用**不落地**。这是 P1-2 改虚拟线程的意外红利（见 §2.2 修订）；
+      副作用**不落地**。这是改虚拟线程的意外红利（见 §2.2 修订）；
    3. 声明 vs 缺省的**可观察后果对照**——同一个 3s 的活儿，声明救活 / 缺省杀死；
    4. **abandon 残余风险的真机证据**——CPU 忙循环打不断，其副作用在「已告知
       LLM 超时」之后才落地（设计文档 §2.3 的核心声明，用真实时间戳钉死）。
@@ -21,7 +21,7 @@
   (:require [clojure.string :as str]
             [im.ttalk.agent.client :as agent]
             [im.ttalk.agent.kernel :as kernel]
-            [im.ttalk.agent.advisor :as flt]
+            [im.ttalk.agent.react :as react]
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.provider.factory.builder :as factory]
             [im.ttalk.agent.provider.minimax :as minimax]
@@ -94,14 +94,14 @@
   "Get the unit price for a SKU. Always use this tool for price questions."
   [[sku :string "SKU code"]]
   {:timeout 6000}
-  ;; 后端 3s 才回，本工具声明 6s → **声明救了它**（filter 缺省仅 800ms）
+  ;; 后端 3s 才回，本工具声明 6s → **声明救了它**（引擎缺省仅 800ms）
   (let [b (hit @slow-port)]
     (str sku " price: " (* b 10) " CNY")))
 
 (deftool get-stock-age
   "Get how many days the SKU has been in stock. Always use this tool for stock age questions."
   [[sku :string "SKU code"]]
-  ;; 同样 3s 的活儿，但**不声明** → 被 filter 的 800ms 缺省杀掉
+  ;; 同样 3s 的活儿，但**不声明** → 被引擎的 800ms 缺省杀掉
   (let [b (hit @slow-port)]
     (str sku " stock age: " b " days")))
 
@@ -131,19 +131,17 @@
     (str sku " forecast: " n " units")))
 
 ;;; ============================================================
-;;; 观测 filter：记录超时结果上报时刻（挂在 timeout-filter 外层）
+;;; 观测：记录超时结果上报给循环的时刻
+;;;
+;;; 用 :on-tool-result 回调而非 filter——声明式超时现在由 kernel/invoke-tool 强制
+;;; （在 filter 链**之外**），故没有任何 filter 看得见它。回调是超时结果抵达循环的
+;;; 第一现场，本就是更贴切的探针。
 ;;; ============================================================
 
-(def witness
-  {:name :witness
-   :tool (fn [req chain]
-           (let [r (chain req)]
-             (when (= :transient (get-in r [:error :class]))
-               (compare-and-set! timeout-reported-at nil (System/currentTimeMillis)))
-             r))})
-
 (defn make-agent
-  "witness 在外、timeout-filter 在内（注册顺序即洋葱由外向内）。"
+  "default-ms → **引擎**缺省（`(sequential-tool-calling-manager {:timeout ms})`）：
+   时间上限属于执行策略，随引擎构造。nil = 不给缺省（框架缺省即不超时）。
+   工具自己的 `deftool {:timeout ms}` 恒优先。"
   [tools default-ms]
   (let [provider (factory/create-provider-from-env :minimax)
         svc (service/create-service provider {:model minimax/default-model
@@ -156,8 +154,16 @@
                               ((:chat-fn svc) messages opts)))
         k (kernel/build-kernel {:service instrumented
                                 :tools tools
-                                :filters [witness (flt/timeout-filter default-ms)]})]
-    {:agent (agent/create-agent {:kernel k}) :llm-calls llm-calls}))
+                                :tool-manager (react/sequential-tool-calling-manager
+                                                (cond-> {} default-ms (assoc :timeout default-ms)))})]
+    {:agent (agent/create-agent
+              {:kernel k
+               :callbacks {:on-tool-result
+                           (fn [_ result]
+                             (when (str/includes? (str result) "超时")
+                               (compare-and-set! timeout-reported-at nil
+                                                 (System/currentTimeMillis))))}})
+     :llm-calls llm-calls}))
 
 (defn tool-results
   "从 :tool-calls-made 取出工具结果（按调用序）。"
@@ -173,7 +179,7 @@
   (println "\n场景 1：工具超时 → 真实模型收到错误 → 循环存活作答（+ 阻塞 IO 真被取消）")
   (reset! io-side-effect-at nil)
   (reset! timeout-reported-at nil)
-  (let [{:keys [agent llm-calls]} (make-agent [#'fetch-inventory] 60000)
+  (let [{:keys [agent llm-calls]} (make-agent [#'fetch-inventory] nil)
         t0 (System/currentTimeMillis)
         result (agent/chat agent
                  "Check the inventory for SKU-42 and tell me what happened."
@@ -183,7 +189,7 @@
     (check "工具被真实模型调用了" (pos? (count results)))
     (check "tool result 是超时错误（模型收到的就是它）"
            (boolean (some #(str/includes? (str %) "超时") results)))
-    (check "以工具声明的 1000ms 为准超时（filter 缺省是 60s，未被采用）"
+    (check "以工具声明的 1000ms 为准超时（引擎未给缺省，声明是唯一来源）"
            (some? @timeout-reported-at))
     (check "循环存活：模型拿到错误后继续，给出非空最终答案"
            (not (str/blank? (str (:text result)))))
@@ -202,7 +208,7 @@
 ;;; ============================================================
 
 (defn scenario-2 []
-  (println "\n场景 2：对照组——filter 缺省 800ms；get-price 声明 6s（活）/ get-stock-age 不声明（死），同为 3s 的活儿")
+  (println "\n场景 2：对照组——引擎缺省 800ms；get-price 声明 6s（活）/ get-stock-age 不声明（死），同为 3s 的活儿")
   (let [{:keys [agent]} (make-agent [#'get-price #'get-stock-age] 800)
         result (agent/chat agent
                  "For SKU-7: get both the price and the stock age. Report both results."
@@ -217,7 +223,7 @@
            (and (seq prices) (seq ages)))
     (check "get-price 声明 :timeout 6000 → 挺过 3s 的活儿，每次都拿到真实数据"
            (every? #(str/includes? (str %) "price") prices))
-    (check "get-stock-age 未声明 → 每次都被 filter 的 800ms 缺省杀掉"
+    (check "get-stock-age 未声明 → 每次都被引擎的 800ms 缺省杀掉"
            (every? #(str/includes? (str %) "超时") ages))
     (check "同一个 3s 的活儿，一活一死——差别只在工具声明（优先级在真实循环里可观察）"
            (and (seq prices) (seq ages)
@@ -235,7 +241,7 @@
 (defn scenario-3 []
   (println "\n场景 3：超时 → :transient → :retry 自动重试（对模型透明）")
   (reset! flaky-attempts 0)
-  (let [{:keys [agent llm-calls]} (make-agent [#'check-warehouse] 60000)
+  (let [{:keys [agent llm-calls]} (make-agent [#'check-warehouse] nil)
         result (agent/chat agent
                  "Check warehouse availability for SKU-9 and report it."
                  {:max-iterations 3})
@@ -259,7 +265,7 @@
   (println "\n场景 4：abandon 残余风险——CPU 忙循环打不断（超时=放弃等待≠终止执行）")
   (reset! cpu-side-effect-at nil)
   (reset! timeout-reported-at nil)
-  (let [{:keys [agent]} (make-agent [#'compute-forecast] 60000)
+  (let [{:keys [agent]} (make-agent [#'compute-forecast] nil)
         t0 (System/currentTimeMillis)
         result (agent/chat agent
                  "Run the demand forecast for SKU-3 and tell me what happened."
