@@ -1,6 +1,6 @@
 # 流式 Agent × Web Server 集成示例
 
-> 这些是 **examples**，不是 core。按 `design/streaming-async-design.md` §0.5 的「框架无关」硬约束：
+> 这些是 **examples**，不是 core。按 `docs/streaming-async-design.md` §0.5 的「框架无关」硬约束：
 > **clj-agent 的 core 不依赖任何 web 框架**；这里展示如何把 agent 的流式能力接到你自己的 web 栈。
 > web 依赖只在你跑对应示例时引入（见各文件顶部的 deps 说明）。
 

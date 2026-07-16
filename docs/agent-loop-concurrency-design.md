@@ -370,8 +370,8 @@ conflict 告警；`:writes` 单 arity 工具可用。
 - Spring Blog, [Tool Calling in Spring AI 2.0: A Composable, Agentic Architecture](https://spring.io/blog/2026/06/15/spring-ai-composable-tool-calling/)
 - spring-projects/spring-ai, [Issue #5195: Support parallel execution of multiple tool calls](https://github.com/spring-projects/spring-ai/issues/5195)
 - Diagrid, [Still Not Durable: MS Agent Framework & Strands](https://www.diagrid.io/blog/still-not-durable-how-microsoft-agent-framework-and-strands-agents-repeat-the-same-mistake)
-- 本仓库（已废弃留档）：`docs/process-framework-design.md`、
-  `docs/process-parallel-design.md`、`design/timeline-snapshot-checkpoint.md`
+- 本仓库（已废弃留档）：`process-framework-design.md`、
+  `process-parallel-design.md`、`timeline-snapshot-checkpoint.md`
 
 ---
 

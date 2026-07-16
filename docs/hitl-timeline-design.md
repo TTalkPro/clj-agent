@@ -301,4 +301,4 @@ tool-result 中立消息携带可选 `:writes` 元数据（该工具对状态槽
 - `filter-chain-design.md`——filter 三链体系（:tool/:chat/:turn 契约、
   递归重入、resume × turn 链的一次性分派）
 - 已废弃留档：`process-framework-design.md`、`process-parallel-design.md`、
-  `../design/timeline-snapshot-checkpoint.md`（旧 Timeline 的教训来源）
+  `timeline-snapshot-checkpoint.md`（旧 Timeline 的教训来源）

@@ -1,7 +1,7 @@
 # Timeline / Snapshot 设计方案
 
 > **状态：🗑️ 已废弃（2026-07-11）**——随 clj-agent-process 模块整体删除
-> （Process 设计重新思考，见 docs/process-parallel-design.md 头部说明；
+> （Process 设计重新思考，见 `process-parallel-design.md` 头部说明；
 > Timeline 唯一消费者是 process 快照，一并撤下）。代码见 git 历史
 > 7bc5d64..764285c。以下为落地时的原状态记录，留档：
 >

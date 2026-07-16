@@ -2,7 +2,7 @@
   "HTTP 客户端工具模块（基于 java.net.http）——**仅非流式**请求/响应。
 
    流式（SSE）已迁移到 `im.ttalk.agent.provider.http.stream-client`（java.net.http 真增量，
-   见 design/streaming-async-design.md）；本模块不再提供流式 API。
+   见 docs/streaming-async-design.md）；本模块不再提供流式 API。
 
    用法：
    (require '[im.ttalk.agent.provider.http.client :as http])

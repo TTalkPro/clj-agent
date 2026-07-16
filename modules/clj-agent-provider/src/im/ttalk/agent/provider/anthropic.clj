@@ -504,7 +504,7 @@
 
    返回：
    {:future CompletableFuture :cancel (fn [])} —— 真增量、非阻塞；
-   cancel 可在客户端断连/停止生成时取消上游（异步服务器整合关键，见 design/streaming-async-design.md）。"
+   cancel 可在客户端断连/停止生成时取消上游（异步服务器整合关键，见 docs/streaming-async-design.md）。"
   [config messages tools on-token on-complete & [on-error]]
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
