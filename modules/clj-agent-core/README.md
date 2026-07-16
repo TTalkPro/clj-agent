@@ -134,6 +134,7 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 
 ;; 支持的参数类型: :string :int :float :boolean :array :object
 ;; 可选项: :sensitive :context :tags :category :serial :retry :return-direct
+;;         :timeout（毫秒；由 timeout-filter 强制，优先于其构造缺省值——不挂该 filter 即无超时）
 ;; 生成的 metadata: :tool/schema :tool/params :tool/sensitive :tool/context
 ;;                  :tool/tags :tool/category :tool/serial :tool/retry
 ;;                  :tool/return-direct :tool/function
@@ -162,6 +163,8 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 filters/logging-filter          ;; :tool  调用前后日志
 (filters/logging-chat-filter)   ;; :chat  LLM 请求/响应日志（≈ SimpleLoggerAdvisor）
 (filters/timeout-filter 5000)   ;; :tool  超时短路 + 中断，标 :transient
+                                ;;        （deftool :timeout 声明优先于此缺省值；
+                                ;;         超时=放弃等待≠终止执行，见其 docstring）
 (filters/approval-filter)       ;; :tool  敏感工具人工审批，拒绝则短路
 (filters/validation-turn-filter validate-fn :max-retries 2)
                                 ;; :turn  答案校验，不合格带反馈重入循环
@@ -332,7 +335,7 @@ subagent) moved to [`clj-agent-client`](../clj-agent-client/README.md) in 2026-0
 - `kernel/build-kernel {:service :tools :filters :settings}` - Declarative kernel construction
 - `kernel/invoke-tool` / `kernel/invoke-chat` - Primitives through the :tool / :chat advisor chains
   (the tool-calling loop lives in `clj-agent-client`, not the kernel)
-- `deftool` - Define tool with auto-generated schema (`:sensitive` / `:serial` / `:retry` / `:return-direct`)
+- `deftool` - Define tool with auto-generated schema (`:sensitive` / `:serial` / `:retry` / `:return-direct` / `:timeout`)
 - `service/create-service` - Wrap any `ILLMProvider` into a kernel service (protocol-only)
 - `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/set-vars`, `ctx/with-conversation-id` - Context
 - `advisor.tool-search/with-tool-search` - Progressive tool disclosure; bring your own
