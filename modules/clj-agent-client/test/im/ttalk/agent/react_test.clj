@@ -10,7 +10,6 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.memory :as memory]
-            [im.ttalk.agent.advisor :as flt]
             [im.ttalk.agent.advisor.memory :as ma]
             [im.ttalk.agent.tool-calling-manager :as tcm]
             [im.ttalk.agent.react :as agent-loop]))
@@ -231,20 +230,40 @@
 
 (defn- tc [id name] {:id id :name name :args {}})
 
-(deftest batch-true-parallel-test
-  (testing "同批两个工具互等对方启动——串行执行会死等超时报 :not-parallel"
+(defn- via-manager
+  "用**指定引擎**跑一批。`execute-batch` 现在缺省串行，故一切「并发语义」的测试
+   都必须显式选引擎——否则它们会在串行下退化成假通过（握手靠 deref 超时兜底）。"
+  [m kernel calls]
+  (tcm/execute-tool-calls m kernel
+                          (response/make-response :text nil :tool-calls calls)
+                          {:tool-context {} :records []}))
+
+(deftest default-manager-is-sequential-test
+  (testing "**缺省 TCM 是串行**：不指定 :tool-manager 时同批工具严格按序、无重叠
+            （v0.3 破坏性变更——此前缺省是虚拟线程并行。并发要求同批工具的副作用
+             彼此无序依赖，那是调用方才知道的性质，框架不替它假定）"
+    (let [trace (atom [])
+          mk (fn [id] (fn [_ _] (swap! trace conj [id :start]) (Thread/sleep 60)
+                        (swap! trace conj [id :end]) "ok"))
+          kernel (batch-kernel [(inline-tool "a" (mk :a)) (inline-tool "b" (mk :b))])]
+      (agent-loop/execute-batch kernel [(tc "1" "a") (tc "2" "b")] nil {} [])
+      (is (= [[:a :start] [:a :end] [:b :start] [:b :end]] @trace)
+          "严格按调用序，无重叠")))
+
+  (testing "要并发是**显式**决定：注入 VT 引擎"
     (let [a (promise) b (promise)
           mk (fn [own other]
                (fn [_ _] (deliver own true)
                  (if (true? (deref other 3000 false)) "ok" "not-parallel")))
           kernel (batch-kernel [(inline-tool "ta" (mk a b))
                                 (inline-tool "tb" (mk b a))])
-          {:keys [messages]} (agent-loop/execute-batch
-                               kernel [(tc "1" "ta") (tc "2" "tb")] nil {} [])]
-      (is (= ["ok" "ok"] (mapv :content messages))))))
+          {:keys [messages]} (via-manager (agent-loop/virtual-thread-tool-calling-manager)
+                                          kernel [(tc "1" "ta") (tc "2" "tb")])]
+      (is (= ["ok" "ok"] (mapv :content messages))
+          "两个工具互等对方启动——只有真并发才都拿到 ok"))))
 
 (deftest batch-snapshot-isolation-test
-  (testing "同批工具互相看不到对方的写（全部拿轮初快照）"
+  (testing "同批工具互相看不到对方的写（全部拿轮初快照）——**在并发引擎下**才有意义"
     (let [gate-a (promise) gate-b (promise)
           writer (fn [_ _] (deliver gate-a true)
                    (deref gate-b 3000 false)
@@ -254,10 +273,22 @@
                    (str "saw=" (context/get-var ctx :seen "nothing")))
           kernel (batch-kernel [(inline-tool "writer" writer)
                                 (inline-tool "reader" reader)])
+          {:keys [messages context]} (via-manager
+                                       (agent-loop/virtual-thread-tool-calling-manager)
+                                       kernel [(tc "1" "writer") (tc "2" "reader")])]
+      (is (= "saw=nothing" (:content (second messages))) "reader 读到的是轮初快照")
+      (is (= "from-a" (context/get-var context :seen)) "屏障后写已折叠进新 context")))
+
+  (testing "串行引擎下快照语义相同（状态语义与引擎无关）"
+    (let [writer (fn [_ _] {:result "wrote" :writes {:seen "from-a"}})
+          reader (fn [_ ctx] (str "saw=" (context/get-var ctx :seen "nothing")))
+          kernel (batch-kernel [(inline-tool "writer" writer)
+                                (inline-tool "reader" reader)])
           {:keys [messages context]} (agent-loop/execute-batch
                                        kernel [(tc "1" "writer") (tc "2" "reader")] nil {} [])]
-      (is (= "saw=nothing" (:content (second messages))) "reader 读到的是轮初快照")
-      (is (= "from-a" (context/get-var context :seen)) "屏障后写已折叠进新 context"))))
+      (is (= "saw=nothing" (:content (second messages)))
+          "即使串行、writer 先跑完，reader 仍只看到轮初快照")
+      (is (= "from-a" (context/get-var context :seen))))))
 
 (deftest batch-last-writer-by-index-test
   (testing "last-writer 按 tool-call 原始序而非完成序（index 0 慢但先折叠）"
@@ -292,7 +323,10 @@
       (is (= [:slow :fast] (mapv :name records))))))
 
 (deftest batch-serial-degrade-test
-  (testing "批内含 :serial 工具 → 整批退化按序执行（无重叠）"
+  (testing "批内含 :serial 工具 → 整批退化按序执行（无重叠）
+
+            **必须在并发引擎下测**：缺省引擎本就串行，拿它测「退化」等于什么都没测
+            （v0.3 缺省改串行后，本测试若仍走 execute-batch 就是假通过）。"
     (let [trace (atom [])
           mk (fn [tag] (fn [_ _]
                          (swap! trace conj [tag :start])
@@ -301,9 +335,20 @@
                          "done"))
           kernel (batch-kernel [(inline-tool "s1" (mk :s1) true)
                                 (inline-tool "s2" (mk :s2))])
-          _ (agent-loop/execute-batch kernel [(tc "1" "s1") (tc "2" "s2")] nil {} [])]
+          _ (via-manager (agent-loop/virtual-thread-tool-calling-manager)
+                         kernel [(tc "1" "s1") (tc "2" "s2")])]
       (is (= [[:s1 :start] [:s1 :end] [:s2 :start] [:s2 :end]] @trace)
-          "按原始序依次执行，不并发"))))
+          "选了并发引擎，但批内有 :serial → 整批仍按原始序依次执行")))
+
+  (testing "对照：同样两个工具、去掉 :serial 声明 → VT 引擎下真并发（证明上面测的是退化）"
+    (let [a (promise) b (promise)
+          mk (fn [own other] (fn [_ _] (deliver own true)
+                               (if (true? (deref other 2000 false)) "并发" "串行")))
+          kernel (batch-kernel [(inline-tool "n1" (mk a b))
+                                (inline-tool "n2" (mk b a))])
+          {:keys [messages]} (via-manager (agent-loop/virtual-thread-tool-calling-manager)
+                                          kernel [(tc "1" "n1") (tc "2" "n2")])]
+      (is (= ["并发" "并发"] (mapv :content messages))))))
 
 (deftest batch-reject-test
   (testing ":reject 不执行、不触发回调、无 writes、记录 :rejected"
@@ -404,17 +449,105 @@
                (run (agent-loop/virtual-thread-tool-calling-manager)))
             "Sequential 与 VirtualThread 引擎须给出相同结果")))))
 
+(deftest tool-error-contained-not-fatal-test
+  (testing "工具抛**非致命 Error** → 收敛为该工具的错误结果，不打死整个循环
+            （回归 review#5：各层此前一律 catch Exception，Error 全部逃逸——
+             一个工具的深递归 StackOverflowError 会整轮死，而分层错误路由的
+             全部意义就是「一个工具坏了不牵连别人」）"
+    (doseq [[label thrower] [["StackOverflowError（工具深递归 bug）"
+                              #(throw (StackOverflowError. "深递归"))]
+                             ["AssertionError（工具里的 assert）"
+                              #(throw (AssertionError. "断言失败"))]
+                             ["NoClassDefFoundError（该工具缺可选依赖）"
+                              #(throw (NoClassDefFoundError. "com/missing/Dep"))]]]
+      (let [kernel (batch-kernel [(inline-tool "boom" (fn [_ _] (thrower)))])
+            {:keys [messages errors]} (agent-loop/execute-batch
+                                        kernel [(tc "1" "boom")] nil {} [])]
+        (is (clojure.string/includes? (:content (first messages)) "错误") label)
+        (is (= :semantic (:class (first errors)))
+            (str label "：工具自身 bug，重试无意义")))))
+
+  (testing "真·栈溢出（不是手工 throw）同样被收敛"
+    (let [recurse (fn [_ _] (let [f (fn f [n] (+ 1 (f (inc n))))] (f 0)))
+          kernel (batch-kernel [(inline-tool "recurse" recurse)])
+          {:keys [errors]} (agent-loop/execute-batch kernel [(tc "1" "recurse")] nil {} [])]
+      (is (= :semantic (:class (first errors))))))
+
+  (testing "同批：一个工具栈溢出不牵连另一个（这正是收敛的意义）"
+    (let [kernel (batch-kernel [(inline-tool "bad" (fn [_ _] (throw (StackOverflowError. "x"))))
+                                (inline-tool "good" (fn [_ _] "我没事"))])
+          {:keys [messages]} (agent-loop/execute-batch
+                               kernel [(tc "1" "bad") (tc "2" "good")] nil {} [])]
+      (is (clojure.string/includes? (:content (first messages)) "错误"))
+      (is (= "我没事" (:content (second messages))))))
+
+  (testing "filter 抛的 Error 同样收敛——invoke-one 是本批的**完备**边界"
+    (let [bad-filter {:name :bad :tool (fn [_ _] (throw (StackOverflowError. "filter 炸了")))}
+          kernel (core/build-kernel {:tools [(inline-tool "t" (fn [_ _] "ok"))]
+                                     :filters [bad-filter]})
+          {:keys [errors]} (agent-loop/execute-batch kernel [(tc "1" "t")] nil {} [])]
+      (is (= :semantic (:class (first errors))))))
+
+  (testing "**致命** Error 仍原样上抛——吞掉 OOM 只会掩盖真因，且收敛动作本身还要分配内存"
+    (let [kernel (batch-kernel [(inline-tool "oom" (fn [_ _] (throw (OutOfMemoryError. "堆爆了"))))])]
+      (is (thrown? OutOfMemoryError
+            (agent-loop/execute-batch kernel [(tc "1" "oom")] nil {} []))))))
+
+(deftest manager-default-timeout-test
+  (testing "**缺省不超时**：既没声明、引擎也没给 :timeout → 工具跑多久都不管
+            （框架不替调用方决定何时放弃）"
+    (let [kernel (batch-kernel [(inline-tool "slow" (fn [_ _] (Thread/sleep 400) "done"))])
+          {:keys [messages]} (agent-loop/execute-batch kernel [(tc "1" "slow")] nil {} [])]
+      (is (= "done" (:content (first messages))))))
+
+  (testing "引擎缺省 `{:timeout ms}` → 未声明的工具被封顶（时间上限属于执行策略，随引擎构造）"
+    (let [tm (agent-loop/sequential-tool-calling-manager {:timeout 150})
+          kernel (core/build-kernel {:tools [(inline-tool "slow" (fn [_ _] (Thread/sleep 5000) "done"))]
+                                     :tool-manager tm})
+          {:keys [messages errors]} (via-manager tm kernel [(tc "1" "slow")])]
+      (is (clojure.string/includes? (:content (first messages)) "超时"))
+      (is (= :transient (:class (first errors))))))
+
+  (testing "优先级：工具声明 > 引擎缺省（声明更紧 → 提前超时，报声明值）"
+    (let [tm (agent-loop/sequential-tool-calling-manager {:timeout 9000})
+          kernel (core/build-kernel
+                   {:tools [(assoc (inline-tool "slow" (fn [_ _] (Thread/sleep 5000) "done"))
+                                   :timeout 150)]
+                    :tool-manager tm})
+          {:keys [messages]} (via-manager tm kernel [(tc "1" "slow")])]
+      (is (clojure.string/includes? (:content (first messages)) "150ms")
+          "报的是工具声明的 150ms，不是引擎的 9000ms")))
+
+  (testing "优先级：工具声明 > 引擎缺省（声明更宽 → 引擎缺省不砍它）"
+    (let [tm (agent-loop/sequential-tool-calling-manager {:timeout 100})
+          kernel (core/build-kernel
+                   {:tools [(assoc (inline-tool "ok" (fn [_ _] (Thread/sleep 300) "done"))
+                                   :timeout 9000)]
+                    :tool-manager tm})
+          {:keys [messages]} (via-manager tm kernel [(tc "1" "ok")])]
+      (is (= "done" (:content (first messages)))
+          "引擎缺省 100ms < 下游 300ms，但声明 9000ms 胜出")))
+
+  (testing "三个引擎都接受 :timeout；坏值构造期即拒"
+    (is (some? (agent-loop/sequential-tool-calling-manager {:timeout 100})))
+    (is (some? (agent-loop/virtual-thread-tool-calling-manager {:timeout 100})))
+    (with-open [m (agent-loop/thread-pool-tool-calling-manager {:pool-size 1 :timeout 100})]
+      (is (some? m)))
+    (doseq [bad ["5s" -1 0]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #":timeout 必须为正整数毫秒"
+            (agent-loop/sequential-tool-calling-manager {:timeout bad}))))))
+
 (deftest timeout-transient-retry-test
-  (testing "timeout-filter 超时 → :transient → 声明 :retry 的工具被重试，第二次按时完成（链路断言：此前各环节单测有、整链无钉）"
+  (testing "声明超时 → :transient → 声明 :retry 的工具被重试，第二次按时完成（链路断言：此前各环节单测有、整链无钉）"
     (let [attempts (atom 0)
           slow-then-fast (fn [_ _]
                            (if (= 1 (swap! attempts inc))
                              (do (Thread/sleep 60000) "never")
                              "第二次很快"))
           kernel (core/build-kernel
-                   {:tools   [(assoc (inline-tool "flaky" slow-then-fast)
-                                     :retry {:max-retries 2 :initial-delay-ms 1})]
-                    :filters [(flt/timeout-filter 200)]})
+                   {:tools [(assoc (inline-tool "flaky" slow-then-fast)
+                                   :timeout 200
+                                   :retry {:max-retries 2 :initial-delay-ms 1})]})
           {:keys [messages errors]} (agent-loop/execute-batch
                                       kernel [(tc "1" "flaky")] nil {} [])]
       (is (= 2 @attempts) "第一次超时触发一次重试——注意幂等前提：重试发起时上一次调用可能仍在跑")
@@ -422,14 +555,15 @@
       (is (empty? errors)))))
 
 (deftest timeout-partial-batch-test
-  (testing "同批一个工具超时不殃及其它——部分结果是每工具超时的自然结果（对照 beamai 需专门一层 gather deadline 才有）"
+  (testing "同批一个工具超时不殃及其它——部分结果是每工具超时的自然结果（对照 beamai 需专门一层 gather deadline 才有）；缺省超时来自**引擎** {:timeout ms}"
     (let [slow (fn [_ _] (Thread/sleep 60000) "never")
           fast (fn [_ _] "快的正常返回")
+          tm   (agent-loop/sequential-tool-calling-manager {:timeout 200})
           kernel (core/build-kernel
-                   {:tools   [(inline-tool "slow" slow) (inline-tool "fast" fast)]
-                    :filters [(flt/timeout-filter 200)]})
-          {:keys [messages errors]} (agent-loop/execute-batch
-                                      kernel [(tc "1" "slow") (tc "2" "fast")] nil {} [])]
+                   {:tools [(inline-tool "slow" slow) (inline-tool "fast" fast)]
+                    :tool-manager tm})
+          {:keys [messages errors]} (via-manager tm kernel
+                                                 [(tc "1" "slow") (tc "2" "fast")])]
       (is (clojure.string/includes? (:content (first messages)) "超时"))
       (is (= "快的正常返回" (:content (second messages))))
       (is (= [:transient] (mapv :class errors)) "只有超时者进 :errors"))))

@@ -18,6 +18,7 @@
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.tool :as tool]
+            [im.ttalk.agent.model.error :as err]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.memory :as memory]
@@ -75,7 +76,11 @@
 
 (defn- invoke-with-retry
   "调用 kernel/invoke-tool；仅当错误为 :transient 且工具声明 :retry 时
-   按策略指数退避重试（幂等前提；重试会重跑整条 tool filter 链）。"
+   按策略指数退避重试（幂等前提；重试会重跑整条 tool filter 链）。
+
+   工具声明的 `:timeout` 由 `kernel/invoke-tool` **自己**强制（单次调用的时间上限
+   是它的职责，不是循环的）——超时归 :transient，故这里的重试对它天然生效。
+   幂等前提在超时下更要紧：重试发起时上一次调用可能仍在跑（打不断的那种）。"
   [kernel fn-key args tool-context]
   (let [policy (kernel/retry-policy kernel fn-key)
         max-r  (long (or (:max-retries policy) 0))]
@@ -111,11 +116,17 @@
     :else
     (let [fn-key (keyword (:name tc))
           {:keys [value writes error]}
+          ;; **本批的完备错误边界**：收 Throwable（不只 Exception）——filter 链或
+          ;; 工具抛的 Error（如深递归的 StackOverflowError）此前会从这里逃逸、
+          ;; 打死整个 agent 循环，而分层错误路由的全部意义就是「一个工具坏了不牵连
+          ;; 别人」。致命的（OOM 等）仍原样上抛：吞掉它只会掩盖真因（见
+          ;; err/fatal-throwable?）。
           (try (invoke-with-retry kernel fn-key (:args tc) tool-context)
-               (catch Exception e
-                 (let [m (or (not-empty (.getMessage e)) (.getName (class e)))]
+               (catch Throwable t
+                 (when (err/fatal-throwable? t) (throw t))
+                 (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
                    {:value (str "错误: " m)
-                    :error {:class :semantic :message m}})))]
+                    :error {:class (err/classify-exception t) :message m}})))]
       ;; 完成即触发（并行下批内顺序不确定；需确定顺序请读 :records）
       (when on-tool-result
         (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
@@ -217,9 +228,13 @@
 (defn execute-batch
   "MapReduce 执行一批工具调用（设计见 docs/agent-loop-concurrency-design.md §9）。
 
-   map：每个调用在虚拟线程执行，全部拿同一份轮初 tool-context 快照
-   （同批工具互相看不到对方的写）。批内任一工具声明 :serial 时整批退化为
-   按序执行（副作用顺序可预期；状态语义不变，仍是快照 + 屏障折叠）。
+   **缺省串行**（无 `:tool-manager` 时走这里）：每个调用按序在调用方线程执行。
+   并发要求同批工具的副作用彼此无序依赖——那是调用方才知道的性质，框架不替它
+   假定。要并发就注入 `virtual-thread-tool-calling-manager`（或 thread-pool 版）。
+
+   map：每个调用拿同一份轮初 tool-context 快照（同批工具互相看不到对方的写）。
+   批内任一工具声明 :serial 时，即使选了并发引擎也整批退化为按序执行。
+   **状态语义与引擎无关**：三个引擎都是快照 + 屏障折叠。
 
    reduce：屏障收齐后，各工具的 :writes 按 tool-call 原始序经 kernel
    :state-slots 的槽级 reducer 折叠进 context（未声明槽默认 last-writer；
@@ -242,7 +257,9 @@
   ([kernel tool-calls gate tool-context init-records]
    (execute-batch kernel tool-calls gate tool-context init-records nil))
   ([kernel tool-calls gate tool-context init-records on-tool-result]
-   (execute-batch-via @tool-executor kernel tool-calls gate tool-context
+   ;; executor = nil → 全程内联。**缺省串行**（v0.3 破坏性变更：此前缺省是
+   ;; @tool-executor 的虚拟线程并行）。并发是显式选择，见 defn 文档。
+   (execute-batch-via nil kernel tool-calls gate tool-context
                       init-records on-tool-result)))
 
 ;;; ============================================================
@@ -254,26 +271,43 @@
 ;;; 「怎么把这批跑完」，不决定「跑的是什么」。
 ;;; ============================================================
 
-(defrecord VirtualThreadToolCallingManager []
+(defn- check-timeout-opt!
+  [t]
+  (when-not (tool/valid-timeout? t)
+    (throw (ex-info (str "ToolCallingManager 的 :timeout 必须为正整数毫秒，实为 "
+                         (pr-str t))
+                    {:timeout t}))))
+
+(defrecord VirtualThreadToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager
   (execute-tool-calls [_ kernel response opts]
     (let [calls (response/response-tool-calls response)]
-      (execute-batch kernel calls
-                     (:gate opts)
-                     (:tool-context opts)
-                     (:records opts)
-                     (:on-tool-result opts)))))
+      (execute-batch-via @tool-executor kernel calls
+                         (:gate opts)
+                         (:tool-context opts)
+                         (:records opts)
+                         (:on-tool-result opts)))))
 
 (defn virtual-thread-tool-calling-manager
-  "缺省引擎：每调用一根虚拟线程，尊重 :serial 声明（现状行为）。
+  "并发引擎：每调用一根虚拟线程，尊重 :serial 声明。
+
+   **不是缺省**——缺省是串行（见 `sequential-tool-calling-manager`）。同轮多个
+   tool-call 并发跑，要求这些工具的副作用彼此无序依赖；那是**调用方才知道**的事，
+   故须显式选择。
 
    线程模型：虚拟线程，无界。
    隔离边界：**无**——用的是进程全局共享 executor（见 tool-executor）。
-   需要舱壁 / 限流 / 可关停边界时改用 thread-pool-tool-calling-manager。"
-  []
-  (->VirtualThreadToolCallingManager))
+   需要舱壁 / 限流 / 可关停边界时改用 thread-pool-tool-calling-manager。
 
-(defrecord SequentialToolCallingManager []
+   opts:
+   - :timeout  本引擎为**没有声明 `:timeout`** 的工具设的缺省超时（毫秒）。
+               缺省 nil = 不超时。工具自己的声明恒优先。"
+  ([] (virtual-thread-tool-calling-manager {}))
+  ([{:keys [timeout]}]
+   (check-timeout-opt! timeout)
+   (->VirtualThreadToolCallingManager timeout)))
+
+(defrecord SequentialToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager
   (execute-tool-calls [_ kernel response opts]
     (let [calls (response/response-tool-calls response)]
@@ -285,15 +319,26 @@
                          (:on-tool-result opts)))))
 
 (defn sequential-tool-calling-manager
-  "全串行引擎：每个工具按调用序在调用方线程执行，无并发。
-   适合调试或严格副作用排查。
+  "**缺省引擎**：每个工具按调用序在调用方线程执行，无并发。
+
+   **为什么串行是缺省**：并发要求同批工具的副作用彼此无序依赖——那是**调用方才
+   知道**的性质，框架不该替它假定。串行是那个「无论工具长什么样都成立」的选择：
+   顺序可预期、可调试、不会因为 LLM 某轮多发一个 tool-call 就把副作用交错起来。
+   要并发是**显式**的决定：注入 `virtual-thread-tool-calling-manager`。
+   （状态语义两者相同：都是轮初快照 + 屏障折叠。）
 
    线程模型：调用方线程，**全程不构造 Future**（故不背 ExecutionException 包装
    与 Future.get 的中断语义——这是它与「给 VT 引擎塞一个 same-thread executor」
    的本质区别）。
-   隔离边界：不持任何资源，无可争之物。"
-  []
-  (->SequentialToolCallingManager))
+   隔离边界：不持任何资源，无可争之物。
+
+   opts:
+   - :timeout  本引擎为**没有声明 `:timeout`** 的工具设的缺省超时（毫秒）。
+               缺省 nil = 不超时。工具自己的声明恒优先。"
+  ([] (sequential-tool-calling-manager {}))
+  ([{:keys [timeout]}]
+   (check-timeout-opt! timeout)
+   (->SequentialToolCallingManager timeout)))
 
 (defn- pool-thread-factory
   ^ThreadFactory [prefix]
@@ -304,7 +349,7 @@
           ;; daemon：用户忘记 close 时不至于吊住 JVM 退出
           (.setDaemon true))))))
 
-(defrecord ThreadPoolToolCallingManager [^ExecutorService pool]
+(defrecord ThreadPoolToolCallingManager [^ExecutorService pool timeout]
   tool-calling-manager/ToolCallingManager
   (execute-tool-calls [_ kernel response opts]
     (when (.isShutdown pool)
@@ -330,6 +375,10 @@
    opts:
    - :pool-size          正整数，缺省 (availableProcessors)
    - :thread-name-prefix 线程名前缀，缺省 \"clj-agent-tool-\"
+   - :timeout            为**没有声明 `:timeout`** 的工具设的缺省超时（毫秒），
+                         缺省 nil = 不超时；工具自己的声明恒优先。
+                         **本引擎尤其值得给一个**：被超时放弃的工具会永久占住一个
+                         池槽（舱壁逐格坏死），而 VT 引擎只漏几 KB 栈
 
    **生命周期由持有者负责**——池不会自己关。实现了 java.io.Closeable：
 
@@ -354,13 +403,15 @@
    顺带一提：有界平台池是给**真正干活**的工具封顶用的。delegate 这类只是阻塞等
    网络的工具，占一根平台线程停几秒到几分钟，本就不该走有界池。"
   ([] (thread-pool-tool-calling-manager {}))
-  ([{:keys [pool-size thread-name-prefix]
+  ([{:keys [pool-size thread-name-prefix timeout]
      :or   {pool-size          (.availableProcessors (Runtime/getRuntime))
             thread-name-prefix "clj-agent-tool-"}}]
    (when-not (pos-int? pool-size)
      (throw (ex-info "pool-size 必须为正整数" {:pool-size pool-size})))
+   (check-timeout-opt! timeout)
    (->ThreadPoolToolCallingManager
-     (Executors/newFixedThreadPool pool-size (pool-thread-factory thread-name-prefix)))))
+     (Executors/newFixedThreadPool pool-size (pool-thread-factory thread-name-prefix))
+     timeout)))
 
 (defn shutdown-tool-calling-manager!
   "关停 manager 持有的资源。只有 ThreadPoolToolCallingManager 持有池；
