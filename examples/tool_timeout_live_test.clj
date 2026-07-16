@@ -154,8 +154,8 @@
                               ((:chat-fn svc) messages opts)))
         k (kernel/build-kernel {:service instrumented
                                 :tools tools
-                                :tool-manager (react/sequential-tool-calling-manager
-                                                (cond-> {} default-ms (assoc :timeout default-ms)))})]
+:tool-manager (react/sequential-tool-calling-manager
+                {:timeout default-ms})})]
     {:agent (agent/create-agent
               {:kernel k
                :callbacks {:on-tool-result

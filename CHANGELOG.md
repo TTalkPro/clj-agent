@@ -435,6 +435,31 @@
   「打不断」变成了「真能取消」——超时后 socket 立刻关闭，副作用不落地。
   残余风险收窄为不检查中断标志的 CPU 密集代码、native 调用等。设计文档 §2.2
   已加修订块记录。
+- **P9 code review 第二轮**（2026-07-16，10 条 CONFIRMED 全部修复）：
+  - **R1/R3 超时包裹 filter 链而非工具本体**：`run-chain` 把整条 `:tool` filter 链
+    （含 approval-filter 的阻塞审批）一起计时——操作员审批慢即超时，超时结果在链外
+    合成（日志/审计 filter 看不到）。超时下沉到 terminal（只包工具本体），filter 链
+    在计时区外。
+  - **R2 超时起 VT 与引擎线程模型冲突**：声明超时的工具总是跑在 VT 上（`call-with-timeout`），
+    Sequential「调用方线程」与 ThreadPool「舱壁」承诺在有超时不成立——诚实降级 docstring。
+  - **R4 manager :timeout 读 kernel 反向指针**：instrumented wrapper / 独立传入的 manager
+    会读错对象。改动态 var `*active-manager-timeout*`，各 record 入口 binding 自身 `:timeout`。
+  - **R5 `:tool-manager` 的 `:timeout` 零校验**：`:tool-manager {:timeout 0}` 每次调用瞬时
+    超时。`build-kernel` 装配期一并过 `valid-timeout?`（消息串统一走 `tool/check-timeout!`）。
+  - **R6 delegate 被引擎超时打断 → kill!/drop! 跳过**：子 agent 泄漏且继续烧 token。
+    `run-sync` 加 try/finally；delegate-tool / fanout-tool 写 `:timeout` 进 inline map
+    （声明恒优先，引擎缺省砍不掉它）。
+  - **R7 executor 路径 OOM 被 Future.get 包成 ExecutionException**：`invoke-one` 重抛的
+    OOM 被 EE 包装（普通 Exception），`fatal-throwable?` 认不出。`run-on-executor` 拆 cause
+    原样重抛。
+  - **R8-R10 docstring/测试陈述过时**：run-tools 恒串行但吃引擎 :timeout（docstring 如实写明）；
+    ThreadPool :timeout 因果倒置（无超时卡死才占槽，非被超时放弃的占）；tool_test「声明无强制力」
+    与「开箱即生效」矛盾（改为「裸 tool/invoke 不超时」）。
+  - **次级 cleanup**（helper 提取，零行为变化）：`err/contain-throwable` 收口 4 处
+    catch-Throwable 三元组；`tool/check-timeout!` 统一超时校验消息串；`:retry` 装配期校验
+    （与 `:timeout` 对称）；`inline-meta` 预计算消除 4 处 by-name O(n) 扫描；live 脚本
+    `cond->` 冗余 + test sleep 减半。
+  - 全套 **316 tests / 1307 assertions / 0 failures**，MiniMax live 20 项第五遍稳定。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 
