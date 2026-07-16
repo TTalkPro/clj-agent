@@ -50,9 +50,21 @@
   - `converter/api validate` 对不支持的 parser fail-closed（返回未通过）而非谎报 `{:valid true}`。
 - [x] **D7（部分）**：`http/client.clj with-retry`（会盲目重试 4xx 的重复实现）标记 `^:deprecated` 并在 docstring 警示，引导改用 `http/retry/maybe-with-retry`。
 
-### ⏳ 待办（架构级，建议各自专项推进，勿在常规改动中草率重构）
+### ✅ 已清零（2026-07-16 复核结案）
 
-- [~] **BUG2 http-kit 伪流式 —— 传输层已落地并验证**（方案见 `design/streaming-async-design.md`）：
+> **复核结论**：此前 6 个 `[~]` **没有一个是「正在做」**——2 个活儿早干完了没改勾，
+> 3 个设计文档里本就是拍板结论（TASK 没同步），1 个触发条件已到期未被触发。
+> 逐条对着代码核过，不是照文字信。
+>
+> **模式**（值得记）：三条「暂缓」都写了触发条件（「留待 D7 顺带」「留 v0.2」），
+> **条件全部到期，无一被触发去做**——按 [`docs/design-principles.md`](docs/design-principles.md)
+> §1 四问判据的「触发条件写得出来吗」，这正是假想需求的定义：真需求不会在触发
+> 条件打响后还没人管。故一并结案，不再挂账。
+
+- [x] **BUG2 http-kit 伪流式 —— 全部完成**（方案见 `docs/streaming-async-design.md`）：
+  *（2026-07-16 复核：10 个子项早已全 `[x]`，设计文档所称「唯一待续项 Undertow
+  WebSocket 示例」实际也在——`examples/streaming/undertow_example.clj` 含完整 WS 段。
+  父项此前一直挂 `[~]`，纯属没改勾。）*
   - [x] 实搜确认 http-kit 客户端流式是**官方已知限制**（issue #591，beta2 尝试后撤回），最新版仍做不了。
   - [x] 新建 `provider/http/stream_client.clj`：**java.net.http `fromLineSubscriber`** 真流式——零依赖、虚拟线程 executor、`on-token/on-complete/on-error` + `cancel`、非 2xx 走 D5 canonical error。
   - [x] **三条流式路径全部上真流式**：anthropic（anthropic/minimax/zhipu）+ openai_compat（openai/deepseek/zhipu/gemini/mistral/ollama/openai-compat）+ **DashScope 原生 SSE**（X-DashScope-SSE + incremental_output，专属 `stream/dashscope.clj` 解析器，`supports-stream? true`）；deepseek 测试改 stub 新传输。**全部内置 provider 现均支持流式**。
@@ -63,22 +75,41 @@
   - [x] **kernel/SimpleAgent `chat-stream` 接入**：service 加 `:stream-fn`（不支持流式的 provider 回退同步 + 全文单 token）；kernel 加 `invoke-chat-stream`（复用同一 chat filter 链，on-token 透传 terminal）；react loop 有 on-token 时走 invoke-chat-stream；client 加 `chat-stream`。memory 在每回合流结束落库完整 assistant 消息，与同步**不分叉**。单测 3 个（流式/回退/带工具）+ **MiniMax 端到端 live 验证多轮记忆**。全套 **197/769/0**。
   - [x] **Web 集成示例（examples/streaming/，框架无关）**：为 4 个最常用 Luminus server（http-kit / Undertow / Jetty / Aleph）各写 WebSocket + SSE 示例 + README（同一"`on-token` → 各 server sink"模式 + 各自依赖 + 断连取消）。按「框架无关」硬约束：**只在 examples、web 依赖不进 core**。设计文档 §0.5 已固化。
   - [x] **chat-stream cancel 透传（断连即时中止生成）**：新增 `core/streaming.clj`（取消令牌 + 动态 var 桥）；令牌经 opts→react 循环（回合间停）、react 绑 `*register-cancel*`→provider 登记 stream_client 的在途 cancel（不改协议/config）；取消时 provider 宽 catch、cancelled? 优先返回空响应；client `chat-stream` 接 `:cancel-token`、finalize 加 `:cancelled`、再导出 `make-cancel-token`/`request-cancel!`。单测 `chat-stream-cancel-test` + **MiniMax live：取消后 ~7ms 停止、status :cancelled、不再烧 token**。示例的 WS on-close / SSE 断连均接 `request-cancel!`。全套 198/773/0。
-- [~] **D5 错误模型统一**（核心已完成 2026-06-10，方案见 `design/error-model-unification.md`）：
+- [x] **D5 错误模型统一 ✅ 结案**（核心 2026-06-10，方案见 `docs/error-model-unification.md`）：
   - [x] 步骤1 `exception->error` 升级为幂等枢纽（透传 canonical ex-data + 识别 UnsupportedOperationException）
   - [x] 步骤2 openai_compat / anthropic HTTP 失败改抛 canonical error（`http-response->error` + `throw!`）
   - [x] 步骤3 bailian 同步失败 + 流式不支持均抛 canonical error（不再裸抛 UnsupportedOperationException）
   - [x] 步骤6 README 错误模型说明更新
   - [x] **修复真实 bug**：provider 401 此前经 `exception->error` 被笼统归为 `:provider-error`（∈可重试集）→ 被误标 `retryable? true`；现端到端保留 `:auth-error`/`:retryable? false`/`:status 401`。回归测试 client_test/model_test/providers_test。
-  - [~] 步骤4（kernel 工具错误渲染）、5（converter/factory payload）暂缓——边界 polish，收益有限，留待 D7 顺带（理由见设计文档 §7）
-- [~] **D6 core 收回厂商 wire 知识**（已定调，方案见 `design/response-path-consolidation.md`）：
+  - ❌ **步骤4（kernel 工具错误渲染）不做**（2026-07-16 结案）：设计文档 §7 写的本就是
+    **否决理由**而非暂缓——`error.clj` 的类型表是 LLM/HTTP 取向，工具内部 NPE 经它会
+    被标成 `[PROVIDER-ERROR]`，**对工具错误是误导**；故保留 P1 的 message/类名渲染，
+    不强套 LLM 错误类型。TASK 此前把结论错记成待办。
+  - ❌ **步骤5（converter/factory payload）不做——半个对象已蒸发**（2026-07-16 结案）：
+    原定「留待 D7 顺带」，**D7 已完成而步骤5 未被触发**；更彻底的是**整个 `converter/`
+    子系统已在 `c1a3ab1`「删除无消费者的 converter + prompt 子系统」中删除**——
+    `json_schema.clj`/`api.clj`/`json.clj`/`protocol.clj`/`retry.clj` 全没了，
+    core 里 `im.ttalk.agent.converter` 零引用。**挂了半年的账，对象自己先没了。**
+    剩下的 factory 部分同样无人触发。按 §1 结案。
+- [x] **D6 core 收回厂商 wire 知识 ✅ 结案**（方案见 `docs/response-path-consolidation.md`，该文状态即「✅ 全部完成，按『中立层容许别名』定调」）：
   - [x] 清掉 `call-with-tools` 后，usage/finish-reason/reasoning 归一化只剩 `model/response.clj` 单一权威来源（service/response_parser 都委托它）。
-  - [~] 保留 permissive 中立层（认识各家字段别名）——彻底协议化（加 `extract-usage`/`extract-finish-reason`）是破坏性变更，收益/破坏不成比例，留 v0.2。converter/json_schema 的 provider 分发同理暂缓。
-- [x] **D7 重复抽象——死代码清理已完成**（方案见 `design/response-path-consolidation.md`）：
+  - ❌ **彻底协议化（加 `extract-usage`/`extract-finish-reason`）不做**（2026-07-16 结案）：
+    **保留 permissive 中立层（认识各家字段别名）就是 D6 的结论**，设计文档已「定调」。
+    协议化是破坏性变更、收益/破坏不成比例，且**无真实需求**（按 §1 四问全落假想列）。
+    原记「留 v0.2」——v0.2 已发布、0.3 也已在途，无人触发，即证其非真需求。
+    **另**：同条挂的「converter/json_schema 的 provider 分发」——`converter/` 整个子系统
+    已在 `c1a3ab1` 中删除，该项对象不存在，无从处理（详见设计文档 §3）。
+- [x] **D7 重复抽象——死代码清理已完成**（方案见 `docs/response-path-consolidation.md`）：
   - [x] 删协议死方法 `build-result-messages`/`build-assistant-message`（协议 + Object 默认 + 4 provider record + 全部测试 reify）——`:build-result-msgs` 构造即死，历史由 `response->neutral` 中立消息构建。
   - [x] 删 `call-with-tools`（core 第 4 份冗余归一化，仅测试用）。
   - [x] 删死响应字段 `response-assistant-msg`/`:assistant-msg`（恒 nil，无读取方）+ openai_compat 独立死函数 `build-assistant-message`。
   - [x] 响应归一化从「4 份」收敛为 2 份活路径（同步 service + 流式 stream，输入不同，合理分工）。
-  - [~] **剩余：双消息体系统一**（`model/types.clj` vs `model/message.clj`）——改动整条消息数据流、高风险、无正确性 bug、转换边界正常工作，建议 v0.2 破坏性版本专项。
+  - [x] **双消息体系统一——已于 2026-07-10 落地（v0.2）**（2026-07-16 复核改勾）：
+    `model/types.clj` **已删除**（`model/` 下现只有 message/response/error/service），
+    tool-call 全库统一为 `{:id :name(字符串) :args}`，response→neutral 桥退化为形状复位。
+    `scripts/check_docs.clj` 已为 `model.types` 立墓碑防文档复活。
+    此前 TASK 仍记「剩余、建议 v0.2 专项」，与设计文档、代码、墓碑三方矛盾——纯属漏改勾
+    （且其父项 D7 早已是 `[x]`，父子自相矛盾）。
 - [x] **测试盲区（增量）**（2026-07-10 收尾）：
   - 流式整链路：已由 stream_client_test（7 个，含建链重试/非 2xx/cancel）+ dashscope_sync_test 覆盖。
   - timeout/approval filter：advisor_test 新增 2 个 deftest——超时返回/按时透传/**后台中断不泄漏线程**；
@@ -186,7 +217,7 @@
   - 代码可从 git 历史找回：V1 见 baf1994/a2a541d、Timeline 见 7bc5d64..764285c、
     V2 见 63dc926..fa13f2b（并行提交会话在删除决定前已提交）。
   - 三份设计文档（`docs/process-framework-design.md`、
-    `docs/process-parallel-design.md`、`design/timeline-snapshot-checkpoint.md`）
+    `docs/process-parallel-design.md`、`docs/timeline-snapshot-checkpoint.md`）
     保留并标注已废弃，作为 rethink 的输入。
 - [ ] **Agent 并发模型 rethink**（讨论已定稿 → `docs/agent-loop-concurrency-design.md`，
   2026-07-11）：核心结论——Agent loop 的并发只在 Tool 阶段（子 agent 也是工具）；
@@ -385,14 +416,159 @@
 - [x] **MiniMax live 验证**（`examples/tool_calling_manager_live_test.clj`）：
   instrumented manager wrapper 跑真实 MiniMax 工具循环，5 项机制断言（manager 被用、
   ≤2 LLM 调用、tool-call 形状正确、最终响应非空）。只钉机制不钉模型措辞。
-- [x] **§1.3 同步**：`advisor-alignment-design.md` §1.3 末尾加「⚠️ 已修订」block，
-  指向专文 + 推翻理由摘要（多 impl 兑现 executor 可注入 + deftool :backend 独立
-  承担 transport dispatch）。
+- [x] **§1.3 同步**：`advisor-alignment-design.md` §1.3 末尾加「⚠️ 已修订」block
+  （2026-07-16 重写）：三条论点逐条对账——「与 :serial / filter 重叠」已推翻
+  （`:serial` 是工具作者的声明，引擎选型是部署方的事，层次不同）；
+  「形状应是 :settings 单键注入」**已推翻但换了理由**（旧理由依赖 `:backend` 已作废；
+  新理由：单键换线程池，manager 换引擎，三条能力级差异见专文 §2.2）；
+  「出现真实需求再抽」成立且已兑现（需求 = 隔离与线程模型可换）。
 - [x] **版本号对齐**：三个 `build.clj` 从 `0.2.%s` 改 `0.3.%s`，与 CHANGELOG
   `[0.3.0]` 对齐（此前 build 仍停在 0.2，与 CHANGELOG 不一致）。
-- [x] **PR2/PR3 评估后搁置**：`deftool :backend` 扩展（HTTP/MCP transport）标记为
-  ⏸️ 未立项——没有真实 HTTP/MCP 工具需求时 ROI 不足（用户可在 deftool 内手写
-  HTTP 包装 5-10 行等价），待真实场景触发。设计文档 §5/§6 已就绪，重启时按图施工。
+- [x] **PR2/PR3 ❌ 否决**（2026-07-16 用户拍板，取代 07-15 的「⏸️ 搁置」）：
+  `deftool :backend` 整条不做——**HTTP / MCP 是工具函数体内部逻辑**，框架不该知道
+  工具走什么 transport（既不影响 LLM 怎么用，也不影响框架怎么调度）。
+  与「搁置」的区别：搁置=有需求就照图施工；否决=**即使有 HTTP/MCP 需求也不这么做**，
+  `deftool` 里直接写 `(http/post ...)` 即可。原设计文档 §5/§6 已删除，替换为
+  §5《为什么不长 `:backend`》否决记录（含唯一可能重开场景：远端动态工具发现，
+  且届时须重新设计、不得捡回原方案）。**代码零改动**（`deftool` / `tool/invoke` /
+  `Kernel` 均未动）。**对 manager 零影响**（见下条）。
+- [x] **manager 定位校准**（2026-07-16 用户拍板，文档 v5）：`ToolCallingManager`
+  是**工具执行引擎**——线程模型 + 隔离边界 + 调度策略，**这一条理由本身足够**，
+  且与 `:backend` 无关（manager 管「怎么执行」，`:backend` 想管「执行的是什么」）。
+  §2 整章按此重写，§0 / §3 / §11（#20 作废，新增 #21）同步。
+  **纠正 v4 的误判**：v4 因 `:backend` 否决而以为 manager「腿变细」，对 §1.3 的
+  「`:settings` 注入 executor」让步——**错的**，差异是能力级不是偏好级：
+  (a) 调度决策 `react.clj:167` 硬编码，`Executor` 接口够不着；
+  (b) `SequentialToolCallingManager` 全程不构造 `Future`（`react.clj:207`），
+  same-thread executor 模拟不出；(c) 池生命周期须与策略打包。
+  **§2.3 新增隔离缺口记录**：`react.clj` 的 VT executor 是进程全局 `def`，
+  所有 kernel 共享，无舱壁 / 无限流 / 无可关停边界。
+- [x] **`ThreadPoolToolCallingManager` 补齐**（2026-07-16，隔离定位的落地）：
+  有界 daemon 平台线程池，`{:pool-size N :thread-name-prefix "..."}`，缺省
+  `availableProcessors`。实现 `java.io.Closeable`（`with-open` 可用）+
+  `react/shutdown-tool-calling-manager!`；关停后再执行抛 `ex-info`
+  （`:error-class :environment`）。**嵌套自锁不设防，改立不变量**（见下）。
+- [x] **不变量：一个引擎属于一个 kernel，不跨 delegate 边界**（2026-07-16 用户拍板）：
+  子 agent 自有引擎本就是默认——`delegate.clj:87` 的 subagent-config 全部来自用户
+  `:subagent-fn`，`do-run` 据此全新造 kernel，父 kernel 的 `:tool-manager` **无渠道
+  流入**。共享需用户亲手塞回去（踩坑，非漏洞）。**删除初版的 `*active-pools*`
+  自锁保护**：跨 delegate 情形线程局部标记测不到（要修得改 subagent/manager 传播
+  上下文 = 让违反不变量的用法能跑，且隔离仍软）；同线程情形无真实需求
+  （`run-tools` 走全局 VT 不碰池）。**复盘**：我用「子 agent 共用会死锁」论证这个
+  保护，而子 agent 根本不共享；主场景被划走后剩假想需求——刚用「无真实需求不建」
+  毙掉 `:backend`，转头自己建了一个，标准要对自己也用。
+- [x] **三引擎骨架抽取**（重构，行为不变）：`execute-batch-via` 统一 gate 预判 /
+  `:serial` 整批退化 / writes 屏障折叠 / 结果按原序排回；引擎只挑 executor
+  （nil = 内联，不构造 Future）。此前 VT 与 Sequential 各持一份 map+reduce 拷贝。
+- [x] **新引擎测试**（+4 tests）：舱壁上限（pool-size 2 跑 6 工具峰值并发 = 2，
+  同批 VT 引擎峰值 = 6，实证隔离差异）、独占命名线程、契约对等（`:serial` 退化 +
+  writes 折叠 + 结果与 VT 引擎逐字段相同）、生命周期 + pool-size 校验。
+  全套 **300 tests / 1227 assertions 通过**（基线 296/1211）。
+- [x] **文档体系整理：原则提取 + 目录合并 + 索引**（2026-07-16 用户拍板，无代码变更）：
+  - **新建 `docs/design-principles.md`——项目级设计原则唯一出处**（硬约束）：
+    原则散在个案里 = 下份文档还得重推，故抽出集中收录，各设计文档改为**回指不重述**。
+    **§1《无真实需求不建》**（新提）：本是 `advisor-alignment-design.md` §1.3 的
+    「立项判据」，在 `tool-calling-manager-design.md` 里被反复重新发现（毙 `:backend`、
+    毙 PR2/PR3、拆 `*active-pools*`）。含**四问判据**（现在有人用吗 / 不建用户怎么办 /
+    换来能力还是"更声明式" / 触发条件写得出吗）、**落地约束**（已建抽象论据倒一条须
+    重新称剩下的；防御性机器同样适用；否决方案重启须重新设计不得捡回旧稿；能立不变量
+    的不建机器）、**案例法**（三次援引 + `ToolCallingManager` 自己险些踩中：假想那条
+    腿当时比真实那条更有说服力）。**§2《框架无关》**：收录自 `docs/streaming-async-design.md`
+    §0.5，内容不变。分工：§1 管纵向（抽象该不该存在），§2 管横向（依赖该不该跨进来）。
+  - **联动改指针**：`tool-calling-manager-design.md` §0.5 与 `streaming-async-design.md`
+    §0.5 双双退为指针（各自保留 doc-local 注记）；§5 / §5.4 / §4.3.1 改回指
+    `design-principles.md` §1；`advisor-alignment-design.md` §1.3 标注「本节是 §1 出处，
+    已提为项目级硬约束」。
+  - **`design/` 并入 `docs/`**：7 份文档 `git mv` 迁移（git 全部识别为 rename，
+    历史保留），`design/` 目录删除。界线本是历史形成的，且「专题 vs 主文档」无可判定
+    标准，跨目录相对链接是纯税。全仓 13 处引用同步（含 `provider/anthropic.clj`、
+    `provider/http/client.clj` 两个 docstring、`examples/streaming/README.md`、
+    README/CHANGELOG/TASK）；移入文件里遗留的 `../docs/`、`docs/` 前缀一并归正。
+    老路径 `design/xxx.md` → `docs/xxx.md` 一一对应，无重命名。
+  - **新增 `docs/README.md` 索引**（16 份全收录）：按权威参考 / 已实施专题 / 进行中 /
+    已废弃留档分组，沿用各文档 `状态：` 行作为「当下是否算数」的判据——对 process
+    V1/V2/Timeline 三份废弃留档尤其要紧（讲得头头是道但不代表现状）。
+  - **校验**：27 个 md 零断链、`design/` 零残留、索引 16/16 全覆盖（脚本校验）。
+
+## P8 — 工具超时处理（2026-07-16）✅ 同日拍板并完成
+
+> 来源：对照 beamai `ToolCallingManager` 的三层超时（层 1 每工具 spawn+kill /
+> 层 2 gather deadline / 层 3 batch worker 兜底），问「我们能否也处理 tool 超时」。
+> **权威设计：`docs/tool-timeout-design.md`**（🚧 待拍板，已进 `docs/README.md`
+> 索引，check_docs 门禁绿）。基线：300 tests / 1227 assertions / 0 failures。
+>
+> **支点结论**：beamai 三层全部建立在 `exit(Pid, kill)` 这一个原语上——JVM 没有它
+> （`Thread.stop` JDK 20+ 直接抛 `UnsupportedOperationException`，只剩协作式中断；
+> 而最需要超时的 `InputStream.read` 读 socket——即绝大多数 HTTP 客户端——恰恰打不断）。
+> 故只移植**策略**（超时优先级链、transient 分类→重试），不移植**结构**
+> （层数、隔离边界——那是 BEAM 进程模型的倒影，照搬只能得到三层文档）。
+> 我们的「超时」= **放弃等待 ≠ 终止执行**：被放弃的工具可能继续跑，其副作用可能在
+> 告知 LLM「超时」之后才落地——这必须如实写进 docstring，照抄 beamai
+> 「到点 kill 执行进程」的措辞即构成 API 谎言，比不做更糟。
+
+### ✅ 分析已完成（结论在设计文档，此处记要点）
+
+- [x] **实测证实真 bug：`deftool :timeout` 是死选项**（非推断，REPL 复现）：
+  声明 `{:timeout 500}` 的工具 `Thread/sleep 3000` 跑满全程、返回 `:success true`。
+  `:timeout` 仅出现在 opts 白名单（`tool.clj:210`）用于判定「首个 map 算不算 opts」，
+  `:tool/timeout` 元数据**从未生成**（`:retry`/`:serial`/`:return-direct` 都有，
+  独缺它），全库零读取。编译通过、无警告、零效果——**沉默 no-op，API 面上的谎言**。
+  对照：beamai 的 `tool_spec.timeout` 是强制执行的（`resolve_timeout/2`）；
+  我们抄了字段名，没抄行为。
+- [x] **发现真 bug：`timeout-filter` 悄悄毁掉引擎线程模型**（`advisor.clj:252`）：
+  `clojure.core/future` = send-off 池 = 无界**平台**线程，而 `chain` 包着其余 filter
+  + 工具函数体本身 → 挂了此 filter，VT 引擎的工具实际跑在平台线程上
+  （「每调用一根虚拟线程」的 docstring 不再成立）；超时后池线程释放、send-off
+  线程留下继续跑 → ThreadPool 引擎的舱壁 bound 不住被放弃的工具。叠加反直觉结论：
+  **最怕超时泄漏的恰是有界池引擎**（被弃任务永久占池槽，舱壁逐格坏死；VT 只漏几 KB 栈）。
+- [x] **确认非 bug**：filter 链讲 `:result`、`invoke-one` 拿 `:value` 并不错位——
+  `kernel.clj:226` 在边界做了映射。`timeout-filter` 的形状、挂点、`:transient`
+  分类、不带 `:writes`（事务性）全部正确，问题只在线程模型与「读不到工具声明」。
+- [x] **吸收**（纯策略，与进程模型无关，可移植）：超时优先级链
+  「工具声明 > manager/filter 缺省 > 不超时」（beamai `resolve_timeout/2`）；
+  超时归 `:transient` → 声明 `:retry` 的工具自动重试——这条链路我们**已经是通的**
+  （`react.clj:75` 重试包在 filter 链外层），只差超时真的能发生。
+- [x] **否决 beamai 层 2 / 层 3**——按 `design-principles.md` §1 四问**全落假想列**：
+  层 3 的主要理由「防工具经 link 传播带崩调用者」在 JVM 不存在（无退出信号，
+  `invoke-one` 的 try/catch 已是完备边界——**它在防一个我们没有的问题**）；
+  层 2 的价值「保住部分结果」是每工具超时的自然结果（超时者自己变 transient 错误，
+  同批其它工具正常返回），免费拥有；两层间的 grace 宽限协调是「有多层」自己制造的
+  复杂度。真需求（「整轮工具预算 ≤ N 秒」的批级预算）出现时按其真实形状另行设计，
+  不得捡回本方案。
+- [x] **否决另两个落点**：`run-on-executor` 的 `(.get f)` 加超时——单工具调用走
+  内联（`react.clj:205` `(<= (count tool-calls) 1)`），最常见情形完全不设防，
+  「看起来有的保护」比没有更危险；`tool/invoke` 内部恒定起线程（beamai 层 1 的
+  位置）——每个调用无条件加线程+Future 包装，换来一个打不断的超时，beamai 敢做
+  是因为 spawn 约等于免费**且 kill 真有效**，两个前提我们都不满足。→ 走 filter
+  （opt-in），不进 `tool/invoke`（恒定）。
+
+### ✅ 落地（2026-07-16 拍板后当日完成；两项均为**修既有承诺**，不长新抽象，不触发 §1）
+
+> 测试：300/1227 → **307 tests / 1251 assertions / 0 failures**（+7 tests / +24
+> assertions，core 94/351 + client 107/406 + provider 106/494，零回归，零反射告警）。
+
+- [x] **P0 修 `:timeout` 死选项**（方案 a：照抄 `:retry` 的现成路径）：
+  - [x] P0-1 `deftool` 发出 `:tool/timeout` 元数据（四个 defn 分支，`tool.clj`）
+  - [x] P0-2 加 `timeout-spec` 读取函数（对称 `retry-spec`；docstring 写明
+    「声明本身无强制力，由 timeout-filter 消费」）
+  - [x] P0-3 `build-func-def` 透传 `:timeout` 供 filter 读取（`kernel.clj`；
+    inline tools 无 var 只吃 filter 缺省值——既有盲点，与 `:sensitive` 现状一致，不新增）
+- [x] **P1 `timeout-filter` 重写**（`advisor.clj`）：
+  - [x] P1-1 优先级链：`:function :timeout`（工具声明）> filter 构造缺省 `timeout-ms`
+  - [x] P1-2 弃 `clojure.core/future` 改 `Thread/startVirtualThread`（修线程模型
+    bug；顺带下游异常改为**原样重抛**，不再包 ExecutionException）
+  - [x] P1-3 docstring 如实写明「放弃等待 ≠ 终止执行」+ 副作用窗口 +
+    「声明 `:retry` 即承诺幂等」（deftool 元数据说明 / `timeout-spec` /
+    `timeout-filter` 三处一致）
+- [x] **测试全部落地**：元数据回归钉 + 端到端穿 `build-func-def`（修复前该用例
+  睡满 60s）+ 「裸 invoke 不超时」语义钉（防误解为内置）；优先级三分支；
+  虚拟线程 `.isVirtual` 断言 + 异常原样重抛；超时→`:transient`→`:retry` 重试
+  整链（`react_test`）；超时不带 `:writes`；同批部分结果（慢者超时、快者原样返回、
+  `:errors` 只含超时者）；**诚实测试**（CPU 忙循环超时返回后计数器仍在跳）。
+- [x] **后记（设计文档 §5.5）**：beamai 同日把三层缺省全部改 `infinity`
+  （超时变纯 opt-in，层 3 退为纯隔离层）——从对方侧独立佐证了否决层 2/层 3 的判断：
+  那两层的价值从来不在缺省截止，而在 BEAM 特有的隔离与 kill；两个体系收敛到同一
+  形态：**超时是声明出来的策略，不是框架强加的缺省**。
 
 ### 📋 历史账本
 

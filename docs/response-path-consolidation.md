@@ -1,6 +1,7 @@
 # D6 / D7 — 响应路径与 wire 知识整理
 
-> 状态：✅ 全部完成。D7 死代码清理 2026-06；D6 按「中立层容许别名」定调；
+> 状态：✅ **全部完成、已结案**（2026-07-16 复核：原 §3「暂缓」两项均已不成立，
+> 见 §3）。D7 死代码清理 2026-06；D6 按「中立层容许别名」定调；
 > **双消息体系统一已于 2026-07-10 落地（v0.2）**：删除 `model/types.clj`，
 > tool-call 全库统一为 `{:id :name(字符串) :args}`（与中立消息同构），
 > response→neutral 桥退化为形状复位。
@@ -57,28 +58,38 @@ GLM `sensitive` 等）。这是**有意保留**的中立层设计，而非 D6 �
 
 ---
 
-## 3. 暂缓（需专项 / 破坏性大版本）
+## 3. 原「暂缓」两项——均已结案（2026-07-16 复核）
 
-### D7 剩余 — 双消息体系统一
+> 本节原题「暂缓（需专项 / 破坏性大版本）」，列了 D7 剩余与 D6 剩余两项。
+> 复核发现**两项都已不成立**，且本文档头部状态与本节自相矛盾（头部写「双消息体
+> 系统一已于 2026-07-10 落地」，本节还写着「建议作为 v0.2 专项」）。现结案：
 
-`model/types.clj`（字符串 role、`:tool_calls`/`:tool_call_id`、name 为 keyword）与
-`model/message.clj`（keyword role、`:tool-calls`/`:tool-call-id`、name 为 string）并存：
+### ✅ D7 剩余 — 双消息体系统一：**已完成**（2026-07-10，v0.2）
 
-- `types/*`：provider **从响应里抽取**工具调用/构造消息时用（`make-tool-call` 6 处、
-  `*-message` 构造若干）——是"provider 响应形状"。
-- `message/*`：core 运行时（react/client/memory/advisor）+ wire 适配器用——是"中立历史形状"。
-- 两者之间有**明确转换边界**：`advisor/memory/response->neutral`、`msg/normalize`。
+`model/types.clj` **已删除**——`model/` 下现只有 `message` / `response` / `error` /
+`service`。tool-call 全库统一为 `{:id :name(字符串) :args}`（与中立消息同构），
+`response→neutral` 桥退化为形状复位。`scripts/check_docs.clj` 已为 `model.types`
+立墓碑，防文档复活这个幽灵 ns。
 
-统一二者要改动**整条消息数据流**（provider 抽取 → response → 中立历史 → wire 回写），
-是高风险大重构，且当前转换边界工作正常、无正确性 bug。**建议作为 v0.2 破坏性版本专项**，
-配合充分的端到端流式/工具/多轮回归一起做，不在常规改动中草率推进。
+### ❌ D6 剩余 — converter/json_schema 的 provider 分发：**对象已不存在**
 
-### D6 剩余 — converter/json_schema 的 provider 分发
+原文说「`converter/json_schema.clj` 按 `:openai/:anthropic/:zhipu/:gemini` 生成
+结构化输出格式，是 core 里另一处『认识各家 wire』，随 v0.2 一并处理」。
 
-`converter/json_schema.clj` 按 `:openai/:anthropic/:zhipu/:gemini` 生成结构化输出格式，
-是 core 里另一处"认识各家 wire"。同样属破坏性协议化范畴，随 v0.2 一并处理。
+**整个 `converter/` 子系统已在 `c1a3ab1`（「删除无消费者的 converter + prompt
+子系统」）中删除**——`json_schema.clj` / `api.clj` / `json.clj` / `protocol.clj` /
+`retry.clj` 全没了，core 里 `im.ttalk.agent.converter` 零引用。
+**这项工作的对象本身不存在了**，无从「随 v0.2 处理」。
+（结构化输出现由 `advisor/structured_output.clj` 承担，JSON 解析经 `:parse-fn`
+注入——core 不内置解析器，见 `advisor-alignment-design.md` §3。）
 
----
+### ❌ D6 主项 — 彻底协议化（`extract-usage` / `extract-finish-reason`）：**不做**
+
+**保留 permissive 中立层（认识各家字段别名）就是 D6 的结论**（见本文头部「定调」）。
+协议化是破坏性变更、收益/破坏不成比例，且**无真实需求**——原记「留 v0.2」，
+而 v0.2 已发布、0.3 亦在途，无人触发。按
+[`design-principles.md`](design-principles.md) §1，触发条件到期无人问津即证其为
+假想需求，故结案不再挂账。
 
 ## 4. 影响 / 风险
 

@@ -1,6 +1,11 @@
 # D5 — 错误模型统一方案
 
-> 状态：🚧 核心已实施（步骤 1-3、6 完成；4-5 按判断暂缓，见文末）。
+> 状态：✅ **已结案**（2026-07-16）。步骤 1-3、6 完成；**步骤 4-5 已否决，不做**
+> ——不再是「暂缓」。理由见 §7：步骤4 本就是**论证过的拒绝**（`error.clj` 的类型表
+> 是 LLM/HTTP 取向，强套会把工具 NPE 误标 `[PROVIDER-ERROR]`）；步骤5 原定「留待 D7
+> 顺带」，而 **D7 已完成且未触发它**——按
+> [`design-principles.md`](design-principles.md) §1，触发条件到期无人问津即证其为
+> 假想需求。真要重构 converter/factory 时按当时需求重新判断，不预先挂账。
 > 来源：2026-06-10 全量审查 D5「错误模型四套并存」。
 > 目标：把"一次操作失败"在全代码库收敛为**一个错误值 + 一套分层信封约定**，
 > 让任意层的调用方用一致方式判断成败、读取错误类型、决定是否重试。
@@ -11,7 +16,8 @@
 > - 步骤 3：bailian 同步失败 + 流式不支持均抛 canonical error（流式不再裸抛 UnsupportedOperationException）。
 > - 步骤 6：README 错误模型说明更新。
 > - **端到端验证**：provider 401 → SimpleAgent `{:status :error}` 且 `:retryable? false`、`:status 401`、`:type :auth-error`（修复前会变成 `:provider-error`/可重试）。回归测试见 client_test/model_test/providers_test。
-> - 步骤 4（kernel 工具错误渲染）、5（converter/factory error payload）暂缓：详见文末「实施说明」。
+> - 步骤 4（kernel 工具错误渲染）、5（converter/factory error payload）**❌ 已否决，不做**
+>   （2026-07-16 结案，非暂缓）：理由详见文末「实施说明」。
 
 ---
 
@@ -146,10 +152,11 @@ provider 不再手搓 ex-info 的 data 形状，改为构造 canonical error 再
 3. **bailian 流式**：`UnsupportedOperationException` → `throw!`（canonical）。更新
    `bailian-registered-and-creatable` 测试（现断言 `thrown? UnsupportedOperationException`
    → 改为 `thrown? ExceptionInfo` + 校验 `:retryable? false`）。
-4. **kernel 工具错误渲染**：invoke-tool catch 用 `format-error (exception->error e)`，
-   react 同步。加测：工具抛 NPE → 喂 LLM 的字符串含类型而非空。
-5. **converter / factory error payload**：失败分支 `:error` 值升级为 canonical map。更新
-   converter 测试。
+4. ~~**kernel 工具错误渲染**：invoke-tool catch 用 `format-error (exception->error e)`，
+   react 同步。加测：工具抛 NPE → 喂 LLM 的字符串含类型而非空。~~
+   **❌ 已否决（2026-07-16）**——实施时发现这一步本身是错的，见 §7。
+5. ~~**converter / factory error payload**：失败分支 `:error` 值升级为 canonical map。更新
+   converter 测试。~~ **❌ 已否决（2026-07-16）**，见 §7。
 6. **文档**：README「错误归一化」段落改写为本方案的"一个错误值 + 四条边界规则"，
    不再含混宣称全局统一。
 
@@ -183,19 +190,29 @@ provider 不再手搓 ex-info 的 data 形状，改为构造 canonical error 再
 
 ---
 
-## 7. 实施说明（步骤 4-5 为何暂缓）
+## 7. 实施说明（步骤 4-5 为何**不做**）
 
-- **步骤 4（kernel 工具错误 → 字符串）暂缓**：D 边界本就该是"给模型读的字符串"，
+> **2026-07-16 结案**：本节原题「为何暂缓」，但下文两条给的其实是**否决理由**，
+> 不是排期。已按 [`design-principles.md`](design-principles.md) §1 结案为 ❌ 不做。
+
+- **步骤 4（kernel 工具错误 → 字符串）❌ 不做**：D 边界本就该是"给模型读的字符串"，
   P1 已保证非空（message 为 nil 时回退异常类名）。原计划用 `format-error (exception->error e)`
   渲染——但 `error.clj` 的类型表是 LLM/HTTP 取向（:auth-error/:provider-error 等），
   工具内部 NPE 经它会被标成 `[PROVIDER-ERROR]`，**对工具错误是误导**。故保留 P1 的
   message/类名渲染，不强套 LLM 错误类型。
-- **步骤 5（converter/factory 的失败 payload → canonical）暂缓**：二者是 B 边界
+- **步骤 5（converter/factory 的失败 payload → canonical）❌ 不做——且 converter 已不存在**：
+  **2026-07-16 复核补记**：整个 `converter/` 子系统已在 `c1a3ab1`（「删除无消费者的
+  converter + prompt 子系统」）中删除，`json.clj` / `api.clj` 等全没了。**这一步的
+  一半对象已经蒸发**，剩下的 factory 部分同样无人触发。原暂缓理由如下，仍成立——二者是 B 边界
   result 信封（`{:success bool}` / `[:ok]/[:error]`），其 `:error` 字符串对解析/配置
   失败已足够可读；升级为 canonical 需让 core 的 converter 反向依赖 error 模块、并改动
   factory 契约与多处测试，收益（这些错误极少进入需要 `:retryable?` 判断的重试路径）
   与改动面不成比例。留待与 D7（converter/factory 重构）一并处理更合适。
 
 > 结论：D5 的**核心价值**——provider→client 的错误保真（修复 401 被误标可重试）——
-> 已由步骤 1-3 完整交付并端到端验证。步骤 4-5 属边界 polish，单独看收益有限，
-> 已记录留待相关重构时顺带完成。
+> 已由步骤 1-3 完整交付并端到端验证。
+>
+> **步骤 4-5 结案为 ❌ 不做（2026-07-16）**：步骤4 上文本就是论证过的拒绝（强套 LLM
+> 错误类型对工具错误是误导），不是排期。步骤5 原写「留待与 D7 一并处理」——**D7 已完成，
+> 步骤5 未被触发**：触发条件打响了却无人需要，按 §1 四问即假想需求。converter/factory
+> 真要重构时，按当时的需求重新判断，不预先挂账。
