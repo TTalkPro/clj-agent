@@ -60,3 +60,43 @@
         (let [r (mgr/await! id 5000)]
           (is (= :error (get-in r [:error :status]))))
         (is (= :failed (wait-status id :failed 2000)))))))
+
+;;; ============================================================
+;;; 设计原则 §3「一个 Kernel 绑定一个 TCM，不跨边界」——边界外不流通
+;;; ============================================================
+
+(def ^:dynamic *tenant* :none)
+
+(deftest ambient-state-does-not-cross-delegate-boundary-test
+  (testing "调用方的动态绑定**不**穿过 delegate 边界（§3「边界外不流通」）
+
+            子 agent 是新 Kernel + 新 TCM = 新执行边界，ambient 状态不该隐式流入。
+            spawn-worker! 不用 bound-fn* 是**故意的**——本测试即为防止后人看它
+            『像疏漏』而顺手改成 bound-fn*。要传状态给子 agent 走 subagent-config。
+
+            对照 react_test/binding-conveyance-across-batch-shapes-test：同一 kernel
+            内的 executor 路径**必须**传导。同一条原则的两侧，方向相反。"
+    (let [seen (promise)]
+      (with-redefs [im.ttalk.agent.subagent.manager/do-run
+                    (fn [_] (deliver seen *tenant*) {:ok "done"})]
+        (binding [*tenant* :acme]
+          (let [{id :ok} (mgr/spawn! {:prompt "x"})]
+            (mgr/await! id 5000)
+            (is (= :none (deref seen 2000 :timeout))
+                "子 agent 看到的是根值——父的 binding 未跨界")))))))
+
+(deftest parent-tool-manager-has-no-channel-into-subagent-test
+  (testing "父 kernel 的 :tool-manager 无自动渠道流入子 agent（§3「Kernel ↔ TCM 1:1」）
+
+            do-run 只吃 spec 的 :subagent-config（全部来自用户的 :subagent-fn），
+            据此全新造 kernel。父引擎要共享须用户亲手塞回去——踩坑，非漏洞。"
+    (let [seen-config (promise)]
+      (with-redefs [im.ttalk.agent.subagent.manager/do-run
+                    (fn [spec] (deliver seen-config (:subagent-config spec)) {:ok "done"})]
+        (let [{id :ok} (mgr/spawn! {:prompt "x" :subagent-config {:memory false}})]
+          (mgr/await! id 5000)
+          (let [cfg (deref seen-config 2000 :timeout)]
+            (is (not (contains? cfg :tool-manager))
+                "子 agent 的 config 里不该出现引擎——它没有渠道到这里")
+            (is (not (contains? cfg :kernel))
+                "更不该带着父 kernel")))))))
