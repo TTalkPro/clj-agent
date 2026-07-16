@@ -117,17 +117,11 @@
     :else
     (let [fn-key (keyword (:name tc))
           {:keys [value writes error]}
-          ;; **本批的完备错误边界**：收 Throwable（不只 Exception）——filter 链或
-          ;; 工具抛的 Error（如深递归的 StackOverflowError）此前会从这里逃逸、
-          ;; 打死整个 agent 循环，而分层错误路由的全部意义就是「一个工具坏了不牵连
-          ;; 别人」。致命的（OOM 等）仍原样上抛：吞掉它只会掩盖真因（见
-          ;; err/fatal-throwable?）。
-          (try (invoke-with-retry kernel fn-key (:args tc) tool-context)
-               (catch Throwable t
-                 (when (err/fatal-throwable? t) (throw t))
-                 (let [m (or (not-empty (.getMessage t)) (.getName (class t)))]
-                   {:value (str "错误: " m)
-                    :error {:class (err/classify-exception t) :message m}})))]
+           (try (invoke-with-retry kernel fn-key (:args tc) tool-context)
+                (catch Throwable t
+                  (let [{:keys [message class]} (err/contain-throwable t)]
+                    {:value (str "错误: " message)
+                     :error {:class class :message message}})))]
       ;; 完成即触发（并行下批内顺序不确定；需确定顺序请读 :records）
       (when on-tool-result
         (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
@@ -284,10 +278,7 @@
 
 (defn- check-timeout-opt!
   [t]
-  (when-not (tool/valid-timeout? t)
-    (throw (ex-info (str "ToolCallingManager 的 :timeout 必须为正整数毫秒，实为 "
-                         (pr-str t))
-                    {:timeout t}))))
+  (tool/check-timeout! "ToolCallingManager" t))
 
 (defrecord VirtualThreadToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager

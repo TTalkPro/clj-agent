@@ -496,7 +496,7 @@
 (deftest manager-default-timeout-test
   (testing "**缺省不超时**：既没声明、引擎也没给 :timeout → 工具跑多久都不管
             （框架不替调用方决定何时放弃）"
-    (let [kernel (batch-kernel [(inline-tool "slow" (fn [_ _] (Thread/sleep 400) "done"))])
+    (let [kernel (batch-kernel [(inline-tool "slow" (fn [_ _] (Thread/sleep 200) "done"))])
           {:keys [messages]} (agent-loop/execute-batch kernel [(tc "1" "slow")] nil {} [])]
       (is (= "done" (:content (first messages))))))
 
