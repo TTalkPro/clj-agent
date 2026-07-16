@@ -340,12 +340,39 @@
     直接失败，scenario 2 更严重：gate 的 `(= :send-email n)` 永不相等 → 永不
     中断 → 中断/恢复整条链路静默失效。`callbacks.clj` 文档补上类型说明防复发。
 - **工具超时批次测试（2026-07-16）**：300/1227 → **307 tests / 1251 assertions /
-  0 failures**（+7 tests / +24 assertions，零回归）。元数据回归钉 + 端到端穿
+  0 failures**（+9 tests / +29 assertions，含上条绑定修复的 2 个，零回归）。元数据回归钉 + 端到端穿
   `build-func-def`（修复前该用例睡满 60s）+「裸 `invoke` 不超时」语义钉；
   优先级三分支；虚拟线程 `.isVirtual` 断言 + 异常原样重抛；超时→`:transient`
   →`:retry` 重试整链；同批部分结果（慢者超时不殃及快者）；**诚实测试**——
   CPU 忙循环在超时结果返回后仍在跳（钉住「放弃等待 ≠ 终止执行」的真实语义，
   防后人误以为有 kill）。
+- **工具执行丢失调用方的动态绑定**（2026-07-16，两处，均为**静默**给根值——
+  无报错、只是悄悄读错）：
+  - **`run-on-executor` 从不传导绑定帧**（既有 bug）：于是同一个工具会因
+    「这批里有几个 tool-call」而看到不同的 `binding` 值——批内 1 个走 `run-inline`
+    （调用方线程，绑定可见）、≥2 个走 executor（绑定丢失），**而发几个 tool-call
+    是 LLM 临场决定的**；换引擎（Sequential 全程内联 → 可见 / VirtualThread →
+    丢失）同样会变。这违反 `react.clj` 明写的引擎契约「引擎只决定『怎么把这批
+    跑完』，不决定『跑的是什么』」。
+  - **`timeout-filter` 改虚拟线程时丢了传导**（本次引入的回归）：原
+    `clojure.core/future` 自带绑定传导，`Thread/startVirtualThread` 没有。
+  两处均改用 `bound-fn*` 包装任务，与 `future` / `pmap` 的传导语义一致。修复后
+  四条路径（内联 / executor / Sequential / VirtualThread）行为一致，挂不挂
+  `timeout-filter` 也不再改变工具看到的 `binding`。回归测试钉住批次大小与引擎
+  两个维度。
+- **工具超时 live 验证（`examples/tool_timeout_live_test.clj`，MiniMax 真实
+  provider）**：20 项行为断言，连跑 3 遍稳定。慢后端是本地裸 TCP（零依赖不联网），
+  只有 LLM 是真的。四场景：超时→模型理解错误→循环存活作答 / 对照组（同为 3s 的
+  活儿，声明 6s 救活 vs 未声明被 800ms 缺省杀死）/ `:retry` 透明重试（实跑 2 次、
+  模型只见成功结果）/ abandon 残余风险（CPU 忙循环副作用晚 1.7s 落地）。
+  **跑真机推翻了一个基于常识的判断**：设计文档初稿断言「socket read 打不断」是
+  残余风险主体——实测 JDK 25 上**虚拟线程 + socket read 会被 interrupt 打断**
+  （`SocketException: Closed by interrupt`；JEP 353 把 Socket 重实现在 NIO 上），
+  平台线程才无视 interrupt。故上面那条 `timeout-filter` 修复**比初判更有价值**：
+  改虚拟线程不只修了线程模型，还把最常见的工具形态（阻塞 IO / HTTP 调用）从
+  「打不断」变成了「真能取消」——超时后 socket 立刻关闭，副作用不落地。
+  残余风险收窄为不检查中断标志的 CPU 密集代码、native 调用等。设计文档 §2.2
+  已加修订块记录。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 

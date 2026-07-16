@@ -544,8 +544,9 @@
 
 ### ✅ 落地（2026-07-16 拍板后当日完成；两项均为**修既有承诺**，不长新抽象，不触发 §1）
 
-> 测试：300/1227 → **307 tests / 1251 assertions / 0 failures**（+7 tests / +24
-> assertions，core 94/351 + client 107/406 + provider 106/494，零回归，零反射告警）。
+> 测试：300/1227 → **309 tests / 1256 assertions / 0 failures**（+9 tests / +29
+> assertions，core 95/353 + client 108/409 + provider 106/494，零回归，零反射告警）。
+> 另有 MiniMax live 20 项断言（连跑 3 遍稳定）。
 
 - [x] **P0 修 `:timeout` 死选项**（方案 a：照抄 `:retry` 的现成路径）：
   - [x] P0-1 `deftool` 发出 `:tool/timeout` 元数据（四个 defn 分支，`tool.clj`）
@@ -565,7 +566,72 @@
   虚拟线程 `.isVirtual` 断言 + 异常原样重抛；超时→`:transient`→`:retry` 重试
   整链（`react_test`）；超时不带 `:writes`；同批部分结果（慢者超时、快者原样返回、
   `:errors` 只含超时者）；**诚实测试**（CPU 忙循环超时返回后计数器仍在跳）。
-- [x] **后记（设计文档 §5.5）**：beamai 同日把三层缺省全部改 `infinity`
+- [x] **live 验证（MiniMax 真实 provider，`examples/tool_timeout_live_test.clj`）**：
+  20 项行为断言，连跑 3 遍稳定。慢后端是**本地裸 TCP**（零依赖不联网），只有 LLM
+  是真的——分工：live 验「真实模型 + 真实阻塞 IO」，单测验形状与分支。四场景：
+  超时→模型理解错误→循环存活作答（2 次 LLM 调用）；**对照组**（filter 缺省 800ms、
+  同为 3s 的活儿：声明 6s 的 `get-price` 拿到 `SKU-7 price: 70 CNY`，未声明的
+  `get-stock-age` 被杀——优先级在真实循环里的可观察后果）；`:retry` 透明重试
+  （实跑 2 次、模型只见成功结果、只 1 条 record）；**abandon 残余风险**
+  （CPU 忙循环：超时上报 t=2361ms → 副作用落地 t=4059ms，晚 1.7s，其间模型已在作答）。
+- [x] **跑真机推翻了一个判断（设计文档 §2.2 加修订块）**：初稿把
+  「`InputStream.read()` 读普通 socket 打不断——**这条最要命**」列为残余风险主体。
+  **实测 JDK 25.0.2 证明它对我们的实现不成立**：虚拟线程 + socket read + interrupt
+  → 抛 `SocketException: Closed by interrupt`（**真被取消**）；平台线程才会无视
+  interrupt 读完。原因是 JDK 13+ 把 `java.net.Socket` 重实现在 NIO 之上（JEP 353），
+  虚拟线程上响应 interrupt 并关闭 socket——**而 P1-2 恰好把工具搬上了虚拟线程**。
+  原判断是平台线程时代的常识，写文档时没实测。**后果：P1-2 的价值被文档低估**——
+  它不只让被放弃的执行变便宜，更把最常见的工具形态（阻塞 IO / HTTP 调用）从
+  「打不断」变成「真能取消」；§4 那个 bug 也因此**比初判更严重**（send-off 平台线程
+  同时毁掉线程模型**和**取消能力）。残余风险收窄为：不检查中断标志的 CPU 密集代码、
+  native 调用、吞掉 InterruptedException 的代码、工具自己 spawn 的平台线程。
+  **§2.3 结论本身不变**（仍是放弃等待≠终止执行，仍无 kill 原语）。
+- [x] **一处 live flake 及其教训**：场景 2 初版断言 `(= 2 (count tool-calls-made))`
+  偶发失败——**模型看到超时后自行重试了 `get-stock-age`**，记录变 3 条。重不重试是
+  模型的自由、不是我们的机制；改为按名分组断言「每次调用的结果形状」，不钉次数。
+  又一个「断言钉机制、不钉模型行为」的实例。
+- [x] **顺带逮到并修了两个动态绑定 bug**（live 之后追查「还有没有别的 bug」时
+  发现；两个都是**静默**给根值——无报错、只是悄悄读错）：
+  - **既有 bug：`run-on-executor` 从不传导绑定帧**。后果是同一个工具因
+    **LLM 临场决定发几个 tool-call** 而看到不同的 `binding`：批内 1 个走
+    `run-inline`（调用方线程 → `:acme`）、≥2 个走 executor（→ `:none`）；
+    换引擎也变（Sequential → `:acme` / VirtualThread → `:none`）。
+    **违反 `react.clj:247` 明写的引擎契约**「引擎只决定『怎么把这批跑完』，
+    不决定『跑的是什么』」。
+  - **本次引入的回归：`timeout-filter` 改虚拟线程时丢了传导**——
+    `clojure.core/future` 自带绑定传导，`Thread/startVirtualThread` 没有。
+    换 future 时没想到这层。
+  - 两处均用 `bound-fn*` 包装任务修复（与 `future`/`pmap` 语义一致）；
+    +2 tests（core 绑定可见 + 挂不挂 filter 一致；client 批次大小 1 vs 2 一致 +
+    两引擎结果相同）。**两者都是设计原则 §3「边界内一致」的违反**（见下）。
+- [x] **新增设计原则 §3「一个 Kernel 绑定一个 TCM，不跨边界」**（2026-07-16 用户
+  拍板提为项目级硬约束，`docs/design-principles.md`）：**这个绑定就是执行边界——
+  边界内必须一致**（工具可见的一切不得因批次大小 / 引擎选型 / filter 挂载而变），
+  **边界外不得流通**（父 Kernel 的 TCM / 动态绑定 / ambient 状态不自动流入子 Agent；
+  要传走 `subagent-config` 显式传）。
+  **提级理由**：它本是 `tool-calling-manager-design.md` §4.3.1 拆 `*active-pools*`
+  时立的不变量，却只以**括号举例**的形式躺在 §1.3 表格里——于是真要用时想不起来
+  （我上一轮就没想起来，见下条复盘）。按本文开篇的论点「原则散在个案里的下场，
+  就是下一份文档再把它重新推导一遍」，提级即对症。
+  含 3.1 理由 / 3.2 两方向判据表 / 3.3 落地约束 / 3.4 案例法（4 条，含本次的
+  两个 binding bug 判为「必须修」、`spawn-worker!` 判为「正确不改」——**同一条
+  原则、方向相反的两个结论**）；「与两条原则的关系」章改写为三条（§2 划库与外部
+  世界的边界，§3 划库内部执行单元之间的边界）。
+  **测试钉住两个方向**：`react_test/binding-conveyance-across-batch-shapes-test`
+  （边界内：批次大小 1 vs 2 一致 + 两引擎一致）、
+  `subagent/manager_test/ambient-state-does-not-cross-delegate-boundary-test` +
+  `parent-tool-manager-has-no-channel-into-subagent-test`（边界外：binding 不跨界、
+  父 TCM 无渠道流入）。全套 **311 tests / 1259 assertions / 0 failures**。
+- [x] **子 agent 不传导绑定 = 正确，不改**（2026-07-16 用户拍板，**由新提的
+  设计原则 §3 定案**，取代此前「待定」）：子 agent 是新 Kernel + 新 TCM =
+  **新执行边界**，ambient 状态本就不该隐式穿过去（§3「边界外不流通」）。
+  `spawn-worker!` 不用 `bound-fn*` 是**故意的**，已加 docstring 说明 + 测试钉住
+  （它看起来像疏漏，我上一轮就差点顺手「修好」）。
+  **复盘（记在 §3.4）**：我最初拿 **§1 四问**答这题，结论「无具体调用方 → 假想
+  需求 → 待定」——**结论碰巧不错，依据是错的**。不传导不是「还没人要」，而是
+  **原则上就不该**：真需求来了 §1 的答案会翻转（有人要就建），§3 的不会
+  （有人要也只给显式的 `subagent-config`，不给隐式通道）。拿错工具的原因是
+  该原则当时**只是 §1.3 表格里的一个括号举例**，真要用时想不起来。
   （超时变纯 opt-in，层 3 退为纯隔离层）——从对方侧独立佐证了否决层 2/层 3 的判断：
   那两层的价值从来不在缺省截止，而在 BEAM 特有的隔离与 kill；两个体系收敛到同一
   形态：**超时是声明出来的策略，不是框架强加的缺省**。
