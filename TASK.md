@@ -219,7 +219,10 @@
   - 三份设计文档（`docs/process-framework-design.md`、
     `docs/process-parallel-design.md`、`docs/timeline-snapshot-checkpoint.md`）
     保留并标注已废弃，作为 rethink 的输入。
-- [ ] **Agent 并发模型 rethink**（讨论已定稿 → `docs/agent-loop-concurrency-design.md`，
+- [x] **Agent 并发模型 rethink ✅ 结案（2026-07-17 补勾）**——子项 1-7 全部完成，
+  第 8 项（多 Agent 编排层）按用户定调**不立项**（非暂缓：真需求出现时按决策阶梯
+  重新评估，不是照此清单施工）。父项此前一直挂 `[ ]` 属漏勾，与子项状态矛盾。
+  （原文照录 → `docs/agent-loop-concurrency-design.md`，
   2026-07-11）：核心结论——Agent loop 的并发只在 Tool 阶段（子 agent 也是工具）；
   Tool 阶段自带零成本屏障，建模为 MapReduce（map on snapshot + writes 数据化 +
   按原序纯折叠），竞态被执行模型消灭而非管理；合并语义用槽级 reducer；工具失败
@@ -769,7 +772,8 @@
 > 独立命中）。范围 = P8 全部未提交改动。
 >
 > **终态：316 tests / 1307 assertions / 0 failures**（core 98/373 + client 112/440 +
-> provider 106/494）。MiniMax live 20 项全过（第五遍稳定）。
+> provider 106/494）。MiniMax live 20 项全过（**六遍稳定**，跨越 P8 初版与 P9 架构
+> 重排；场景 4 abandon 差值六次实测 1701/1702/1700/1700/1700/1700ms）。
 > **根因一（R1/R2/R3）一举修掉**：超时从 run-chain（包整条 filter 链）下沉到
 > terminal（只包工具本体）；**根因二（R4/R5）**：manager-timeout 改动态 var
 > 不走 kernel 反向指针 + 装配期校验。R6-R10 各自独立小修。
@@ -852,25 +856,40 @@
   `kernel.clj:253` run-chain docstring 现在时引用已删的 timeout-filter；
   `react.clj:69` tool-executor docstring 仍称承载所有工具批（现仅 VT 引擎用）。
 
-### 次级（10 条上限挤出的 cleanup 候选，finder 发现、未过独立验证）
+### 次级（10 条上限挤出的 cleanup 候选）✅ 基本完成
 
-> **未做**——均为 cleanup 候选（helper 提取 / 消息串去重 / 预计算 map /
-> :retry 校验 / live 冗余），无行为影响。留给下一轮优化。
+> **勾与批注为 2026-07-17 复核补记**：此前这里挂着「未做，留给下一轮」的批注，
+> 与事实相反——活在提交 9a14091 / ca667b3 / fab4cf7 里早已干完（提交信息即
+> 「P9 次级 cleanup」），只是账没跟上。逐条对代码核过（src 使用点计数 + 实测），
+> 不是照提交信息信。仅最后一条杂项里的「测试跨模块重复」未做。
 
-- [ ] catch-Throwable 收敛块 4 处手抄（tool.clj / kernel.clj ×2 / react.clj）→
-  提一个 `err/contain-throwable` helper，防三元组（fatal 检查/nil-message 回退/
-  分类）漂移
-- [ ] 「:timeout 必须为正整数毫秒」消息串 3 处手抄且被两个模块的测试用正则钉住 →
-  提 `tool/check-timeout!` helper
-- [ ] 内联工具 by-name 线性扫的第 4 份拷贝（tool-timeout）+ 每次 invoke 的 O(n)
-  热路径扫描 → build-kernel 装配期预计算 `{fn-key timeout}` map（validate 已在
-  同一时点遍历过全部工具）
-- [ ] :retry 声明无装配期校验（与 :timeout 校验不对称）：`{:max-retries "3"}`
-  运行期在 `(long ...)` 抛 CCE 且被收敛成指向工具的 :semantic 错误——症状偏离
-  病因，正是装配期校验要防的类别
-- [ ] 杂项：live 脚本 `(cond-> {} default-ms ...)` 冗余（`{:timeout nil}` 合法）；
-  优先级矩阵测试跨模块重复（kernel 层已钉，client 只需构造器透传断言）；
-  react_test「缺省不超时」400ms sleep 可减半
+- [x] catch-Throwable 收敛块 4 处手抄 → `err/contain-throwable` helper
+  （src 5 处使用，fatal 检查/nil-message 回退/分类三元组不再漂移）
+- [x] 「:timeout 必须为正整数毫秒」消息串 3 处手抄 → `tool/check-timeout!`
+  （src 6 处使用，引擎侧校验也复用它）
+- [x] 内联工具 by-name O(n) 热路径扫描 → 装配期预计算 `inline-meta` map
+  （Kernel record 第 8 字段），serial/retry/timeout/return-direct 四个读取全 O(1)
+- [x] :retry 装配期校验 → `valid-retry?` + `validate-tool-retries!`
+  （实测 `{:max-retries "3"}` build-kernel 即拒、报错点名工具）
+- [x] 杂项（部分）：live 脚本 `(cond-> {} default-ms ...)` 冗余已清；
+  react_test「缺省不超时」sleep 已减半
+- [ ] **仅剩**：优先级矩阵测试跨模块重复（react_test manager-default-timeout-test
+  的声明更紧/更宽两条与 advisor_test kernel 层同矩阵，各带秒级 sleep）——client
+  侧留一条「构造器把 :timeout 透传到 manager-timeout」断言即可
+
+### 收尾（2026-07-17，用户拍板 3/4 两件）
+
+- [x] **设计文档补 P9 修订记录**：`tool-timeout-design.md` 新增 **§5.6 后记**——
+  记录两个架构事实变更（超时包裹点：整条 filter 链 → 只包 terminal；引擎缺省读取：
+  kernel 字段回读 → 动态 var 随执行传递）+ 连带修复清单 + §3.5 修订块加指针
+  （防止读到旧落点就停）。§5.6 里如实标注：`*active-manager-timeout*` 与被 §1
+  毙掉的 `*active-pools*` 同类机器，但这次服务的是验证过的真实 bug，立得住。
+- [x] **advisor_test 的 5 处 map 桩换 `StubManager` defrecord**（R5 尾巴）：裸
+  `{:timeout ms}` 是陷阱先例——manager-timeout 读得到，但进真实 react 循环会在
+  execute-tool-calls 抛 No implementation of method。defrecord 桩协议 + 字段两个
+  契约都满足（execute-tool-calls 抛「桩不执行批次」的明确错误）；注意 **reify
+  不行**——关键字查找拿不到 reify 的值，必须 defrecord。带注释说明为什么不用
+  裸 map，防下个人再抄出陷阱。全套 316/1307/0。
 
 ### 📋 历史账本
 

@@ -402,6 +402,8 @@ worker 崩溃或超时 → 整批合成 error + context 回滚。
 > 逐字相同**。我们只是把「白名单收下但没人读」换成了「元数据发出但没人读」。
 >
 > **现在的落点：`kernel/invoke-tool`，且只在声明时起线程。**
+> （⚠️ 本块写作时包裹的是整条 filter 链——**又被 P9 review 修正为只包 terminal**，
+> 见 §5.6。「落在 invoke-tool、声明才起线程」两点仍准确。）
 > - 与方案 C 的差别是**条件化**：未声明 → 零开销，不起线程，与从前逐字相同。
 >   §3.5 否的「无条件给每个调用加线程」依然否着。
 > - 与 react 的差别是**职责**：`:retry` / `:serial` / `:return-direct` 都是**循环 /
@@ -519,6 +521,50 @@ worker 崩溃或超时 → 整批合成 error + context 回滚。
 JVM 不需要、（kill）JVM 给不了。两个体系各自收敛到同一形态：
 **超时是声明出来的策略，不是框架强加的缺省**。
 （注意本文 §1–§3 引用的 beamai 缺省值描述的是分析时点的代码，已过时，判断不受影响。）
+
+---
+
+## 5.6 后记：P9 code review 的架构修订（2026-07-16/17）
+
+落地当天的第二轮 code review（8 finder 角度 → 35 候选 → 3 个独立验证 agent，
+**10/10 CONFIRMED**）推翻了本文记录的两个实现决定。修复已全部落地并实测复核
+（TASK P9 有逐条账目），此处只记**架构事实的变更**，供读本文理解现状：
+
+### 超时包裹点：从「包整条 filter 链」改为「只包 terminal（工具本体）」
+
+§3.5 修订块曾写「强制力落在 `kernel/invoke-tool`（`run-chain`）」——包裹的是
+**整条 tool filter 链**。这是错的层：approval-filter 的人工审批等待被算进工具的
+超时预算（操作员敲 y 慢一点，工具从未执行就报超时；`:retry` 还会对人重复弹框）；
+且超时结果在链外合成，任何日志/指标 filter 永远观察不到超时。
+
+**现状**：`exec-with-timeout` 在 **terminal 内**计时——filter 链在计时区外，
+审批等待不吃预算；超时结果在链内产生，外层 filter 照常可见。beamai 也只计时
+handler，本该一步到位。
+
+### 引擎缺省的读取：从「kernel 字段回读」改为「动态 var 随执行传递」
+
+`effective-tool-timeout` 曾读 `(:tool-manager kernel)`——**反向指针**。后果：
+instrumented wrapper（reify 委派）的内层引擎 `:timeout` 静默失效；独立 manager
+直接跑批次时自己的 `:timeout` 被忽略。
+
+**现状**：三个内置引擎在 `execute-tool-calls` 入口 `binding`
+`tcm/*active-manager-timeout*` 为自身值（经 `bound-fn*` 传导到 executor 路径，
+在 delegate 边界自然断开——与设计原则 §3 两个方向都吻合）；kernel 字段仅作
+直调 invoke-tool 时的回落。**是的，这是一个动态变量机器**——与被 §1 毙掉的
+`*active-pools*` 同类，但这次立得住：它服务的是验证过的真实 bug，不是假想需求。
+
+### 连带修复（详见 TASK P9）
+
+校验补全（引擎侧 `:timeout` 与 `:retry` 都进装配期，`0`/`"5s"` 不再溜到执行期）；
+delegate/fanout 的 `:timeout` 上报为 inline 声明 + `run-sync` 以 try/finally 保
+`drop!`（其内先 `kill!`）——引擎超时打断子 agent 时不再泄漏注册表、不再烧 token；
+executor 路径 `.get` 拆 `ExecutionException` 取 cause，OOM 恢复原样逃逸（引擎不再
+改变致命错误的可观察类型）；Sequential/ThreadPool 的线程模型 docstring 诚实降级
+（声明了超时的工具跑在 VT 上，是例外且写明）；ThreadPool 的「占池槽」因果翻正
+（真占槽的是**无**超时的卡死工具）。
+
+**教训与 §5.1 同款**：每一步局部全绿，但「包链还是包 terminal」「字段还是协议/
+传递」两个隐含面当时没被追问——是 review 的多角度 fan-out 逮住的，不是测试。
 
 ---
 

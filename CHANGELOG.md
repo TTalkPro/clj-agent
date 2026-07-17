@@ -447,8 +447,10 @@
   - **R5 `:tool-manager` 的 `:timeout` 零校验**：`:tool-manager {:timeout 0}` 每次调用瞬时
     超时。`build-kernel` 装配期一并过 `valid-timeout?`（消息串统一走 `tool/check-timeout!`）。
   - **R6 delegate 被引擎超时打断 → kill!/drop! 跳过**：子 agent 泄漏且继续烧 token。
-    `run-sync` 加 try/finally；delegate-tool / fanout-tool 写 `:timeout` 进 inline map
-    （声明恒优先，引擎缺省砍不掉它）。
+    `run-sync` 加 try/finally（`drop!` 内先 `kill!`，中断路径一条不漏）；
+    delegate-tool / fanout-tool 写 `:timeout` 进 inline map（声明恒优先，引擎缺省
+    砍不掉它）。**fanout-tool 的 try/finally 为事后自查补漏**（首轮只修了
+    delegate 的 run-sync，同型的 fanout await 循环漏了——第二次 code review 逮到）。
   - **R7 executor 路径 OOM 被 Future.get 包成 ExecutionException**：`invoke-one` 重抛的
     OOM 被 EE 包装（普通 Exception），`fatal-throwable?` 认不出。`run-on-executor` 拆 cause
     原样重抛。
@@ -459,7 +461,15 @@
     catch-Throwable 三元组；`tool/check-timeout!` 统一超时校验消息串；`:retry` 装配期校验
     （与 `:timeout` 对称）；`inline-meta` 预计算消除 4 处 by-name O(n) 扫描；live 脚本
     `cond->` 冗余 + test sleep 减半。
-  - 全套 **316 tests / 1307 assertions / 0 failures**，MiniMax live 20 项第五遍稳定。
+  - **收尾（2026-07-17）**：`tool-timeout-design.md` 补 **§5.6 后记**记录 P9 的两个
+    架构事实变更（超时包裹点 链→terminal、引擎缺省读取 字段回读→动态 var），
+    §3.5 旧修订块加指针防读旧停留；advisor_test 的 5 处裸 map 引擎桩
+    `{:timeout ms}` 换 `StubManager` defrecord（协议 + 字段双契约；裸 map 进真实
+    react 循环会抛 No implementation of method 的陷阱先例清除；注意 reify 不可用
+    ——关键字查找拿不到 reify 的值，必须 defrecord）。
+  - 全套 **316 tests / 1307 assertions / 0 failures**，MiniMax live 20 项**六遍稳定**
+    （场景 4 abandon 差值六次实测 1701/1702/1700/1700/1700/1700ms，恒定 ≈ CPU 循环
+    2500ms − 超时 800ms——修复前后跨越了架构重排，测量纹丝不动）。
 
 ## [0.2.0] - 未发布（2026-07-10 定稿）
 
