@@ -8,6 +8,7 @@
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.tool :as tool :refer [deftool]]
+            [im.ttalk.agent.tool-calling-manager :as tcm]
             [im.ttalk.agent.advisor :as flt]))
 
 ;;; ============================================================
@@ -444,22 +445,29 @@
     (let [k (kernel/build-kernel {:service {} :tools [(inline-sleepy "plain")]})]
       (is (nil? (kernel/tool-timeout k :plain))))))
 
+;; 引擎桩：satisfies ToolCallingManager **且**携带 :timeout 字段。
+;; 不用裸 map `{:timeout ms}`——那是个陷阱先例：manager-timeout 读得到它，但这样的
+;; kernel 一旦进真实 react 循环，会在 tcm/execute-tool-calls 抛 No implementation
+;; of method（P9 review 逮到的 R5 尾巴）。真引擎（三个构造器）在 client 模块，
+;; core 造不了，故用最小 defrecord 桩：协议 + 字段两个契约都满足。
+(defrecord StubManager [timeout]
+  tcm/ToolCallingManager
+  (execute-tool-calls [_ _ _ _]
+    (throw (ex-info "StubManager 只携带 :timeout 供 invoke-tool 读取，不执行批次" {}))))
+
 (deftest declared-timeout-beats-engine-default-test
-  ;; 引擎缺省经 tcm/manager-timeout 读 :tool-manager 的 :timeout 字段——
-  ;; 按其契约，任何带该字段的值都可（invoke-tool 路径只读不执行），
-  ;; 故这里用 {:timeout ms} 桩即可，不必造真引擎（真引擎的测试在 client 模块）。
   (testing "优先级：工具声明 > 引擎缺省（声明更**宽**时引擎缺省不砍它）"
     (let [slowish (assoc (inline-sleepy "s" :timeout 5000)
                          :handler (fn [_ _] (Thread/sleep 300) "done"))
           k (kernel/build-kernel {:service {} :tools [slowish]
-                                  :tool-manager {:timeout 100}})]
+                                  :tool-manager (->StubManager 100)})]
       (is (= "done" (:value (kernel/invoke-tool k :s {} nil)))
           "引擎缺省 100ms < 下游 300ms，但声明 5000ms 胜出")))
 
   (testing "优先级：工具声明 > 引擎缺省（声明更**紧**时提前超时，报的是声明值）"
     (let [k (kernel/build-kernel {:service {}
                                   :tools [#'sleepy-declared]
-                                  :tool-manager {:timeout 60000}})
+                                  :tool-manager (->StubManager 60000)})
           r (kernel/invoke-tool k :sleepy-declared {} nil)]
       (is (clojure.string/includes? (:value r) "200ms")
           "报的是工具声明的 200ms，不是引擎的 60000ms")))
@@ -467,7 +475,7 @@
   (testing "未声明的工具吃引擎缺省"
     (let [k (kernel/build-kernel {:service {}
                                   :tools [#'sleepy-plain]
-                                  :tool-manager {:timeout 150}})
+                                  :tool-manager (->StubManager 150)})
           r (kernel/invoke-tool k :sleepy-plain {} nil)]
       (is (clojure.string/includes? (:value r) "150ms"))))
 
@@ -498,18 +506,18 @@
             clojure.lang.ExceptionInfo #":tool-manager 的 :timeout 必须为正整数毫秒"
             (kernel/build-kernel {:service {}
                                   :tools [(inline-sleepy "ok")]
-                                  :tool-manager {:timeout bad}}))
+                                  :tool-manager (->StubManager bad)}))
           (str "应拒绝 " (pr-str bad)))))
 
   (testing "合法的 :tool-manager :timeout 照常通过"
     (is (some? (kernel/build-kernel {:service {}
                                      :tools [(inline-sleepy "ok")]
-                                     :tool-manager {:timeout 500}}))))
+                                     :tool-manager (->StubManager 500)}))))
 
   (testing "无 :timeout 字段的 :tool-manager 不受影响（reify/自定义实现）"
     (is (some? (kernel/build-kernel {:service {}
                                      :tools [(inline-sleepy "ok")]
-                                     :tool-manager {}})))))
+                                     :tool-manager (->StubManager nil)})))))
 
 (deftool instant-tool
   "瞬间返回的工具（R1 测试用：审批耗时应排除在超时预算外）"
