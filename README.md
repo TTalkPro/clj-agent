@@ -140,7 +140,7 @@ clj-agent/
 
 ;; 使用 tag
 {:deps {im.ttalk/clj-agent {:git/url "https://github.com/your-org/clj-agent"
-                            :git/tag "v0.2.0"
+                            :git/tag "v0.3.0"
                             :git/sha "d523507"}}}
 ```
 
@@ -159,8 +159,8 @@ clj -T:build install  # 安装到本地 Maven 仓库
 
 ```clojure
 ;; deps.edn
-{:deps {im.ttalk/clj-agent-client {:mvn/version "0.2.xxx"}     ;; agent 运行时（引 core）
-        im.ttalk/clj-agent-provider {:mvn/version "0.2.xxx"}}}  ;; 厂商适配器
+{:deps {im.ttalk/clj-agent-client {:mvn/version "0.3.xxx"}     ;; agent 运行时（引 core）
+        im.ttalk/clj-agent-provider {:mvn/version "0.3.xxx"}}}  ;; 厂商适配器
 ```
 
 > **建议**：本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。

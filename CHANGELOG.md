@@ -2,9 +2,13 @@
 
 本项目版本号形如 `0.x.<git-count>`（各模块同步）。本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织。
 
-## [0.3.0] - 未发布（2026-07-11，S1：工具阶段 MapReduce 化）
+## [0.3.0] - 未发布（2026-07-17 定稿；2026-07-11 启动）
 
-设计与动机见 `docs/agent-loop-concurrency-design.md`（§9 为实施设计）。
+v0.3 的主线：工具阶段 MapReduce 化（S1/S2）、HITL 持久化与 Timeline、
+Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超时内建化、
+缺省引擎串行化。设计与动机见 `docs/agent-loop-concurrency-design.md`（§9 为实施设计）。
+从 v0.2 迁移请看文末[迁移指南](#从-v02-迁移到-v03)——**尤其第 1 节的升级陷阱**
+（依赖批内并行的工具对在新的串行缺省下会**无错误、无日志地永久挂起**）。
 
 ### 💥 破坏性变更
 
@@ -562,6 +566,97 @@ v0.2 是一次**破坏性**版本：统一消息/tool-call 词汇、模块重组
 - 设计文档状态与代码对齐：memory-filter-refactor（已完成）、onion-filter
   （全部实施，落地为 clj-agent-client）、streaming-async-design（全部落地）、
   response-path-consolidation（双消息体系统一完成）。
+
+---
+
+## 从 v0.2 迁移到 v0.3
+
+### 1. 缺省执行引擎改为串行 ⚠️ 唯一可能静默挂起的变更，先读这节
+
+不指定 `:tool-manager` 时，同一轮的多个 tool-call 从**并行**（v0.2 缺省，虚拟线程）
+改为**按调用序依次执行**。绝大多数工具无感知；但有一类升级后会**永久挂起**：
+
+```clojure
+;; v0.2 下能工作的「批内互等」工具对——A 等 B 的信号，B 等 A 的信号，
+;; 并行时双双就绪；串行缺省下 A 先跑、永远等不到 B，而缺省又无超时：
+;; 无错误、无日志、循环永不返回。
+```
+
+**排查判据**：工具体内有 `deref` promise / 等锁 / 等队列，且对端是**同批**另一个
+工具 → 中招。**迁移**：显式注入并发引擎（行为与 v0.2 逐字相同）：
+
+```clojure
+(kernel/build-kernel {:service svc :tools [...]
+                      :tool-manager (react/virtual-thread-tool-calling-manager)})
+```
+
+顺带建议给引擎配 `:timeout` 兜底（见下节）——即使漏排查了一对互等工具，
+也是「超时错误」而非「永久挂起」。
+
+### 2. 超时：`timeout-filter` 已删除，超时是内建机制
+
+```clojure
+;; v0.2
+{:filters [(filters/timeout-filter 5000)]}
+;; v0.3 —— 两个来源，开箱即生效，无需任何 filter
+(deftool slow-api "..." [...] {:timeout 5000} ...)                 ;; 工具声明（优先）
+{:tool-manager (react/sequential-tool-calling-manager {:timeout 30000})} ;; 引擎缺省
+```
+
+- 缺省**不超时**（v0.2 的 filter 也是 opt-in，故仅迁移挂过 filter 的部署）
+- 优先级：工具声明 > 引擎缺省 > 不超时；坏值（`0`/`"5s"`/负数）**装配期即抛**
+- 语义不变：超时 = 放弃等待 ≠ 终止执行（阻塞 IO 会被真正取消；纯 CPU 循环
+  打不断，副作用可能在超时后落地）——声明 `:retry` 的超时工具必须幂等
+
+### 3. `invoke-tool` 返回形状
+
+```clojure
+;; v0.2                            ;; v0.3
+{:value result :context ctx}       {:value result}            ;; 无写
+                                   {:value result :writes {k v}}  ;; 有写意图
+```
+
+直调方自行用 `context/apply-writes` 折叠 writes（react 循环内已自动处理）。
+
+### 4. tool filter 响应契约收窄
+
+```clojure
+;; v0.2 短路分支须回传 context      ;; v0.3 响应侧无 :context
+{:result "blocked" :context (:context req)}   {:result "blocked"}
+```
+
+不带 `:writes` 的响应 = 该调用写意图不生效（事务性）；`:error {:class ...}`
+参与屏障分层路由。
+
+### 5. 工具 / inline handler 返回值拆包判据
+
+```clojure
+;; v0.2：含 :result 的 map 会被拆包   ;; v0.3：判据改为「含 :writes」
+(fn [args ctx] {:result r})           (fn [args ctx] r)                    ;; 纯结果直接返回
+                                      (fn [args ctx] {:result r :writes {k v}})  ;; 要写才包
+```
+
+### 6. ToolContext 只读 + 状态槽
+
+工具/filter 不再改写 context；写走返回值 `:writes`，屏障处按 `build-kernel`
+`:state-slots` 声明的槽级 reducer 折叠（未声明槽 last-writer）。同批工具互相
+看不到对方的写（轮初快照）——此语义与选哪个引擎无关。
+
+### 7. `on-tool-result` 时序
+
+改为任务完成即实时触发，批内顺序不确定；需确定顺序读 `:tool-calls-made` /
+`:records`。
+
+### 8. `LineageStore` → `BranchStore`（含 SQLite 表重建）
+
+| v0.2 | v0.3 |
+|---|---|
+| `lineage-add!` / `lineage-get` / `lineage-children` / `lineage-remove!` | `record-branch!` / `get-branch` / `branch-children` / `delete-branch!` |
+| `in-memory-lineage-store` / `sqlite-lineage-store` | `in-memory-branch-store` / `sqlite-branch-store` |
+| deps key `:lineage` | `:branch` |
+| SQL 表 `branch_lineage` | `branch_records`（**跨版本需重建**，无自动迁移） |
+
+用户侧查询 API（`lineage` / `ancestry` / `fork!` / `rollback!` / `prune!`）不变。
 
 ---
 
