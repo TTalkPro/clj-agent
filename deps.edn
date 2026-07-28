@@ -16,4 +16,9 @@
                                "modules/clj-agent-client/test"
                                "modules/clj-agent-core/test"]
                  :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
-                 :main-opts ["-m" "kaocha.runner"]}}}
+                 :main-opts ["-m" "kaocha.runner"]}
+
+           ;; 三个模块的构建/发布统一在根 build.clj（见其 ns docstring）
+           :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                          slipset/deps-deploy {:mvn/version "0.2.2"}}
+                   :ns-default build}}}
