@@ -267,6 +267,22 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### 🐛 修复
 
+- **`create-agent` 递不到 provider 专属能力**（2026-07-28，见
+  `docs/provider-variant-design.md` §6.1）：`common/build-kernel` 用白名单
+  `{:model :max-tokens :temperature}` 组装 provider 调用 config，于是 provider 侧
+  **明明实现了**的能力——Anthropic/MiniMax 的 `:thinking`、`:cache-strategy`、
+  `:service-tier`、`:top-k`、`:beta`、`:retry` 等——走 agent 门面全部**静默丢弃**，
+  只能自建 kernel/service 绕开。`anthropic/build-params` 早就认 `:thinking`，
+  是门面把它挡在外面：**说了能用却用不了**。
+  改为排除法（新增公开的 `common/service-config` + `orchestration-keys`）：
+  编排层的键不下沉，其余一律透传。
+  - **风险面朝向反了才安全**：白名单漏一个键 = 一个能力静默失效（只在用户报「为什么
+    不生效」时才发现）；排除法漏一个键 = 编排层的值被塞给 provider，**当场炸在测试里**。
+  - **`:tools` 是名单里最危险的一条**（两边都有、含义不同：service config 里是已编译
+    schema，agent 里是 tool var 向量）。漏下去 provider 转出 `{:name nil}`，MiniMax
+    报 400「function name is empty」——P0 实验第一版真撞过，故单测专钉这条。
+  - 显式 `nil` 不下沉（否则 provider 侧 `(some? temperature)` 这类判据会被 nil 骗过）。
+  - +3 tests / +17 assertions（`service_config_test.clj`）；真机 M2.7 冒烟通过。
 - **resume 丢弃暂停前累积的 context 状态槽**：`client/resume` 此前用仅含
   conversation-id 的裸 context 续跑，S1 的 `:writes` 折叠结果跨 resume 即失
   （S1 之前 context 无内容故无感）。现 resume context 恢复自暂停态的
