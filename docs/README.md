@@ -30,7 +30,7 @@
 
 | 文档 | 讲什么 |
 |---|---|
-| [`provider-variant-design.md`](provider-variant-design.md) | 一个标准 provider 如何承载多套厂商方言（MiniMax thinking）：**三类差异三种机制**。P0 实验**大幅修正了本文自己的核心推论**：M2.7 三臂无差别，**M3 上剥 thinking 回传让模型少思考 26%** 但任务结果全同 → 回传契约「证据不足暂不立项」（下一个实验的判据已预先定死）；落地的只有 config 排除法 |
+| [`provider-variant-design.md`](provider-variant-design.md) | 一个标准 provider 如何承载多套厂商方言（MiniMax thinking）：**三类差异三种机制**，不动 `ILLMProvider` 而用**可选协议 + `satisfies?` 探测**。修了 config 白名单（provider 专属键递不到底）与 thinking 回传丢失（实测正确率 100%→82.5%）。**也是「预注册判据双向作数」的范例**：判据先否掉一次、卡住一次，最后才放行同一个结论 |
 | [`tool-timeout-design.md`](tool-timeout-design.md) | 工具超时：借鉴 beamai 但**不照搬三层**（JVM 无 `exit(Pid,kill)`，超时=放弃等待≠终止执行）。修了 `:timeout` 死选项与 `timeout-filter` 平台线程两个真 bug |
 | [`streaming-async-design.md`](streaming-async-design.md) | 真增量 SSE 传输选型 + 异步框架整合。**也是 §2《框架无关》的出处** |
 | [`onion-filter.md`](onion-filter.md) | 洋葱式 filter + kernel 瘦身（loop/memory 下沉 client 模块） |

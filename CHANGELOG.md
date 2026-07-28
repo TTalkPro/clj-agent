@@ -69,6 +69,29 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### ✨ 新增
 
+- **thinking 回传契约：可选协议 `IReplayableResponse` + 中立消息 `:blocks`**
+  （2026-07-28，设计与三轮实验记录见 `docs/provider-variant-design.md`）。
+  推理模型的 thinking 块（含 `signature`）此前在中立层被抹平——`response->neutral`
+  只用 `:text` + `:tool-calls` 重建 assistant 消息，`wire/anthropic` 也只吐
+  text/tool_use 两种块。于是**工具循环第二轮起，模型再也看不到自己前几轮的思考**。
+  - **代价是实测出来的，不是从文档推的**：M3 上 A/B 对照（n=40/臂，7 步串行工具链，
+    答案唯一可自动判定）——完整回传 **100%** 正确、逐轮全对 100%、40 次零方差；
+    剥掉 thinking **82.5%** 正确、逐轮全对 47.5%、轮数 3–17。单侧 Fisher **p=0.0059**。
+    （M2.x 不受影响：它关不掉 thinking，每轮必然思考。）
+  - **机制**：新增**可选**协议 `im.ttalk.agent.model/IReplayableResponse`
+    （单方法 `replay-blocks`），`service` 归一化时 `satisfies?` **探测**——
+    不实现的 provider（含仓库外的实现）**一行不改**照常工作。
+    **不往 `ILLMProvider` 加方法**：那是 DIP 的端口，加方法 = 所有实现方破坏性变更。
+  - **core 只搬运不解释**：载荷带 `:format` 标签，core 全程不碰 `:data`，
+    厂商 wire 知识仍归 provider（不违反 `response-path-consolidation.md`）。
+  - **降级是缺省路径**：无 `:blocks` / `:format` 认不出（跨 provider 的历史）/
+    `:data` 为空，一律走原来的 text+tool_use 重建，各有单测。
+  - 陷阱记录：新协议**不得**加 `extend-type Object` 兜底——`ILLMProvider` 就因为有
+    兜底，`satisfies?` 对任意非 nil 对象恒为 true（见 `model/provider?` 注释），
+    而本机制全靠 `satisfies?`。单测专钉这条。
+  - 验收：+12 tests / +45 assertions（全套 331/1369/0）；真机走 `create-agent`
+    全链 **20/20 = 100%**，20 次全部恰好 7 次工具调用，与 A 臂零方差形态一致。
+
 - `context/apply-writes`：批次写折叠纯函数（槽级 reducer + conflict 上报）。
 - `build-kernel :state-slots`：状态槽合并语义声明。
 - `deftool {:serial true}` / inline 工具 `:serial` 键 + `kernel/serial-tool?`。
