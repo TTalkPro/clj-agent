@@ -41,11 +41,16 @@
    判据（照着读，别自由发挥）
    ============================================================
 
-     B 报错（4xx）                       → 降级确凿，P3 立项，且优先级高于 P1/P2
-     B 不报错但机制退化                   → 软降级：P3 立项，验收要钉住退化的那一条
-       （不再发起第二次工具调用 / 不再产出 thinking / 重复调用同一工具）
-     A/B/C 三臂机制上无差别               → **对 MiniMax 而言 P3 撤回**，只留 P1
-       （Anthropic 官方与 Gemini 的需求独立成立，但那不是本实验的结论）
+     A 臂（官方要求的形态）也报错         → **实验本身有问题，结论作废**（先证伪自己）
+     B 报错（4xx）而 A 不报错             → 降级确凿，P3 立项
+     B **任务层**退化（轮次更少 / 重复问同一目标）→ 降级确凿，P3 立项
+     B **思考频率**退化（thinking 次数两组不重叠）→ 软降级：行为差异确认，
+       但「是否伤害任务质量」本实验无据——见 docs 的 §7.5，那才是立项分界
+     三臂无差别                           → 就本模型而言 P3 无据可立
+
+   判读**按模型分组**：M2.x 关不掉 thinking、M3 可关，两者数据合并等于没测。
+   thinking 看的是**次数**不是有无——第一版判成布尔（是否为零），
+   于是 M3 上唯一的真信号（4.50 → 3.33 次）被判据本身漏掉了。
 
    token 用量只印不判：prompt cache 会让 token 对照得出反向结论（已有前车之鉴）。
    模型措辞同样只印不判——会波动的东西不能当判据。
@@ -94,6 +99,14 @@
    :anthropic-version nil
    :api-key auth-token
    :max-tokens 2048})
+
+(def ^:private thinking-on
+  "探针 1 / 2 一律显式开 thinking。
+
+   M2.x 关不掉，开不开都一样；但 **M3 缺省关闭**——不显式开的话第一轮响应里
+   根本没有 thinking 块可剥，三臂完全等价，实验退化成空转（而且会印出一个
+   看起来很像结论的『无差别』）。探针 0 单独验开关语义，故那里不加。"
+  {:thinking {:type "adaptive"}})
 
 ;; 两套任务，默认用 chain。
 ;;
@@ -266,7 +279,7 @@
         (let [msgs (conj history
                          {:role "assistant" :content (replay-policy arm resp)}
                          {:role "user" :content (run-tools resp)})
-              {ok :ok err :error} (call! {:model model} msgs)]
+              {ok :ok err :error} (call! (merge {:model model} thinking-on) msgs)]
           (if err
             (assoc acc :error (select-keys err [:type :status :message]) :failed-at-round round)
             (recur msgs ok (inc round) acc)))))))
@@ -274,7 +287,7 @@
 (defn probe-1-replay [model]
   (println "\n--- 探针 1：回传缺 thinking 块会怎样（§7.1 / §7.2，核心）---")
   (let [user-msg {:role "user" :content question}
-        {:keys [ok error]} (call! {:model model} [user-msg])]
+        {:keys [ok error]} (call! (merge {:model model} thinking-on) [user-msg])]
     (cond
       error
       (do (println "  第一轮就失败，实验无从谈起：" (pr-str error))
@@ -315,9 +328,9 @@
 (defn probe-2-stream-shape [model]
   (println "\n--- 探针 2：流式与非流式的块形状是否同构（§7.4）---")
   (let [q [{:role "user" :content "用一句话说明彩虹为什么是弯的。"}]
-        {sync-ok :ok sync-err :error} (call! {:model model} q)
+        {sync-ok :ok sync-err :error} (call! (merge {:model model} thinking-on) q)
         streamed (try
-                   (anthropic/call-anthropic-stream (merge base-config {:model model}) q tools (fn [_] nil))
+                   (anthropic/call-anthropic-stream (merge base-config {:model model} thinking-on) q tools (fn [_] nil))
                    (catch Exception e {:stream-error (.getMessage e)}))]
     (if (or sync-err (:stream-error streamed))
       (println "  一侧失败，跳过：" (pr-str (or sync-err (:stream-error streamed))))
@@ -336,50 +349,72 @@
 ;;; 判读
 ;;; ============================================================
 
+(defn- arm-stat [rs]
+  (let [ok (remove :error rs)]
+    {:n (count rs)
+     :errors (count (filter :error rs))
+     :repeated (count (filter :repeated? rs))
+     :rounds (mapv :rounds ok)
+     ;; thinking **次数**，不是「有没有」——M3 的信号就藏在这：整条链跑完的
+     ;; 轮数一样、也从不为零，但剥掉回传后模型每轮重新思考的频率掉下来了。
+     ;; 第一版判读器只看 (zero? thinking)，这个信号被它整个漏掉。
+     :thinking (mapv #(long (:thinking % 0)) ok)}))
+
+(defn- verdict-for
+  "**按模型**判读——两个模型的数据混在一起统计等于没统计（M2.7 关不掉 thinking，
+   M3 可关，两者本就不该合并）。"
+  [model rs]
+  (println (format "\n---------- %s ----------" model))
+  (let [by-arm (group-by :arm rs)
+        stat (into {} (for [[arm v] by-arm] [arm (arm-stat v)]))
+        {a :A b :B} stat
+        mean (fn [xs] (if (seq xs) (double (/ (reduce + xs) (count xs))) 0.0))]
+    (doseq [arm [:A :B :C] :when (get stat arm)]
+      (println (format "  臂 %s：%s" (name arm) (pr-str (get stat arm)))))
+    (println)
+    (cond
+      ;; 先证伪自己：A 臂（官方要求的形态）也挂 = 实验搭错了，不是发现。
+      ;; 第一版就在这里差点报出假阳性——它只回了一个 tool_result，
+      ;; 而 MiniMax 一轮并行发起了两个 tool_use，三臂一起 400。
+      (pos? (:errors a))
+      (println "→ ⚠ A 臂（完整回传）也报错：**实验本身有问题，结论作废**。"
+               "\n  A 臂是官方要求的形态，它挂说明错在脚本或调用方式，不在回传策略。")
+
+      (pos? (:errors b))
+      (println "→ B 臂报错而 A 臂不报错：**降级确凿**，P3 立项。")
+
+      (or (> (:repeated b) (:repeated a))
+          (< (apply min (:rounds b)) (apply min (:rounds a))))
+      (println "→ B 臂**任务层**退化（重复查同一目标 / 轮次更少）：降级确凿，P3 立项。")
+
+      ;; thinking 次数：B 的每一次都不高于 A 的最低值 = 两组不重叠
+      (and (>= (count (:thinking b)) 3)
+           (<= (apply max (:thinking b)) (apply min (:thinking a)))
+           (< (mean (:thinking b)) (mean (:thinking a))))
+      (println (format "→ B 臂**思考频率**退化：thinking 均值 %.2f vs A 的 %.2f，两组不重叠。"
+                       (mean (:thinking b)) (mean (:thinking a)))
+               "\n  任务仍能走完（轮数/工具调用数一致、无重复、无报错），故是**软降级**："
+               "\n  可观测的行为差异**已确认**，但「是否伤害任务质量」本实验没有证据。"
+               "\n  n 小，先加大 EXPERIMENT_REPEAT 复核再据此立项。")
+
+      (< (mean (:thinking b)) (* 0.8 (mean (:thinking a))))
+      (println (format "→ 疑似思考频率退化（均值 %.2f vs %.2f）但两组有重叠：**证据不足**，加大 n 复核。"
+                       (mean (:thinking b)) (mean (:thinking a))))
+
+      :else
+      (println "→ 三臂机制上无差别：就本模型而言 P3 无据可立。"))))
+
 (defn- verdict []
   (println "\n==================================================")
   (println "判读（按 docs/provider-variant-design.md §6 P0 的判据）")
   (println "==================================================")
-  (let [replay (filter #(= :replay (:probe %)) @findings)
-        by-arm (group-by :arm replay)
-        arm-stat (fn [arm]
-                   (let [rs (get by-arm arm)]
-                     {:n (count rs)
-                      :errors (count (filter :error rs))
-                      :repeated (count (filter :repeated? rs))
-                      :rounds (mapv :rounds rs)
-                      :no-thinking (count (filter #(and (not (:error %)) (zero? (long (:thinking % 0)))) rs))}))]
+  (let [replay (filter #(= :replay (:probe %)) @findings)]
     (if (empty? replay)
       (println "探针 1 没有产出可判读的数据（见上文原因）。")
-      (do
-        (doseq [arm [:A :B :C] :when (get by-arm arm)]
-          (println (format "  臂 %s：%s" (name arm) (pr-str (arm-stat arm)))))
-        (let [b (arm-stat :B) a (arm-stat :A)]
-          (println)
-          (cond
-            ;; 先证伪自己：A 臂（官方要求的形态）也挂 = 实验搭错了，不是发现。
-            ;; 第一版就在这里差点报出假阳性——它只回了一个 tool_result，
-            ;; 而 MiniMax 一轮并行发起了两个 tool_use，三臂一起 400。
-            (pos? (:errors a))
-            (println "→ ⚠ A 臂（完整回传）也报错：**实验本身有问题，结论作废**。"
-                     "\n  A 臂是官方文档要求的形态，它挂说明错在脚本或调用方式，不在回传策略。"
-                     "\n  先看上面的报错信息（tool call and result not match = tool_result 没回全）。")
-
-            (pos? (:errors b))
-            (println "→ B 臂报错而 A 臂不报错：**降级确凿**，P3 立项，优先级高于 P1/P2。")
-
-            (or (> (:repeated b) (:repeated a))
-                (> (:no-thinking b) (:no-thinking a))
-                (< (apply min (:rounds b)) (apply min (:rounds a))))
-            (println "→ B 臂机制退化（重复查同一城市 / 不再产出 thinking / 轮次更少）："
-                     "\n  **软降级**，P3 立项，验收要钉住退化的那一条。"
-                     "\n  注意重复次数少时无法排除采样波动——加大 EXPERIMENT_REPEAT 复核。")
-
-            :else
-            (println "→ 三臂机制上无差别：**对 MiniMax 而言 P3 撤回**，只留 P1（config 白名单）。"
-                     "\n  Anthropic 官方与 Gemini 的回传需求独立成立，但那不是本实验的结论。")))))
-    (println "\n原始记录（可粘进设计文档 §7）：")
-    (doseq [f @findings] (println "  " (pr-str f)))))
+      (doseq [[model rs] (group-by :model replay)]
+        (verdict-for model rs))))
+  (println "\n原始记录（可粘进设计文档 §7）：")
+  (doseq [f @findings] (println "  " (pr-str f))))
 
 ;;; ============================================================
 ;;; main
