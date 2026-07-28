@@ -22,15 +22,21 @@
 (defn response->neutral
   "把归一化响应(ILLMResponse)转成中立 assistant 消息。
     归一化响应的 tool-calls 已与中立形状同构（{:id :name(字符串) :args}，
-    v0.2 统一后不再需要 :input→:args 换名），仅经 msg/tool-call 复位形状。"
+    v0.2 统一后不再需要 :input→:args 换名），仅经 msg/tool-call 复位形状。
+
+    :replay-blocks（provider 经 IReplayableResponse 抽出的不透明载荷）**必须**
+    随消息进历史：它是「原样带回下一轮」的唯一载体，在这里丢掉，下一轮 wire 层
+    就再也拿不回来了——这正是 P3 修的那个洞（docs/provider-variant-design.md
+    §1.3；实测代价：M3 正确率 100%→82.5%）。本函数不解释它，只搬运。"
   [response]
   (let [text (resp/response-text response)
-        calls (resp/response-tool-calls response)]
-    (if (seq calls)
-      (msg/assistant-tool-calls
-        (mapv (fn [{:keys [id name args]}] (msg/tool-call id name args)) calls)
-        (when (seq text) text))
-      (msg/assistant text))))
+        calls (resp/response-tool-calls response)
+        m (if (seq calls)
+            (msg/assistant-tool-calls
+              (mapv (fn [{:keys [id name args]}] (msg/tool-call id name args)) calls)
+              (when (seq text) text))
+            (msg/assistant text))]
+    (msg/with-blocks m (resp/response-replay-blocks response))))
 
 (defn memory-filter
   "构造按 conversation-id 读写历史的 around-chat filter，闭包绑定 store。

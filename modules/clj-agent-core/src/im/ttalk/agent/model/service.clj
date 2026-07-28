@@ -90,7 +90,13 @@
       :usage usage
       :finish-reason finish-reason
       :provider (provider/provider-name provider)
-      :raw-response raw-response)))
+      :raw-response raw-response
+      ;; 不透明回放载荷：**可选**协议，探测到才取（见 model/IReplayableResponse）。
+      ;; core 全程不解释 :data——它只负责把这段数据从响应搬到中立消息，
+      ;; 让下一轮的 wire 转换器原样吐回去。厂商 wire 知识仍归 provider
+      ;; （见 docs/response-path-consolidation.md）。
+      :replay-blocks (when (satisfies? provider/IReplayableResponse provider)
+                       (provider/replay-blocks provider raw-response)))))
 
 (defn create-service
   "从 ILLMProvider 创建 Kernel service
