@@ -14,6 +14,36 @@
 ;;; Kernel 构建
 ;;; ============================================================
 
+(def ^:private orchestration-keys
+  "只属于 agent/kernel **编排层**的键——绝不下沉到 provider 调用 config。
+
+   这份名单是白名单改排除法后唯一的把关处，加 agent 级选项时**必须**同步加进来。
+   `:tools` 尤其危险：service config 里的 `:tools` 指**已编译的 tool schema**，
+   而 agent 的 `:tools` 是 tool var 向量——漏下去 provider 会转出 `{:name nil}`，
+   MiniMax 当场 400「invalid params, function name is empty」。
+
+   `:system-prompt` 不在这里下沉是因为它**每次调用单独下发**（见 client 的
+   :settings → service/build-call-config），基础 config 里再放一份是重复真相。"
+  #{:provider :tools :tool-vars :kernel :filters :memory :pause-store
+    :callbacks :conversation-id :max-iterations :state-slots :tool-manager
+    :eligibility-fn :system-prompt :on-pause :on-error :on-env-error
+    :cancel-token :tool-choice :id})
+
+(defn service-config
+  "opts → provider 调用 config（基础值，每次调用可再覆盖）。
+
+   **排除法而非白名单**：早先这里只放行 {:model :max-tokens :temperature}，
+   于是 provider 专属能力（Anthropic/MiniMax 的 :thinking、:cache-strategy、
+   :service-tier、:top-k、:beta …）明明在 provider 侧实现了，走 create-agent 却
+   **递不到底**——只能自建 kernel/service 绕开 agent 门面。那是「说了能用却用不了」，
+   不是设计取舍。放行未知键的代价可控：各 provider 的 build-params 只解构自己认识的
+   键，多余的原样忽略。"
+  [opts]
+  (->> (apply dissoc opts orchestration-keys)
+       (remove (comp nil? val))          ;; 显式传 nil 不该覆盖 provider 侧默认值
+       (into {:model      (:model opts "glm-4")
+              :max-tokens (:max-tokens opts 4096)})))
+
 (defn build-kernel
   "根据配置 map 构建 Kernel 实例
 
@@ -25,15 +55,14 @@
     - :tools         tool var 列表
     - :memory        ChatMemory store（已解析；以 memory-filter 形态挂进 kernel）
     - :max-iterations 最大工具调用循环次数（默认 10）
+    - **其余键一律透传给 provider 调用 config**（见 service-config）：
+      如 Anthropic/MiniMax 的 :thinking、:cache-strategy、:service-tier、:top-k、
+      :beta、:retry、:timeout 等。编排层自己的键见 orchestration-keys。
 
     Agent 层不暴露 kernel filter：此处只挂 memory-filter。
     需要自定义 filter 时，请直接用 kernel/build-kernel 自建后传 :kernel。"
   [opts]
-  (let [service (service/create-service
-                  (:provider opts)
-                  (cond-> {:model      (:model opts "glm-4")
-                           :max-tokens (:max-tokens opts 4096)}
-                    (:temperature opts) (assoc :temperature (:temperature opts))))
+  (let [service (service/create-service (:provider opts) (service-config opts))
         tools (:tools opts [])
         store (:memory opts)
         filters (if store
