@@ -253,7 +253,7 @@
 
 (defrecord LLMResponse
   [text reasoning tool-calls usage finish-reason
-   id model provider raw-response]
+   id model provider raw-response replay-blocks]
 
   ILLMResponse
   (response-text [_] text)
@@ -265,6 +265,15 @@
   (response-id [_] id)
   (response-model [_] model)
   (response-provider [_] provider))
+
+(defn response-replay-blocks
+  "获取「必须原样带回下一轮」的不透明载荷 {:format kw :data ...}，无则 nil。
+
+   由 service 归一化时经可选协议 im.ttalk.agent.model/IReplayableResponse 抽取；
+   provider 不实现该协议即恒为 nil（原路径不变）。
+   下游：advisor/memory 的 response->neutral 把它挂到中立消息的 :blocks。"
+  [resp]
+  (:replay-blocks resp))
 
 (defn response-reasoning
   "获取推理/思考内容（reasoning_content / thinking）
@@ -292,6 +301,8 @@
    - :model          模型名称
    - :provider       Provider 类型
    - :raw-response   原始响应
+   - :replay-blocks  需原样回放的不透明载荷 {:format kw :data ...}（可选，见
+                     im.ttalk.agent.model/IReplayableResponse）
 
    返回：
    LLMResponse record
@@ -303,7 +314,7 @@
      :usage {:prompt_tokens 100 :completion_tokens 50}
      :finish-reason \"stop\")"
   [& {:keys [text reasoning tool-calls usage finish-reason
-             id model provider raw-response]}]
+             id model provider raw-response replay-blocks]}]
   (->LLMResponse
     text
     reasoning
@@ -313,7 +324,8 @@
     id
     model
     provider
-    raw-response))
+    raw-response
+    replay-blocks))
 
 ;;; ============================================================
 ;;; 谓词函数

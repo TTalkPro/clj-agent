@@ -17,7 +17,21 @@
    约束：
    - role 用 keyword（:system/:user/:assistant/:tool）
    - tool-call: {:id 字符串 :name 字符串 :args map}
-   - tool 消息的 :tool-call-id 关联到对应调用的 :id")
+   - tool 消息的 :tool-call-id 关联到对应调用的 :id
+
+   assistant 消息可携带 **:blocks**（可选）：
+
+   {:role :assistant :content \"...\" :tool-calls [...]
+    :blocks {:provider :minimax :format :anthropic-content :data [...]}}
+
+   这是「必须原样带回下一轮」的**不透明载荷**（Anthropic thinking 块 + signature、
+   Gemini thought_signature 之类）。性质与 :tool 消息的 :writes 一样——
+   **中立层只搬运、不解释**；区别是 wire 层**会**消费它，但只由认得 :format 的
+   那一方消费，认不出就当它不存在（降级路径见 wire/anthropic）。
+
+   来源：service 归一化时经可选协议 model/IReplayableResponse 抽取，
+   由 advisor/memory 的 response->neutral 挂上来。
+   动机与实测代价见 docs/provider-variant-design.md（不回传：正确率 100%→82.5%）。")
 
 (set! *warn-on-reflection* true)
 
@@ -53,6 +67,18 @@
   {:id id
    :name (if (keyword? name) (clojure.core/name name) (str name))
    :args (or args {})})
+
+(defn with-blocks
+  "给 assistant 消息挂上不透明回放载荷（nil / 空则原样返回）。
+
+   blocks 形如 {:format :anthropic-content :data [...]}——中立层不解释 :data。"
+  [m blocks]
+  (if (seq blocks) (assoc m :blocks blocks) m))
+
+(defn blocks
+  "读取不透明回放载荷（无则 nil）。"
+  [m]
+  (:blocks m))
 
 (defn assistant-tool-calls
   "带工具调用的 assistant 消息
