@@ -10,7 +10,8 @@ clj-agent/
 │   ├── clj-agent-core/      # 协议(端口) + kernel 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
 │   └── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
-├── scripts/
+├── bb.edn                   # 开发任务(bb test / bb jar / bb release …)
+├── build.clj                # 三模块统一构建发布(tools.build)
 └── deps.edn                 # 根配置(开发/测试一次性加载全部模块)
 ```
 

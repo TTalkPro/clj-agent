@@ -78,7 +78,9 @@ clj-agent/
 │   └── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
 ├── examples/              # Usage Examples
 ├── docs/                  # Design Documents
-├── scripts/               # Development Scripts
+├── scripts/check_docs.clj # Docs-vs-code gate (JVM Clojure, see below)
+├── bb.edn                 # Dev task entry point (`bb tasks` lists them all)
+├── build.clj              # Build/release for all three modules (tools.build)
 └── deps.edn               # Root Dependency Configuration
 ```
 
@@ -438,19 +440,35 @@ Context manages shared state within a conversation:
 
 ## Development
 
+Dev tasks all go through [babashka](https://babashka.org/) (`bb tasks` lists them all):
+
 ```bash
-# Run all tests
-./scripts/test-all.sh
+bb test          # test all three modules; `bb test core` for just one
+bb check-docs    # docs-vs-code gate (ghost APIs / missing index entries)
+bb check         # test + check-docs — run this before committing
 
-# Build all modules
-./scripts/build-all.sh
+bb jar           # jar all three modules; `bb jar core` for just one
+bb install       # install into the local ~/.m2
+bb release       # per module: clean → jar → install (full pre-release flow)
+bb deploy        # push to Clojars (needs CLOJARS_USERNAME / CLOJARS_PASSWORD)
+bb version       # current version (0.3.<git-count-revs>)
 
-# Install to local Maven
-./scripts/install-all.sh
-
-# Check that the READMEs still match the code (ghost APIs / missing index entries)
-clojure -M scripts/check_docs.clj
+bb repl                       # REPL with all module sources on the classpath
+bb repl simpleagent_examples  # load an example first, then drop into the REPL
 ```
+
+The build itself lives in the root `build.clj` (tools.build) — `bb` is just the entry
+point, `clojure -T:build jar :module core` works too. All three modules share one build:
+same pom-data, same `0.3.<git-count>` version scheme, switched per module via
+`b/set-project-root!`.
+
+> **Why core must be installed before client/provider are jarred**: their `deps.edn`
+> declares core as `{:local/root ".."}`, and `write-pom` can't turn a local path into a
+> valid Maven coordinate — left alone, the generated pom would **omit the core
+> dependency** and break resolution for consumers. The build overrides it to the
+> same-version `:mvn/version` via an alias, which requires that core already be in the
+> local repo. `bb release` satisfies this by going clean→jar→install per module; a bare
+> `bb jar client` auto-installs core first.
 
 <!-- check-docs:ignore-start -->
 ### Docs-vs-code gate (`scripts/check_docs.clj`)
@@ -470,7 +488,7 @@ explicitly said it was gone. Human review doesn't catch this, so it's mechanized
 
 Design bias: **prefer false negatives over false positives.** An alias not bound by a
 `require` in the same file is skipped (so Spring class names, `my-vector-store/search`
-placeholders and `scripts/test-all.sh` paths never participate); comments and string
+placeholders and `scripts/check_docs.clj` paths never participate); comments and string
 literals are stripped first (otherwise "pause/resume" in a comment and the URL
 `/anthropic/v1/messages` in a string both misfire). *A gate that cries wolf gets
 `|| true`'d within a week.*

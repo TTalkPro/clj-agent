@@ -107,7 +107,9 @@ clj-agent/
 │   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
 ├── examples/              # 使用示例
 ├── docs/                  # 设计文档（索引见 docs/README.md；design-principles.md = 项目级硬约束，先读它）
-├── scripts/               # 开发脚本
+├── scripts/check_docs.clj # 文档一致性门禁（JVM Clojure，见下）
+├── bb.edn                 # 开发任务入口（bb tasks 看全部）
+├── build.clj              # 三模块构建/发布（tools.build）
 └── deps.edn               # 根依赖配置
 ```
 
@@ -149,10 +151,9 @@ clj-agent/
 先打包并安装到 `~/.m2/repository`：
 
 ```bash
-# 或用 ./scripts/install-all.sh 一次装全部三个模块（core → client → provider）
-cd /path/to/clj-agent/modules/clj-agent-core
-clj -T:build jar      # 打包
-clj -T:build install  # 安装到本地 Maven 仓库
+cd /path/to/clj-agent
+bb release            # 三个模块按 core → client → provider 打包 + 装进 ~/.m2
+bb release core       # 或只装某一个
 ```
 
 然后像普通 Maven 依赖一样引用：
@@ -636,25 +637,35 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 
 ## 开发
 
+开发任务统一走 [babashka](https://babashka.org/)（`bb tasks` 列全部）：
+
 ```bash
-# 运行所有测试
-./scripts/test-all.sh
+bb test          # 三个模块全测；bb test core 只测一个
+bb check-docs    # 文档一致性门禁（幽灵 API / 模块索引缺漏）
+bb check         # test + check-docs，提交前跑这个
 
-# 构建所有模块
-./scripts/build-all.sh
+bb jar           # 打包三个模块；bb jar core 只打一个
+bb install       # 装到本地 ~/.m2
+bb release       # 逐模块 clean → jar → install（发布前完整流程）
+bb deploy        # 推 Clojars（需 CLOJARS_USERNAME / CLOJARS_PASSWORD）
+bb version       # 当前版本号（0.3.<git-count-revs>）
 
-# 安装到本地 Maven
-./scripts/install-all.sh
-
-# 单独跑某个模块
-cd modules/clj-agent-core && clojure -M:test
-
-# 检查 README 与真实代码是否一致（幽灵 API / 模块索引缺漏）
-clojure -M scripts/check_docs.clj
+bb repl                       # 带全部模块源码的 REPL
+bb repl simpleagent_examples  # 先加载某个 example 再进 REPL
 ```
 
-> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对三个模块并行跑测试，
-> 外加一个 `docs` job 跑文档一致性检查。
+构建/发布本体在根 `build.clj`（tools.build），`bb` 只是入口——也可以直接
+`clojure -T:build jar :module core`。三个模块共用一份构建代码：同一套 pom-data、
+同一个 `0.3.<git-count>` 版本方案，靠 `b/set-project-root!` 切模块目录。
+
+> **为什么 client/provider 打包前要先 install core**：它俩的 `deps.edn` 里 core 是
+> `{:local/root ".."}`，而 `write-pom` 写不出本地路径的合法 Maven 坐标——不处理的话
+> 生成的 pom 会**缺失 core 依赖**，消费方解析即断。构建期用 alias 的 `:override-deps`
+> 把它换成同版本 `:mvn/version`，代价是这个版本的 core 必须已在本地仓库里。
+> `bb release` 逐模块 clean→jar→install 天然满足；单独 `bb jar client` 则会自动补一次 core。
+
+> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对三个模块并行跑
+> `bb test <module>`，外加一个 `docs` job 跑 `bb check-docs`（与本地同一条命令）。
 
 <!-- check-docs:ignore-start -->
 ### 文档一致性门禁（`scripts/check_docs.clj`）
@@ -672,7 +683,7 @@ clojure -M scripts/check_docs.clj
 | **墓碑** | 已删除的 API 不得复活。map 键/宏选项没法靠 resolve 检查，故显式登记——**删 API 时往 `tombstones` 加一条** |
 
 设计取舍：**宁可漏报，不可误报**。alias 未由同文件 `require` 绑定即跳过（Spring
-类名、`my-vector-store/search` 占位符、`scripts/test-all.sh` 路径因此天然不参检）；
+类名、`my-vector-store/search` 占位符、`scripts/check_docs.clj` 路径因此天然不参检）；
 注释与字符串字面量在检查前剥掉（否则注释里的「pause/resume」、字符串里的 URL
 `/anthropic/v1/messages` 都会误报）。**一个会误报的门禁很快就会被加 `|| true` 绕过。**
 
