@@ -8,6 +8,8 @@ on:
 
 jobs:
   # README 与真实代码的一致性（幽灵 API / 模块索引缺漏）——见 scripts/check_docs.clj
+  # （必须跑 JVM Clojure：门禁要 require 全部源码 ns 再 ns-resolve，bb 跑不动；
+  #   bb 在这里只是任务入口。）
   docs:
     runs-on: ubuntu-latest
     steps:
@@ -23,6 +25,7 @@ jobs:
         uses: DeLaGuardo/setup-clojure@13.2
         with:
           cli: latest
+          bb: latest
 
       - name: Cache deps
         uses: actions/cache@v4
@@ -34,7 +37,7 @@ jobs:
           restore-keys: ${{ runner.os }}-deps-
 
       - name: Check docs match code
-        run: clojure -M scripts/check_docs.clj
+        run: bb check-docs
 
   test:
     runs-on: ubuntu-latest
@@ -55,6 +58,7 @@ jobs:
         uses: DeLaGuardo/setup-clojure@13.2
         with:
           cli: latest
+          bb: latest
 
       - name: Cache deps
         uses: actions/cache@v4
@@ -65,6 +69,6 @@ jobs:
           key: ${{ runner.os }}-deps-${{ hashFiles('**/deps.edn') }}
           restore-keys: ${{ runner.os }}-deps-
 
+      # 与本地同一条命令（bb.edn 的 test 任务），避免 CI 与脚本各跑各的
       - name: Run tests (${{ matrix.module }})
-        working-directory: modules/${{ matrix.module }}
-        run: clojure -M:test
+        run: bb test ${{ matrix.module }}
