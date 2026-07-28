@@ -564,7 +564,21 @@
 
   ;; Schema 转换
   (tool->schema [_ tool]
-    (schema/tool->schema tool)))
+    (schema/tool->schema tool))
+
+  ;; 不透明回放载荷（可选协议）：thinking 块必须原样带回下一轮，
+  ;; 否则模型后续轮次会显著少思考、正确率下降
+  ;; （实测 M3 40 次/臂：100% → 82.5%，见 docs/provider-variant-design.md §7.5.3）
+  proto/IReplayableResponse
+  (replay-blocks [_ raw-response]
+    (let [content (:content raw-response)]
+      ;; **只在真有 thinking 块时才捕获**。范围严格限定在有实测证据的那一种情况：
+      ;; 无脑捕获所有响应会让「原样回放」盖过现有的 text/tool_use 重建路径，
+      ;; 连带绕过任何改写过历史的 filter——那是没有证据支持的行为变更。
+      (when (and (sequential? content)
+                 (some #(= "thinking" (:type %)) content))
+        {:format :anthropic-content
+         :data (vec content)}))))
 
 ;;; ============================================================
 ;;; 工厂函数
