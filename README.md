@@ -701,7 +701,7 @@ bb repl simpleagent_examples  # 先加载某个 example 再进 REPL
 | `examples/safeguard_live_test.clj` | 18 | 拦下时**零 LLM 调用**；不落库的代价在真实多轮里可见；边界——工具结果里的敏感词照样通过（**入口守卫 ≠ 输出守卫**） |
 | `examples/return_direct_live_test.clj` | 19 | **对照组**：同一句合规话术，return-direct 逐字送达 vs 普通工具被模型改写；补落库修复用真实第二轮验证 |
 | `examples/minimax_agent_live_test.clj` | — | 9 个 callback / 自定义 memory & kernel / `:filters` 不暴露 |
-| `examples/minimax_thinking_replay_experiment.clj` | — | **实验**（非门禁）：三臂对照证明「剥掉 thinking 块回传」与「完整回传」在 MiniMax 上机制无差别——**推翻了一个基于代码推导的设计推论**，见 `docs/provider-variant-design.md` §7 |
+| `examples/minimax_thinking_replay_experiment.clj` | — | **实验**（非门禁）：三臂对照量化「剥掉 thinking 块回传」（＝框架当前行为）的代价——M2.7 无差别，**M3 思考频率降 26% 但任务结果全同**。修正了一个基于代码推导的设计推论，见 `docs/provider-variant-design.md` §7 |
 | `examples/release_consumer_live_test.clj` | 10 | **消费方视角**：deps 只写 client + provider，core 必须由 pom 传递而来；断言 classpath 上是 jar 不是源码目录，再实叩一轮工具调用。单测跑在源码 classpath 上，对 jar/pom **一无所知**——pom 缺 core 依赖只在别人的项目里现形（需先 `bb release`） |
 
 ```bash
