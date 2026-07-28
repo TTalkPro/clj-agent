@@ -8,7 +8,7 @@
    4. 双 Provider 验证（OpenAI 兼容 / Anthropic 兼容）
 
    运行:
-     ./scripts/repl.sh simpleagent_examples
+     bb repl simpleagent_examples
 
    或:
      clojure -M -e \"(load-file \\\"examples/simpleagent_examples.clj\\\")\"

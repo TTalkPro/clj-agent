@@ -38,13 +38,18 @@
    它只查 README。记账腐烂和文档腐烂一样，靠人肉复查挡不住。
 
    设计取舍：**宁可漏报，不可误报**。alias 没在同文件 require 里绑定就跳过
-   （Spring 类名、`my-vector-store/search` 这类占位符、`scripts/test-all.sh`
+   （Spring 类名、`my-vector-store/search` 这类占位符、`scripts/check_docs.clj`
    这类路径因此天然不参检）；`.md` 引用按「同目录 / 仓库根 / docs/」三处任一命中
    即放行，散文里的占位符（`docs/xxx.md`）不参检。
    一个会误报的门禁很快就会被加 `|| true` 绕过。
 
    用法：
-     clojure -M scripts/check_docs.clj        # 全部检查，有问题 exit 1"
+     bb check-docs                            # 推荐入口（bb.edn）
+     clojure -M scripts/check_docs.clj        # 等价；有问题 exit 1
+
+   注：本脚本**必须**跑在 JVM Clojure 上——它 require 全部源码 ns 再 ns-resolve
+   文档里的 alias/sym（检查 3），而源码带 next.jdbc / sqlite 等 JVM 依赖，
+   babashka 跑不动。仓库里其余开发脚本已在 2026-07 迁到 bb.edn，这个是例外。"
   (:require [clojure.java.io :as io]
             [clojure.string :as str]))
 
