@@ -895,7 +895,9 @@
 
 > 质量面：316 tests / 1307 assertions / 0 failures（core 98/373 + client 112/440 +
 > provider 106/494）；MiniMax live 20 项六遍稳定；check_docs 双门禁绿（5 条墓碑）；
-> 三个 build.clj 版本号 `0.3.%s` 对齐；两轮 code review（15 条 CONFIRMED）全部落地。
+> 三个 build.clj 版本号 `0.3.%s` 对齐（**已被 P10 取代**：三份 build.clj 于
+> 2026-07-28 合并为根 `build.clj` 一份，版本号自然唯一）；两轮 code review
+> （15 条 CONFIRMED）全部落地。
 > 发布面：CHANGELOG 头部已落定稿日期；**「从 v0.2 迁移到 v0.3」指南**（8 节，
 > 第 1 节 = 互等工具在串行缺省下永久挂起的升级陷阱 + 排查判据 + 迁移代码）；
 > README 版本引用改 0.3/v0.3.0。
@@ -906,3 +908,62 @@
 ### 📋 历史账本
 
 2026-06 审查（P0/P1/P2 + 测试盲区）与 2026-07 优化轮（P3 + A/B/C 组）全部清零。
+
+---
+
+## P10 — 构建/开发脚本迁移：bb + tools.build（2026-07-28）✅ 同日完成
+
+> 起因：用户提出「scripts 下多个脚本可以用 babashka 替换，并用 tools.build 构建
+> 发布脚本」。落点是两处收敛——**任务入口**收到 `bb.edn`，**构建本体**收到根
+> `build.clj`。
+
+- [x] **五个 shell 脚本 → `bb.edn` 任务**：`scripts/{build,clean,install,test,repl}-all.sh`
+  全部删除。任务表：`bb test [module]` / `check-docs` / `check` / `jar [module]` /
+  `install` / `release` / `deploy` / `version` / `repl [example]`。模块名吃
+  `core` 与 `clj-agent-core` 两种写法；`bb test` 的参数**先全解析成目录再开跑**，
+  否则 `bb test core bogus` 会跑完 core 整套测试才炸「未知模块」。
+  - 踩坑记录（`bb.edn` 按 **EDN** 读，非 Clojure）：正则字面量 `#"…"` 与匿名函数
+    `#(…)` 都会在加载期直接报错（`No dispatch macro for: (`）。故 `strip-clj`
+    手写 `subs`、`map` 用 `(fn [p] …)`。`repl`/`version` 覆盖 bb 内建命令，
+    需 `:override-builtin true` 消警告。
+- [x] **三份 build.clj → 根 `build.clj` 一份**（tools.build）：模块各自的 `build.clj`
+  与 `deps.edn` 里的 `:build` alias 全部删除，改为根 `:build` alias + 一张模块表
+  （`:key/:lib/:dir/:override-core?/:description`）+ 一套函数。
+  - 合并的理由是三份 95% 雷同：同一套 pom-data、同一个 `0.3.<git-count>` 版本方案、
+    同一段 override-deps 注释，连「`b/install` 必填 `:class-dir`」这条踩坑记录都抄了三遍。
+  - 机制：`b/set-project-root!` —— tools.build 全部路径（`:project "deps.edn"`、
+    `target/`、`class-dir`）相对 `*project-root*` 解析，切根即切模块，三模块**一个
+    JVM** 跑完（原来 `cd` + 起 6 次 clojure）。`run-modules!` 用 `finally` 复位，
+    半路抛异常不污染后续调用。
+  - **例外**：deps-deploy **不吃** `*project-root*`，故 `deploy` 的 artifact/pom
+    路径显式 `b/resolve-path` / `b/pom-path`（已实测三模块均得到带 `modules/…` 前缀
+    的真实路径）。
+- [x] **顺带修掉一个真 bug（旧 `build-all.sh` 在 fresh clone 上必然失败）**：它只跑
+  `clean`+`jar`、从不 `install`，而 client/provider 的 basis 把 core 覆盖成同版本
+  `:mvn/version`（否则 `:local/root` 写不出合法 Maven 坐标、pom 缺 core 依赖）——
+  本地仓库没有该版本 core 时 `create-basis` 当场解析失败。且它的 MODULES 列表**根本
+  没有 client**（与 P2 里 `test-all.sh` 漏测 client 同款毛病，见历史账本）。
+  现在 `release` **逐模块** clean→jar→install（而非先 jar 全部再 install 全部，
+  后者同样会在 fresh clone 上炸）；单独 `bb jar client` 走 `ensure-core-installed!`
+  自动补一次 core。
+- [x] **`scripts/check_docs.clj` 留在 JVM Clojure 上**（`bb check-docs` 只是入口）：
+  它 require 全部源码 ns 再 `ns-resolve` 文档里的 alias/sym（检查 3），而源码带
+  next.jdbc / sqlite 等 JVM 依赖，bb 跑不动。已在 ns docstring 与 CI 注释里写明
+  「这是迁移的唯一例外」，防下一个人顺手把它也搬去 bb。
+- [x] **CI 与本地跑同一条命令**：workflow 的 `docs` job 改 `bb check-docs`，
+  test matrix 改 `bb test <module>`（setup-clojure 加 `bb: latest`）。
+  动机同 P2 的 test-all 漏测 client：CI 与脚本各写一份列表，迟早分叉。
+- [x] **文档同步**：README / README_EN 开发章节重写（任务表 + 「为什么 client/provider
+  打包前要先 install core」的说明）、模块结构树改 `bb.edn` / `build.clj`、
+  modules/README 结构树、`examples/simpleagent_examples.clj` 头部 `./scripts/repl.sh`
+  → `bb repl`、check_docs 与两份 README 里以 `scripts/test-all.sh` 举例的那句改
+  `scripts/check_docs.clj`（例子文件本身被删了）、CHANGELOG「🔧 内部 / 测试」补记。
+  CHANGELOG / TASK 里**属于历史记录**的 `scripts/*.sh` 提及不动（它们描述当时发生的事）。
+
+> 验证：`bb release` 三模块全绿（jar 齐全 + 进 `~/.m2`；client/provider 的 pom 里
+> core 依赖坐标实测为 `im.ttalk:clj-agent-core:0.3.320`，即合并前那条「发布关键」
+> 不变量仍成立）；删掉 m2 里的 core 后 `bb jar client` 自动补齐并成功；
+> `bb check` 全绿（316 tests / 1307 assertions / 0 failures + check_docs 双门禁：
+> 6 README / 55 ns / 5 墓碑 / 18 份 docs）；未知模块名在 `bb jar` 与 `bb test`
+> 两条路径上都给出可读错误。
+> 按惯例未提交（提交归并行会话）。

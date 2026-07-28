@@ -289,6 +289,25 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### 🔧 内部 / 测试
 
+- **构建/开发脚本重做：5 个 shell 脚本 → `bb.edn`，3 份 build.clj → 根 `build.clj`**
+  （2026-07-28）。`scripts/{build,clean,install,test,repl}-all.sh` 与三个模块各自的
+  `build.clj`（含各自的 `:build` alias）全部删除。
+  - **任务入口** `bb.edn`：`bb test [module] / check-docs / check / jar / install /
+    release / deploy / version / repl [example]`。CI 与本地从此跑**同一条命令**
+    （workflow 改为 `bb test <module>` 与 `bb check-docs`）。
+  - **构建本体** 根 `build.clj`：三份 95% 雷同的 build.clj 合成一张模块表 + 一套函数
+    （同一 pom-data、同一 `0.3.<git-count>` 版本、同一段 override-deps 注释，
+    连「`b/install` 必填 `:class-dir`」这条踩坑记录都曾抄三遍）。切模块靠
+    `b/set-project-root!`——tools.build 全部路径相对 `*project-root*` 解析；
+    deps-deploy 不吃它，故 `deploy` 的路径显式 `b/resolve-path`。
+    三模块一个 JVM 跑完，不再 `cd` + 起 6 次 clojure。
+  - **顺带修掉一个真 bug**：旧 `build-all.sh` 只 `clean`+`jar`，从不 `install`，而
+    client/provider 的 basis 把 core 覆盖成同版本 `:mvn/version`——**fresh clone 上
+    它必然解析失败**（且列表里根本没有 client，与 `test-all.sh` 早先漏测 client 同款
+    毛病）。现在 `release` 逐模块 clean→jar→install，单独 `jar client` 也会自动补一次
+    core；pom 里 core 依赖坐标已实测正确。
+  - `scripts/check_docs.clj` **留在 JVM Clojure 上**（`bb check-docs` 只是入口）：
+    门禁要 require 全部源码 ns 再 `ns-resolve`，而源码带 next.jdbc / sqlite，bb 跑不动。
 - 新语义测试：S1 批次 9 个（真并行证明、快照隔离、last-writer 按调用序而非
   完成序、失败 writes 丢弃、messages/records 原序、serial 整批退化、reject、
   reducer 折叠与跨轮累积）+ S2 分类/重试/环境暂停 5 组 + HITL 持久化 6 个
