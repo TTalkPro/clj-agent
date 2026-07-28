@@ -1,0 +1,110 @@
+{:min-bb-version "1.3.181"
+
+ :tasks
+ {:requires ([babashka.fs :as fs]
+             [clojure.string :as str])
+
+  :init
+  (do
+    ;; 模块的**测试**顺序（构建顺序在 build.clj 的 modules 表里）。
+    ;; client 曾长期缺席旧 test-all.sh 的列表——CI matrix 有它、脚本没有，
+    ;; 于是本地跑 test 会静默跳过整个 Agent 运行时。别再删它。
+    (def modules ["clj-agent-core" "clj-agent-client" "clj-agent-provider"])
+
+    (defn module-dir
+      "吃 core / clj-agent-core 两种写法。"
+      [m]
+      (let [full (if (str/starts-with? m "clj-agent-") m (str "clj-agent-" m))]
+        (when-not (contains? (set modules) full)
+          (binding [*out* *err*]
+            (println (format "未知模块 %s（可选：%s）" m (str/join " / " modules))))
+          (System/exit 1))
+        (str "modules/" full)))
+
+    (defn banner [& xs]
+      (println)
+      (println "----------------------------------------")
+      (apply println xs)
+      (println "----------------------------------------"))
+
+    (defn strip-clj
+      ;; bb.edn 按 EDN 读，正则字面量 #\"…\" 直接报错，故手写而非 str/replace
+      [s]
+      (if (str/ends-with? s ".clj") (subs s 0 (- (count s) 4)) s))
+
+    (defn build-task
+      "转发到根 build.clj。`bb jar core` → clojure -T:build jar :module core。"
+      [fn-name]
+      (clojure (str "-T:build " fn-name
+                    (when-let [m (first *command-line-args*)] (str " :module " m))))))
+
+  ;; ---------------- 构建 / 发布（均转发到根 build.clj）----------------
+
+  clean       {:doc "清理三个模块的 target/（bb clean core 只清一个）"
+               :task (build-task "clean")}
+
+  jar         {:doc "打包三个模块（bb jar core 只打一个）"
+               :task (build-task "jar")}
+
+  install     {:doc "装到本地 ~/.m2（core → client → provider）"
+               :task (build-task "install")}
+
+  release     {:doc "发布前完整流程：逐模块 clean → jar → install"
+               :task (build-task "release")}
+
+  deploy      {:doc "推 Clojars（需 CLOJARS_USERNAME / CLOJARS_PASSWORD）"
+               :task (build-task "deploy")}
+
+  version     {:doc "打印当前版本号（0.3.<git-count-revs>）"
+               :override-builtin true
+               :task (println (str "0.3." (str/trim (:out (shell {:out :string} "git rev-list HEAD --count")))))}
+
+  ;; ---------------- 测试 / 门禁 ----------------
+
+  test
+  {:doc "跑三个模块的测试（bb test core 只跑一个）"
+   ;; 先把参数全解析成目录再开跑：否则 `bb test core bogus` 会先跑完 core
+   ;; 的整套测试，才在第二个模块上炸出「未知模块」。
+   :task (let [targets (mapv (fn [m] [m (module-dir m)])
+                             (or (seq *command-line-args*) modules))
+               failed (reduce (fn [failed [m dir]]
+                                (banner "Testing" m "...")
+                                (if (zero? (:exit (shell {:dir dir :continue true}
+                                                         "clojure -M:test")))
+                                  (do (println "✓" m "passed") failed)
+                                  (do (println "✗" m "FAILED") (conj failed m))))
+                              []
+                              targets)]
+           (println)
+           (if (empty? failed)
+             (println "✓ All modules passed!")
+             (do (binding [*out* *err*] (println "✗ Failed:" (str/join " " failed)))
+                 (System/exit 1))))}
+
+  check-docs
+  {:doc "README/docs 与真实代码的一致性门禁"
+   ;; 必须跑在 JVM Clojure 上：它 require 全部源码 ns 再 ns-resolve 文档里的
+   ;; alias/sym（还要 next.jdbc / sqlite 这类 JVM 依赖），bb 跑不动。
+   :task (clojure "-M scripts/check_docs.clj")}
+
+  check
+  {:doc "test + check-docs（提交前跑这个）"
+   :depends [test check-docs]}
+
+  ;; ---------------- 开发 ----------------
+
+  repl
+  {:doc "REPL（bb repl <example> 先加载 examples/<example>.clj）"
+   :override-builtin true
+   :task (let [example (first *command-line-args*)]
+           (if example
+             (let [f (str "examples/" (strip-clj example) ".clj")]
+               (when-not (fs/exists? f)
+                 (println "Example not found:" f)
+                 (println "Available examples:")
+                 (doseq [e (sort (map (fn [p] (strip-clj (fs/file-name p)))
+                                      (fs/glob "examples" "*.clj")))]
+                   (println " " e))
+                 (System/exit 1))
+               (clojure "-M" "-e" (format "(load-file \"%s\")" f) "-r"))
+             (clojure "-M" "-r")))}}}
