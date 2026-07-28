@@ -499,7 +499,7 @@ The unit suite (293 tests / 1198 assertions) touches no network. But some proper
 **a unit test cannot prove** — "will the model actually fix itself when handed the
 validation error?", "does the answer come from retrieval or from prior knowledge?",
 "do we really save tokens?" — only a real model can answer those. That's what these
-are for (**78 assertions** total):
+are for (**88 assertions** total):
 
 | Script | Asserts | What only it can prove |
 |---|---|---|
@@ -509,6 +509,7 @@ are for (**78 assertions** total):
 | `examples/safeguard_live_test.clj` | 18 | a blocked turn makes **zero LLM calls**; the cost of not persisting is visible across real turns; boundary — a sensitive word in a *tool result* passes (**entry guard ≠ output guard**) |
 | `examples/return_direct_live_test.clj` | 19 | **control group**: the same compliance text goes through verbatim with return-direct, but gets rewritten by the model via a normal tool; the persistence fix verified with a real second turn |
 | `examples/minimax_agent_live_test.clj` | — | 9 callbacks / custom memory & kernel / `:filters` not exposed |
+| `examples/release_consumer_live_test.clj` | 10 | **consumer's view**: deps declare only client + provider, so core *must* arrive transitively via the pom; asserts the classpath holds jars rather than source dirs, then makes a real tool-calling round-trip. The unit suite runs on a source classpath and knows **nothing** about jars/poms — a pom missing its core dependency only shows up in someone else's project (run `bb release` first) |
 
 ```bash
 export MINIMAX_API_KEY=...        # legacy name MINIMAX_AUTH_TOKEN also accepted
