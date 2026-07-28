@@ -26,6 +26,12 @@
 | [`tool-calling-manager-design.md`](tool-calling-manager-design.md) | 工具**执行引擎**（线程模型 + 隔离边界 + 调度策略）；含 `deftool :backend` 的否决记录（§5） |
 | [`advisor-alignment-design.md`](advisor-alignment-design.md) | 逐个对齐 Spring AI 2.0 Advisor：有什么、对应什么、吸收还是不跟、为什么 |
 
+## 🚧 进行中（设计已定稿，实施未开始）
+
+| 文档 | 讲什么 |
+|---|---|
+| [`provider-variant-design.md`](provider-variant-design.md) | 一个标准 provider 如何承载多套厂商方言（MiniMax thinking 回传）：**三类差异三种机制**。P0 实验**推翻了本文自己的核心推论**（剥掉 thinking 块与完整回传 12/12 无差别）→ 回传契约不立项，只剩「打开 config 白名单」一条 |
+
 ## 已实施（专题 / 重构记录）
 
 | 文档 | 讲什么 |
