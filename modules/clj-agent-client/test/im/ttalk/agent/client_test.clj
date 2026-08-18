@@ -11,6 +11,7 @@
             [im.ttalk.agent.advisor.memory :as ma]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.memory.sqlite :as sqlite]
+            [im.ttalk.agent.model.content :as content]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.streaming :as streaming]
@@ -527,6 +528,21 @@
         (is (msg/has-tool-calls? (first out)))
         (is (= {:city "北京"} (:args (first (msg/tool-calls (first out))))))
         (is (= "t1" (msg/tool-call-id (second out))))))))
+
+(deftest sqlite-multimodal-roundtrip-test
+  (testing "多模态部件经 SQLite（EDN 序列化）历史往返一字不变"
+    ;; 部件里的二进制一律以 base64 **字符串**落地，正是为了过得去这一关——
+    ;; 字节数组 pr-str/read-string 往返会变形。
+    (let [s (sqlite/sqlite-store ":memory:")
+          m (msg/user [(content/text-part "这张图里有几只猫？")
+                       (content/image-part "https://example.com/cats.png")
+                       (content/image-part "QUJD" {:media-type "image/png"})])]
+      (memory/mem-add s "mm" [m])
+      (let [[out] (memory/mem-get s "mm")]
+        (is (= m out))
+        (is (content/parts? (msg/content out)))
+        (is (= "QUJD" (:data (nth (msg/content out) 2)))))
+      (sqlite/close-store! s))))
 
 (deftest sqlite-persists-across-instances-test
   (testing "跨 store 实例（模拟重启）持久"
