@@ -15,10 +15,18 @@
                    :content [{:type \"tool_result\" :tool_use_id .. :content ..}]}
    连续的 tool 结果合并进同一条 user 消息的 content 数组。
 
+   **多模态**：user 消息的 :content 为中立部件向量（见 model/content）时翻译成
+   Anthropic 内容块——image/* → image 块（内联 base64 source / url source）、
+   application/pdf → document 块。Anthropic 不收音频，遇到即抛 :validation-error
+   （不静默丢内容）。:type 为**字符串**的元素视为 Anthropic 原生块（citations 的
+   document、cache_control 断点等），原样透传。
+
    assistant 消息带 :blocks {:format :anthropic-content :data [...]} 时**原样吐回**
    （thinking 块 + signature 必须逐字回传）；格式认不出或没有 :blocks 就走
    text + tool_use 重建。见 docs/provider-variant-design.md。"
   (:require [clojure.string :as str]
+            [im.ttalk.agent.model.content :as content]
+            [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.model.message :as msg]))
 
 (set! *warn-on-reflection* true)
@@ -26,6 +34,56 @@
 ;;; ============================================================
 ;;; 中立 → Anthropic wire
 ;;; ============================================================
+
+(defn- unsupported!
+  [what part]
+  (errors/throw!
+    (errors/error :validation-error
+                  (str "Anthropic Messages 协议不支持" what)
+                  {:provider :anthropic
+                   :context {:media-type (:media-type part)
+                             :source (if (:url part) :url :data)}})))
+
+(defn- file-part->block
+  [{:keys [url filename] :as part}]
+  (let [source (if url
+                 {:type "url" :url url}
+                 {:type "base64"
+                  :media_type (:media-type part)
+                  :data (:data part)})]
+    (cond
+      (content/image? part)
+      (do
+        ;; base64 source 的 media_type 必须具体（image/* 这种通配会被服务端拒），
+        ;; 早失败给出人话，好过收一个与真实原因无关的 400。
+        (when (and (not url) (str/includes? (str (:media-type part)) "*"))
+          (unsupported! "通配 media-type 的内联图片（请给出具体类型，如 image/png）" part))
+        {:type "image" :source source})
+
+      (= "application/pdf" (:media-type part))
+      (cond-> {:type "document" :source source}
+        filename (assoc :title filename))
+
+      (content/audio? part)
+      (unsupported! "音频输入" part)
+
+      :else
+      (unsupported! (str "该文件类型（" (:media-type part) "）") part))))
+
+(defn- part->block
+  "中立部件 → Anthropic 内容块；非中立部件（原生块 / 字符串）原样透传。"
+  [part]
+  (cond
+    (content/text-part? part) {:type "text" :text (:text part)}
+    (content/file-part? part) (file-part->block part)
+    :else part))
+
+(defn- content->wire
+  "content 归一：中立部件向量逐个翻译为 Anthropic 块；字符串与原生块向量原样透传。"
+  [c]
+  (if (content/parts? c)
+    (mapv part->block c)
+    c))
 
 (defn- tool-call->block
   [{:keys [id name args]}]
@@ -70,14 +128,16 @@
   "中立消息列表 → {:system <str|nil> :messages [wire-msg ...]}"
   [neutral-msgs]
   (let [norm (map msg/normalize neutral-msgs)
-        system (let [sys (->> norm (filter msg/system?) (map msg/content) (remove nil?))]
+        system (let [sys (->> norm (filter msg/system?)
+                              (map (comp content/text-of msg/content))
+                              (remove str/blank?))]
                  (when (seq sys) (str/join "\n" sys)))
         body (remove msg/system? norm)
         messages
         (reduce
           (fn [acc m]
             (case (msg/role m)
-              :user      (conj acc {:role "user" :content (msg/content m)})
+              :user      (conj acc {:role "user" :content (content->wire (msg/content m))})
               :assistant (conj acc (assistant->wire m))
               :tool      (let [block {:type "tool_result"
                                       :tool_use_id (msg/tool-call-id m)

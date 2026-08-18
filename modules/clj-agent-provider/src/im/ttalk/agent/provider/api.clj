@@ -25,9 +25,12 @@
    ;; 提取结果
    (llm/extract-text provider response)
    (llm/extract-tool-calls provider response)"
-  (:require [im.ttalk.agent.provider.factory.builder :as builder]
+  (:require [im.ttalk.agent.provider.embeddings :as embeddings]
+            [im.ttalk.agent.provider.factory.builder :as builder]
             [im.ttalk.agent.provider.factory.registry :as registry]
             [im.ttalk.agent.model :as proto]
+            [im.ttalk.agent.model.content :as content]
+            [im.ttalk.agent.model.embedding :as emb]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]))
@@ -287,6 +290,63 @@
 (def tool-message
   "创建工具结果消息（中立格式 {:role :tool :tool-call-id ...}；参数 [id name content]）"
   msg/tool-result)
+
+;;; ============================================================
+;;; 多模态内容部件
+;;; ============================================================
+
+(def text-part
+  "文本部件 {:type :text :text \"...\"}"
+  content/text-part)
+
+(def image-part
+  "图片部件（URL / data URI / base64+:media-type / byte[] / java.io.File）
+
+   (image-part \"https://example.com/a.png\")
+   (image-part (clojure.java.io/file \"a.png\"))
+   (image-part base64-str {:media-type \"image/png\"})"
+  content/image-part)
+
+(def file-part
+  "文件部件（PDF 等；内联数据须给 :media-type）"
+  content/file-part)
+
+(def audio-part
+  "音频部件（OpenAI 兼容端点只收内联 wav/mp3）"
+  content/audio-part)
+
+(def content-text
+  "取 content 的纯文本（字符串原样 / 部件向量取文本部件拼接）"
+  content/text-of)
+
+;;; ============================================================
+;;; Embedding
+;;; ============================================================
+
+(def create-embedding-provider
+  "创建 embedding provider
+
+   (create-embedding-provider :openai)
+   (create-embedding-provider :openai-compat {:base-url \"...\" :api-key \"...\"
+                                              :model \"bge-m3\"})"
+  embeddings/create-provider)
+
+(def embed
+  "批量文本向量化 → {:embeddings [[..] ..] :model .. :usage .. :provider ..}"
+  embeddings/embed)
+
+(def embed-one
+  "单条文本向量化 → 向量"
+  embeddings/embed-one)
+
+(def supported-embedding-providers
+  "支持 embedding 的内置 provider 列表"
+  embeddings/supported-providers)
+
+(defn supports-embedding?
+  "该实例是否支持 embedding（可信探测：IEmbeddingProvider 无 Object 兜底）"
+  [p]
+  (emb/embedding-provider? p))
 
 ;;; ============================================================
 ;;; 错误处理
