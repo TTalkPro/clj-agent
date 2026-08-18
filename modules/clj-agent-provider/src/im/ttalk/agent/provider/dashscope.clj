@@ -22,7 +22,10 @@
    (dashscope/call-dashscope config messages tools)"
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.model :as proto]
+            [im.ttalk.agent.model.content :as content]
             [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.model.message :as msg]
+            [im.ttalk.agent.provider.wire.openai :as wire]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.stream.dashscope :as dstream]
             [im.ttalk.agent.provider.schema.openai :as schema]
@@ -53,6 +56,35 @@
 ;;; ============================================================
 ;;; 请求/响应转换
 ;;; ============================================================
+
+(defn- ->wire-messages
+  "中立消息 → DashScope 原生 messages。
+
+   原生 text-generation 的 messages 与 OpenAI 同构（tool_calls 的 arguments 是
+   JSON 字符串、tool 结果走 role=tool + tool_call_id），故直接复用 openai wire——
+   此前把中立消息（:tool-calls / :args / keyword role）直接塞进请求体，多轮工具
+   调用的历史发出去 DashScope 认不得。
+
+   唯一与 OpenAI 的差别：DashScope 的 tool 结果消息文档里带 name（OpenAI 不需要，
+   多给也无害），故 wire 之后补回来——中立消息本就有 :name。
+
+   多模态：原生 text-generation 端点不收内容部件（qwen-vl 走 multimodal-generation
+   端点，形状也不同）。与其发出去收一个与真实原因无关的 400，不如在边界上说清楚。"
+  [messages]
+  (when (some #(content/parts? (:content %)) messages)
+    (errors/throw!
+      (errors/error :validation-error
+                    (str "DashScope 原生端点不支持多模态内容部件；"
+                         "多模态请用 :openai-compat provider 指向 DashScope 兼容模式"
+                         "（https://dashscope.aliyuncs.com/compatible-mode/v1）+ qwen-vl 模型")
+                    {:provider :dashscope})))
+  ;; wire/neutral->wire 与入参一一对应（mapv），故可按位补 name
+  (mapv (fn [wired neutral]
+          (if (and (= "tool" (:role wired)) (:name neutral))
+            (assoc wired :name (:name neutral))
+            wired))
+        (:messages (wire/neutral->wire messages))
+        (map msg/normalize messages)))
 
 (defn- build-request
   "构建 DashScope API 请求体
@@ -246,12 +278,13 @@
 
   (provider-name [_] :dashscope)
 
+  ;; 协议以中立消息为边界：内部转 DashScope（= OpenAI 同构）wire 格式
   (call-llm [_ llm-config messages tools]
-    (call-dashscope llm-config messages tools opts))
+    (call-dashscope llm-config (->wire-messages messages) tools opts))
 
   (call-llm-stream [_ llm-config messages tools on-token]
     ;; DashScope 原生流式（X-DashScope-SSE: enable + incremental_output）
-    (call-dashscope-stream llm-config messages tools on-token opts))
+    (call-dashscope-stream llm-config (->wire-messages messages) tools on-token opts))
 
   ;; parse-response 已把 DashScope 响应整形为 OpenAI 兼容格式，
   ;; 解析/构造直接复用 OpenAI 家族的共享实现（消除与 response-parser/openai-compat 的重复）。

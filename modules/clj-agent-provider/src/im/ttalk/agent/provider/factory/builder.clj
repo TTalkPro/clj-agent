@@ -25,6 +25,10 @@
    :deepseek  ['im.ttalk.agent.provider.deepseek 'im.ttalk.agent.provider.deepseek/create-provider]
    :minimax   ['im.ttalk.agent.provider.minimax 'im.ttalk.agent.provider.minimax/create-provider]
    :dashscope ['im.ttalk.agent.provider.dashscope 'im.ttalk.agent.provider.dashscope/create-provider]
+   :xai       ['im.ttalk.agent.provider.xai 'im.ttalk.agent.provider.xai/create-provider]
+   :moonshot  ['im.ttalk.agent.provider.moonshot 'im.ttalk.agent.provider.moonshot/create-provider]
+   :openrouter ['im.ttalk.agent.provider.openrouter 'im.ttalk.agent.provider.openrouter/create-provider]
+   :siliconflow ['im.ttalk.agent.provider.siliconflow 'im.ttalk.agent.provider.siliconflow/create-provider]
    :openai-compat ['im.ttalk.agent.provider.openai-compat-provider 'im.ttalk.agent.provider.openai-compat-provider/create-provider]})
 
 (defn- ensure-providers-registered!

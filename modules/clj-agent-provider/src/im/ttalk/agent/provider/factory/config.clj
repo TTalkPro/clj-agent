@@ -173,7 +173,11 @@
    :mistral "MISTRAL"
    :deepseek "DEEPSEEK"
    :minimax "MINIMAX"
-   :dashscope "DASHSCOPE"})
+   :dashscope "DASHSCOPE"
+   :xai       "XAI"
+   :moonshot  "MOONSHOT"
+   :openrouter "OPENROUTER"
+   :siliconflow "SILICONFLOW"})
 
 (def ^:private builtin-default-configs
   {:openai  {:api-key  ""
@@ -215,7 +219,24 @@
    :dashscope {:api-key  ""
                :base-url "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
                :timeout  120000
-               :model    "qwen-plus"}})
+               :model    "qwen-plus"}
+   :xai     {:api-key  ""
+             :base-url "https://api.x.ai/v1"
+             :timeout  120000
+             :model    "grok-4.5"}
+   :moonshot {:api-key  ""
+              ;; 国际站为 https://api.moonshot.ai/v1（用 :base-url 或 MOONSHOT_BASE_URL 覆盖）
+              :base-url "https://api.moonshot.cn/v1"
+              :timeout  120000
+              :model    "kimi-k2.5"}
+   :openrouter {:api-key  ""
+                :base-url "https://openrouter.ai/api/v1"
+                :timeout  120000
+                :model    "openai/gpt-4o-mini"}
+   :siliconflow {:api-key  ""
+                 :base-url "https://api.siliconflow.cn/v1"
+                 :timeout  120000
+                 :model    "Qwen/Qwen3-8B"}})
 
 (defonce ^:private _init
   (do
