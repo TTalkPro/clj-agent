@@ -6,6 +6,9 @@
    成功响应也被误报 :parse-error。本测试钉住修复后的行为。"
   (:require [clojure.test :refer [deftest testing is]]
             [cheshire.core :as json]
+            [im.ttalk.agent.model :as model]
+            [im.ttalk.agent.model.content :as content]
+            [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.provider.dashscope :as dashscope])
   (:import [com.sun.net.httpserver HttpServer HttpHandler]
            [java.net InetSocketAddress]))
@@ -81,3 +84,48 @@
           (is (= "InvalidApiKey" (get-in e [:context :code])))
           (is (= "r-9" (get-in e [:context :request-id]))))
         (finally (.stop server 0))))))
+
+;;; ============================================================
+;;; 中立消息 → DashScope wire（协议边界）
+;;; ============================================================
+
+(deftest neutral-messages-converted-at-protocol-boundary-test
+  (testing "多轮工具历史转成 DashScope（= OpenAI 同构）形状，而不是把中立键直接发出去"
+    ;; 回归：call-llm 曾把中立消息原样塞进请求体——:tool-calls / :args / keyword role
+    ;; DashScope 一个都不认，多轮工具调用的历史等于没发。
+    (let [{:keys [server port captured]}
+          (start-server 200 {:output {:choices [{:finish_reason "stop"
+                                                 :message {:role "assistant" :content "ok"}}]}})
+          provider (dashscope/create-provider {:api-key "k"
+                                               :base-url (str "http://127.0.0.1:" port "/")})]
+      (try
+        (model/call-llm provider {:model "qwen-plus"}
+                        [(msg/user "北京天气？")
+                         (msg/assistant-tool-calls [(msg/tool-call "c1" "get_weather" {:city "北京"})])
+                         (msg/tool-result "c1" "get_weather" "晴 22°C")]
+                        [])
+        (let [sent (json/parse-string @captured true)
+              [user assistant tool] (get-in sent [:input :messages])]
+          (is (= {:role "user" :content "北京天气？"} user))
+          (is (= "assistant" (:role assistant)))
+          (is (= "get_weather" (get-in assistant [:tool_calls 0 :function :name])))
+          (is (= "{\"city\":\"北京\"}" (get-in assistant [:tool_calls 0 :function :arguments]))
+              "arguments 必须是 JSON 字符串，不是 map")
+          (is (= {:role "tool" :tool_call_id "c1" :name "get_weather" :content "晴 22°C"} tool)
+              "DashScope 的 tool 结果消息文档里带 name（OpenAI 侧多给无害）")
+          (is (not (contains? assistant :tool-calls)) "中立键不得泄漏到 wire"))
+        (finally (.stop server 0))))))
+
+(deftest multimodal-rejected-with-actionable-error-test
+  (testing "原生 text-generation 端点不收内容部件 → 边界处报错并指路，不发出去等 400"
+    (let [provider (dashscope/create-provider {:api-key "k"})
+          e (try (model/call-llm provider {:model "qwen-vl-plus"}
+                                 [(msg/user [(content/text-part "这是什么")
+                                             (content/image-part "https://x/a.png")])]
+                                 [])
+                 nil
+                 (catch clojure.lang.ExceptionInfo ex (ex-data ex)))]
+      (is (some? e))
+      (is (= :validation-error (:type e)))
+      (is (false? (:retryable? e)))
+      (is (= :dashscope (:provider e))))))

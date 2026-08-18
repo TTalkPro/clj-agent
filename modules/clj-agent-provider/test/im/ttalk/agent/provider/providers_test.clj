@@ -12,6 +12,11 @@
             [im.ttalk.agent.provider.deepseek :as deepseek]
             [im.ttalk.agent.provider.minimax :as minimax]
             [im.ttalk.agent.provider.ollama :as ollama]
+            [im.ttalk.agent.provider.xai :as xai]
+            [im.ttalk.agent.provider.moonshot :as moonshot]
+            [im.ttalk.agent.provider.openrouter :as openrouter]
+            [im.ttalk.agent.provider.siliconflow :as siliconflow]
+            [im.ttalk.agent.provider.factory.config :as fconfig]
             [im.ttalk.agent.provider.mock :as mock]))
 
 ;;; ============================================================
@@ -30,7 +35,11 @@
       #(mistral/create-provider {:api-key "k"})    :mistral
       #(deepseek/create-provider {:api-key "k"})   :deepseek
       #(minimax/create-provider {:api-key "k"})    :minimax
-      #(ollama/create-provider {:model "llama2"})  :ollama)))
+      #(ollama/create-provider {:model "llama2"})  :ollama
+      #(xai/create-provider {:api-key "k"})        :xai
+      #(moonshot/create-provider {:api-key "k"})   :moonshot
+      #(openrouter/create-provider {:api-key "k"}) :openrouter
+      #(siliconflow/create-provider {:api-key "k"}) :siliconflow)))
 
 (deftest multi-instance-config-isolation
   (testing "同类 provider 多实例持有独立 config，不互相覆盖 key/base-url（回归 D1）"
@@ -56,7 +65,11 @@
       #(deepseek/create-provider {:api-key ""})
       #(minimax/create-provider {:api-key ""})
       #(zhipu/create-provider {:api-key ""})
-      #(zhipu/create-anthropic-provider {:api-key ""})))
+      #(zhipu/create-anthropic-provider {:api-key ""})
+      #(xai/create-provider {:api-key ""})
+      #(moonshot/create-provider {:api-key ""})
+      #(openrouter/create-provider {:api-key ""})
+      #(siliconflow/create-provider {:api-key ""})))
   (testing "提供 api-key 即可正常创建"
     (is (= :deepseek (model/provider-name (deepseek/create-provider {:api-key "sk-x"}))))))
 
@@ -92,7 +105,33 @@
     (llm/create-provider :mock)   ;; 触发延迟注册
     (let [supported (set (llm/supported-providers))]
       (are [k] (contains? supported k)
-        :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :dashscope :openai-compat :mock))))
+        :openai :anthropic :zhipu :ollama :gemini :mistral :deepseek :minimax :dashscope :openai-compat :mock
+        :xai :moonshot :openrouter :siliconflow))))
+
+(deftest new-vendor-endpoints-test
+  (testing "端点与默认模型：defprovider 与 factory 默认配置两处必须一致"
+    ;; 两处不一致正是 P1 修过的一类 bug（anthropic 多一个 /v1、mistral 少一个 /v1），
+    ;; 新增 provider 一并钉住，别再各写各的。
+    (are [thunk ptype base-url model]
+         (let [p (thunk)
+               cfg @(:config p)
+               fdefault (fconfig/get-default-config ptype)]
+           (and (= base-url (:base-url cfg))
+                (= model (:default-model cfg))
+                (= base-url (:base-url fdefault))
+                (= model (:model fdefault))))
+      #(xai/create-provider {:api-key "k"})         :xai         "https://api.x.ai/v1" "grok-4.5"
+      #(moonshot/create-provider {:api-key "k"})    :moonshot    "https://api.moonshot.cn/v1" "kimi-k2.5"
+      #(openrouter/create-provider {:api-key "k"})  :openrouter  "https://openrouter.ai/api/v1" "openai/gpt-4o-mini"
+      #(siliconflow/create-provider {:api-key "k"}) :siliconflow "https://api.siliconflow.cn/v1" "Qwen/Qwen3-8B"))
+
+  (testing "环境变量前缀已注册（否则 create-provider-auto 读不到 key）"
+    (let [mappings (fconfig/get-env-mappings)]
+      (are [k prefix] (= prefix (get mappings k))
+        :xai "XAI"
+        :moonshot "MOONSHOT"
+        :openrouter "OPENROUTER"
+        :siliconflow "SILICONFLOW"))))
 
 (deftest mock-error-and-history-test
   (testing "create-error-mock 调用时抛 ex-info（回归：曾把函数对象当文本返回不抛错）"
