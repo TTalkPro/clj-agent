@@ -1059,3 +1059,56 @@
   MiniMax-M3、超长对话下 thinking 缺失是否随上下文累积。见设计文档 §7.5。
 
 ---
+
+## P12 — Provider 层对照 Vercel AI SDK 补齐（2026-08-18）✅ 编码完成，待真机验证
+
+> 起因：用户要求「参考 `~/workspace/ai`（Vercel AI SDK）完善当前项目的 provider」。
+> 逐个对照其 provider 规格后，真实缺口三块（其余要么已有等价物，要么按 §1 属假想）：
+> **多模态输入**（完全缺）、**embedding**（完全缺）、**厂商覆盖**（用户点名四家）。
+> 基线 331 tests / 1369 assertions → **358 / 1529 / 0**（+27 tests / +160 assertions）。
+
+- [x] **多模态输入**：core 新增 `model/content`（中立部件：`text-part` /
+  `image-part` / `file-part` / `audio-part`；来源吃 URL / data URI / base64 /
+  `byte[]` / `File`）；`wire/openai` 与 `wire/anthropic` 各自按 **media type 顶层
+  类别**分派翻译。
+  - 跟 AI SDK 学的两条形状决策：**图片/音频/PDF 不各立部件类型**（统一 `:file` +
+    `:media-type`，新格式不需要新类型）；**部件是数据不是句柄**（二进制以 base64
+    字符串落地，才过得了 EDN/SQLite 历史往返——有回归测试）。
+  - **不支持的组合抛 `:validation-error` 而不是静默丢**（丢内容 = 模型答非所问，
+    排查成本远高于当场报错）：Anthropic 不收音频 / 不收通配 media-type 的内联图片，
+    OpenAI 不收 URL 音频与 URL PDF。
+  - **既有厂商原生块逃生通道不变**：`:type` 为字符串的元素原样透传，可与中立部件
+    混用（Anthropic citations 的 document、`cache_control` 断点等照旧）。
+  - 端到端已验：SimpleAgent `chat` 直接收部件向量 → 出站 wire 正确 → 历史落库 →
+    第二轮原样重发。
+- [x] **顺带逮到并修一个真 bug**：`DashScopeProvider/call-llm` 从来没做 wire 转换，
+  把中立消息（`:tool-calls` / `:args` / keyword role）**原样发给了 DashScope**——
+  多轮工具历史等于没发。改为复用 `wire/openai`（原生 messages 与 OpenAI 同构），
+  回归测试钉出站 body 形状。**这个 bug 在仓库里躺了很久，是被新特性顺出来的**，
+  记一笔：没有对着出站请求体断言的 provider，等于没测。
+- [x] **Embedding**：core 新增**独立可选协议** `model/embedding/IEmbeddingProvider`
+  （单方法 `embed`；与 `ILLMProvider` 并列而非从属，**无 Object 兜底**故
+  `satisfies?` 可信）；provider 新增 `embeddings`（工厂 + 3 实现）与
+  `common/embeddings`（OpenAI 兼容 + DashScope 原生两种线上形状）。
+  内置 9 家；超批自动切片、按服务端 index 重排、usage 累加、条数不符即 `:parse-error`。
+  - 形状取自 AI SDK 的 `EmbeddingModel` 与 `LanguageModel` 分离：**能力探测不撒谎**
+    比「一个 provider 什么都能干」重要——Anthropic 没有 embedding 服务，表里就
+    没有条目，而不是「调了才报不支持」。
+- [x] **四个新 provider**（用户点名）：`:xai` / `:moonshot` / `:openrouter` /
+  `:siliconflow`，均由 `defprovider` 生成 + factory 注册 + env 前缀 + 默认配置。
+  新增测试钉住「defprovider 默认值与 factory 默认配置**两处一致**」——历史上
+  anthropic 多一个 `/v1`、mistral 少一个 `/v1` 正是这么漏的。
+  - **刻意没做的事**：OpenRouter 的署名头/路由参数不新增字段（既有
+    `:extra-headers` / `:extra-body` 即等价，按 §1 四问全落假想列）。
+- [x] 文档：三个 README（根 / provider / core）+ CHANGELOG 0.3.0；`bb check-docs` 绿。
+- [ ] **记账（不立项）**：`advisor/rag` 与 `re-reading-filter` 至今只改写 **string
+  content** 的用户消息，多模态 turn 因此拿不到 RAG 注入（原因见 rag.clj
+  `last-user-index` 注释：改写向量会丢图片片段）。中立部件落地后这条限制**在技术上
+  已可解除**（往部件向量里追加一个 text-part 即可，不动图片），但没有具体调用方
+  要「多模态 + RAG」，按 §1 四问不立项——真需求出现时改一处 `last-user-index`
+  加一处注入分支即可。
+- [ ] **真机验证未跑**（本轮只编码，无可用 provider key）：脚本已写好
+  `examples/multimodal_embedding_live_test.clj`——内联图片（程序生成的红方块，
+  答对只可能来自真看见）、URL 图片、embedding 语义排序（同义 > 无关，这条才是
+  判据本身：随便返回一堆数能过形状断言，过不了语义排序）、批次切片。
+  缺哪个 key 跳哪段。**在真机跑通前，这三块只能算「单测通过」，不算验收**。

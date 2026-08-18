@@ -65,6 +65,10 @@ LLM Provider 和 Service 工厂模块
 | MiniMax | `:minimax` | `MINIMAX_*` | MiniMax-M 系列，**Anthropic 兼容端点**（`/anthropic/v1/messages`，Bearer 鉴权） |
 | DashScope | `:dashscope` | `DASHSCOPE_*` | 阿里云百炼（通义千问等）；**原生 SSE 流式**（`X-DashScope-SSE` + `incremental_output`，专属 `stream/dashscope` 解析器） |
 | Ollama | `:ollama` | `OLLAMA_*` | 本地模型 |
+| xAI | `:xai` | `XAI_*` | Grok 系列（grok-4.5 / 4.3 / 4.20-reasoning） |
+| Moonshot | `:moonshot` | `MOONSHOT_*` | Kimi 系列（kimi-k2.5 / k3、moonshot-v1-*）；默认国内站，国际站覆盖 `:base-url` 为 `https://api.moonshot.ai/v1` |
+| OpenRouter | `:openrouter` | `OPENROUTER_*` | 多厂商聚合网关，模型 id 带厂商前缀（`openai/gpt-4o-mini`）；署名头走 `:extra-headers`、路由参数走 `:extra-body` |
+| SiliconFlow | `:siliconflow` | `SILICONFLOW_*` | 硅基流动（`Qwen/Qwen3-8B`、`deepseek-ai/DeepSeek-V3` 等）；embedding 默认 `BAAI/bge-m3` |
 | OpenAI 兼容 | `:openai-compat` | 自定义 | vLLM、LocalAI 等 |
 | Mock | `:mock` | - | 测试用 |
 
@@ -84,6 +88,11 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.deepseek` | DeepSeek 实现 |
 | `im.ttalk.agent.provider.minimax` | MiniMax 实现（复用 anthropic provider 的 Anthropic 兼容端点） |
 | `im.ttalk.agent.provider.dashscope` | DashScope（阿里云百炼）实现 |
+| `im.ttalk.agent.provider.xai` | xAI（Grok）实现 |
+| `im.ttalk.agent.provider.moonshot` | Moonshot（Kimi）实现 |
+| `im.ttalk.agent.provider.openrouter` | OpenRouter 聚合网关实现 |
+| `im.ttalk.agent.provider.siliconflow` | SiliconFlow（硅基流动）实现 |
+| `im.ttalk.agent.provider.embeddings` | Embedding provider（实现 + 工厂，与对话 provider 分开） |
 | `im.ttalk.agent.provider.openai-compat-provider` | 通用 OpenAI 兼容 provider（base-url 必填） |
 | `im.ttalk.agent.provider.api` | Provider 统一门面 |
 | `im.ttalk.agent.provider.mock` | Mock Provider |
@@ -92,6 +101,7 @@ LLM Provider 和 Service 工厂模块
 | `im.ttalk.agent.provider.common.cache` | Anthropic prompt caching 策略层（辅助层） |
 | `im.ttalk.agent.provider.common.response-parser` | 响应归一化（辅助层） |
 | `im.ttalk.agent.provider.common.memo` | 有界记忆化（schema 转换缓存，辅助层） |
+| `im.ttalk.agent.provider.common.embeddings` | Embedding HTTP 调用与响应归一（OpenAI 兼容 + DashScope 原生，辅助层） |
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |
 | `im.ttalk.agent.provider.schema.anthropic` | Anthropic Schema 转换 |
 | `im.ttalk.agent.provider.stream.openai` | OpenAI 流式处理 |
@@ -220,6 +230,85 @@ LLM Provider 和 Service 工厂模块
  :response-format {:type "json_object"}
  :extra-body {:enable_thinking false}}  ;; 各家私有字段逃生通道，直接 merge 进请求体
 ```
+
+### 多模态输入（图片 / PDF / 音频）
+
+中立消息的 `:content` 除字符串外，还可以是**内容部件向量**（`im.ttalk.agent.model.content`），
+由各家 wire 转换器翻译成自家形状——同一份对话历史换 provider 不用改。
+
+```clojure
+(require '[im.ttalk.agent.model.content :as content]
+         '[im.ttalk.agent.model.message :as msg])
+
+(msg/user [(content/text-part "这张图里有几只猫？")
+           (content/image-part "https://example.com/cats.png")])       ;; 远端 URL
+(msg/user [(content/image-part (clojure.java.io/file "cat.png"))])     ;; 本地文件（自动 base64 + 猜类型）
+(msg/user [(content/image-part base64-str {:media-type "image/png"})]) ;; 内联 base64
+(msg/user [(content/file-part pdf-base64 {:media-type "application/pdf" :filename "报告.pdf"})])
+(msg/user [(content/audio-part wav-base64 {:media-type "audio/wav"})])
+```
+
+翻译规则与边界：
+
+| 部件 | OpenAI 兼容 | Anthropic |
+|---|---|---|
+| `image/*` URL | `image_url.url` | `image` + `url` source |
+| `image/*` 内联 | `image_url` 的 data URI | `image` + `base64` source（media-type 须具体，不收 `image/*`） |
+| `application/pdf` 内联 | `file.file_data` | `document` + `base64` source（`:filename` → `title`） |
+| `audio/*` 内联 | `input_audio`（仅 wav / mp3） | ❌ 不支持 |
+| URL 形态的音频 / PDF | ❌ 不支持 | PDF 支持 url source |
+
+- **不支持的组合抛规范错误**（`:validation-error`，不可重试），不静默丢内容——
+  丢了内容模型只会答非所问，排查成本远高于当场报错。
+- **厂商原生块照旧透传**：向量里 `:type` 为**字符串**的元素（Anthropic 的
+  `{:type "document" ...}`、带 `cache_control` 的块等）原样发出，可与中立部件混用。
+- DashScope **原生** text-generation 端点不收内容部件（qwen-vl 走另一个端点、
+  形状也不同），该 provider 在边界处直接报错并指路：多模态请用 `:openai-compat`
+  指向 DashScope 兼容模式 + qwen-vl 模型。
+
+### 文本向量化（Embedding）
+
+embedding 模型与对话模型是**两种模型**（另一个端点、另一套参数、另一份计费），
+所以是独立实例、独立协议（`im.ttalk.agent.model.embedding/IEmbeddingProvider`），
+不给 `ILLMProvider` 加方法。好处是**能力探测不撒谎**：没有 embedding 服务的厂商
+（如 Anthropic）在表里根本没有条目，`embedding-provider?` 直接为 false。
+
+```clojure
+(require '[im.ttalk.agent.provider.embeddings :as emb])
+
+(def e (emb/create-provider :openai))            ;; 取 OPENAI_API_KEY，默认 text-embedding-3-small
+(emb/embed e ["你好" "世界"])
+;; => {:embeddings [[...] [...]] :model "text-embedding-3-small"
+;;     :usage {:input-tokens 8 :total-tokens 8} :provider :openai}
+
+(emb/embed-one e {:dimensions 256} "只要一条")   ;; => [0.01 ...]
+
+;; 自建 / 私有兼容端点
+(emb/create-provider :openai-compat
+  {:base-url "https://my-gw.internal/v1" :api-key "..." :model "bge-m3"})
+
+(emb/supported-providers)
+;; => [:dashscope :gemini :mistral :mock :ollama :openai :openai-compat :siliconflow :zhipu]
+```
+
+| 内置 | 默认模型 | 单次批上限 | 形状 |
+|---|---|---|---|
+| `:openai` | text-embedding-3-small | 2048 | OpenAI 兼容 |
+| `:zhipu` | embedding-3 | 64 | OpenAI 兼容 |
+| `:siliconflow` | BAAI/bge-m3 | 32 | OpenAI 兼容 |
+| `:mistral` | mistral-embed | 128 | OpenAI 兼容 |
+| `:gemini` | text-embedding-004 | - | OpenAI 兼容端点 |
+| `:ollama` | nomic-embed-text | - | OpenAI 兼容（本地，免 key） |
+| `:dashscope` | text-embedding-v3 | 10 | DashScope 原生（`input.texts` + `parameters.dimension`） |
+| `:openai-compat` | 无（必填 `:model` + `:base-url`） | - | OpenAI 兼容 |
+| `:mock` | mock-embedding | - | 确定性假向量，离线测试用（**无语义**） |
+
+- 超批**自动切片**并按原序拼回，usage 逐片累加；返回向量与入参 `texts` 同序等长
+  （按服务端 `index` / `text_index` 重排，不假定顺序），条数对不上宁可抛 `:parse-error`
+  也不给错位向量。
+- 调用时 config 覆盖实例 config：`{:model :dimensions :batch-size :timeout :retry
+  :encoding-format :user :extra-headers :extra-body}`（DashScope 另有 `:text-type`）。
+- 失败与 chat 路径同一套规范错误词汇（401 → `:auth-error` 且不可重试）。
 
 ### 结构化输出（OpenAI 兼容）
 
@@ -383,6 +472,18 @@ export MINIMAX_API_KEY="..."
 
 # DashScope（阿里云百炼）
 export DASHSCOPE_API_KEY="sk-..."
+
+# xAI (Grok)
+export XAI_API_KEY="xai-..."
+
+# Moonshot (Kimi)
+export MOONSHOT_API_KEY="sk-..."
+
+# OpenRouter
+export OPENROUTER_API_KEY="sk-or-..."
+
+# SiliconFlow（硅基流动）
+export SILICONFLOW_API_KEY="sk-..."
 
 # Ollama（本地部署，无需 API Key）
 export OLLAMA_BASE_URL="http://localhost:11434"

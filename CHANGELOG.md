@@ -69,6 +69,47 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### ✨ 新增
 
+- **多模态输入：中立内容部件 + 两家 wire 翻译**（2026-08-18，对照 Vercel AI SDK
+  的 prompt 部件模型）。此前 `:content` 只能是字符串——**图片 / PDF / 音频根本
+  发不出去**，除非用户自己按各家 wire 手写块（而那份历史换个 provider 就废了）。
+  - 新增 core ns `im.ttalk.agent.model.content`：`text-part` / `image-part` /
+    `file-part` / `audio-part`，来源吃 http(s) URL、data URI、base64 字符串、
+    `byte[]`、`java.io.File`（自动 base64 + 从扩展名猜 media type）。
+  - **图片 / 音频 / PDF 不各立一类**，统一是 `:file` + `:media-type`，wire 层按
+    media type 的**顶层类别**分派——新格式不需要新部件类型（AI SDK 同一取法）。
+  - `wire/openai`：image → `image_url`（URL 或 data URI）、audio → `input_audio`
+    （仅 wav/mp3）、PDF → `file.file_data`；`wire/anthropic`：image → `image` 块
+    （base64 / url source）、PDF → `document` 块（`:filename` → `title`）。
+  - **不支持的组合抛 `:validation-error`（不可重试），不静默丢内容**——丢了内容
+    模型只会答非所问，排查成本远高于当场报错。Anthropic 不收音频、OpenAI 不收
+    URL 音频/URL PDF、Anthropic 不收通配 media-type 的内联图片，各有单测。
+  - **既有逃生通道不变**：向量里 `:type` 为**字符串**的元素（Anthropic citations
+    的 `document`、带 `cache_control` 的块…）视为厂商原生块**原样透传**，
+    可与中立部件混用。
+  - 二进制一律以 **base64 字符串**落地，不是 `byte[]`——对话历史要过 EDN/SQLite
+    往返，字节数组过不去（有 SQLite 往返回归测试钉住）。
+- **文本向量化：`IEmbeddingProvider` 独立可选协议 + 9 个内置端点**（2026-08-18）。
+  框架此前完全没有 embedding 能力。
+  - core 新增 ns `im.ttalk.agent.model.embedding`（单方法 `embed`，批量即全部）。
+    **与 `ILLMProvider` 并列、不加进它**：embedding 是另一种模型（另一端点、
+    另一套参数、另一份计费）。**同样不给 Object 兜底**——`satisfies?` 必须可信，
+    没有 embedding 服务的厂商（Anthropic）在表里根本没有条目。
+  - provider 新增 `provider/embeddings`（工厂 + 三个实现）与
+    `provider/common/embeddings`（OpenAI 兼容 + DashScope 原生两种线上形状）：
+    `:openai` / `:zhipu` / `:siliconflow` / `:mistral` / `:gemini` / `:ollama` /
+    `:dashscope` / `:openai-compat` / `:mock`（确定性假向量，离线测试用）。
+  - 超批**自动切片**按原序拼回、usage 逐片累加；返回向量按服务端 `index` /
+    `text_index` **重排**（不假定顺序），条数对不上宁可抛 `:parse-error` 也不给
+    错位向量；失败与 chat 路径同一套规范错误词汇。
+  - 门面：`provider/api` 加 `create-embedding-provider` / `embed` / `embed-one` /
+    `supports-embedding?`，以及内容部件构造器的 re-export。
+- **新增四个 provider**：`:xai`（Grok）、`:moonshot`（Kimi，默认国内站）、
+  `:openrouter`（多厂商聚合网关）、`:siliconflow`（硅基流动）。均由
+  `defprovider` 生成，已进 factory 注册表、env 前缀映射与默认配置表
+  （两处默认值一致性有测试钉住——历史上 anthropic 多一个 `/v1`、mistral 少一个
+  `/v1` 就是这么漏的）。OpenRouter 的署名头走既有 `:extra-headers`、路由参数走
+  既有 `:extra-body`，**不为它新增字段**。
+
 - **thinking 回传契约：可选协议 `IReplayableResponse` + 中立消息 `:blocks`**
   （2026-07-28，设计与三轮实验记录见 `docs/provider-variant-design.md`）。
   推理模型的 thinking 块（含 `signature`）此前在中立层被抹平——`response->neutral`
@@ -289,6 +330,16 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
   （transport），两件事不相干。
 
 ### 🐛 修复
+
+- **DashScope 把中立消息原样发了出去**（2026-08-18，随多模态改造暴露）：
+  `DashScopeProvider/call-llm` 未做 wire 转换，`:tool-calls` / `:args` / keyword
+  role 直接进请求体——DashScope 一个都不认，于是**多轮工具调用的历史等于没发**
+  （首轮正常，第二轮起模型看不到自己调过什么、拿到过什么结果）。原生
+  text-generation 的 messages 与 OpenAI 同构，故复用 `wire/openai`；
+  回归测试断言出站 body 里 `tool_calls[].function.arguments` 是 JSON 字符串、
+  tool 结果是 `role=tool` + `tool_call_id`，且中立键不得泄漏。
+  该端点不收多模态部件（qwen-vl 在另一个端点、形状也不同），边界处直接报错并
+  指路（用 `:openai-compat` 指向兼容模式），而不是发出去等一个看不懂的 400。
 
 - **`create-agent` 递不到 provider 专属能力**（2026-07-28，见
   `docs/provider-variant-design.md` §6.1）：`common/build-kernel` 用白名单

@@ -38,7 +38,9 @@ Clojure AI Agent Framework - Kernel 中央编排器
 - **Filter 中间件**：洋葱式 around 链（对标 Spring AI 2.0 Advisor），:chat / :tool / :turn / :token-xform 四类钩子，可短路/重试/计时/递归重入
 - **Spring AI 2.0 Advisor 对齐**：ToolSearch 渐进式工具披露（省 34–64% token）、return-direct、可插拔续跑判据、SafeGuard 敏感词、RAG 注入、结构化输出自我修正、RE2 重读——检索/向量库一律经协议注入，框架零新增依赖（见 `docs/advisor-alignment-design.md`）
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :stream-fn}` map 接入，无耦合
-- **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）及 OpenAI 兼容协议
+- **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）、xAI、Moonshot、OpenRouter、SiliconFlow 及 OpenAI 兼容协议
+- **多模态输入**：中立内容部件（图片 / PDF / 音频）一份历史两家 wire 各自成型；不支持的组合当场报错而非静默丢内容
+- **文本向量化**：`IEmbeddingProvider` 独立可选协议 + 内置 8 家端点（OpenAI / 智谱 / SiliconFlow / DashScope 原生 / Ollama 等），自动批次切片
 - **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error :error <规范错误 map>}`（可配 `:on-error`）
 - **统一错误模型**：失败统一用规范错误 map `{:type :message :retryable? :status :provider}`（见 `im.ttalk.agent.model.error`）。各边界封装一致：provider I/O 失败抛 `ex-info`（data 即规范错误）、配置/解析返回 `[:ok]/[:error]`、SimpleAgent 返回 `{:status :error}`、工具错误渲染成字符串喂回 LLM——彼此可单向转换，`:retryable?`/`:status` 全程不丢（如 401 始终不可重试）
 - **ChatMemory**：按 conversation-id 持久化对话历史（in-memory / windowed / SQLite，SQLite store 实现 `Closeable`）
@@ -538,6 +540,10 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 | `:deepseek` | DeepSeek | `DEEPSEEK_API_KEY` | deepseek-chat, deepseek-reasoner |
 | `:minimax` | MiniMax（Anthropic 兼容端点） | `MINIMAX_API_KEY` | MiniMax-M2 |
 | `:dashscope` | 阿里云 DashScope（原生 SSE 流式） | `DASHSCOPE_API_KEY` | qwen-plus, qwen-max |
+| `:xai` | xAI Grok 系列 | `XAI_API_KEY` | grok-4.5, grok-4.3 |
+| `:moonshot` | Moonshot Kimi 系列（默认国内站） | `MOONSHOT_API_KEY` | kimi-k2.5, kimi-k3 |
+| `:openrouter` | OpenRouter 多厂商聚合网关 | `OPENROUTER_API_KEY` | openai/gpt-4o-mini 等带前缀 id |
+| `:siliconflow` | SiliconFlow 硅基流动 | `SILICONFLOW_API_KEY` | Qwen/Qwen3-8B, deepseek-ai/DeepSeek-V3 |
 | `:openai-compat` | OpenAI 兼容协议 | 自定义 | 取决于后端 |
 
 > **各家进阶能力**（结构化输出、并行工具调用、`reasoning_effort`、Anthropic prompt
@@ -606,6 +612,51 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 
 > 归一化（统一成 `ILLMResponse`）发生在 `service/create-service` 里；直调
 > provider 拿到的是原始响应，故需经 `extract-*` 协议方法读取。
+
+### 多模态输入（图片 / PDF / 音频）
+
+`:content` 除字符串外可以是**中立内容部件向量**，由各 provider 的 wire 转换器翻译
+成自家形状——同一份对话历史换 provider 不用改：
+
+```clojure
+(require '[im.ttalk.agent.model.content :as content]
+         '[im.ttalk.agent.model.message :as msg])
+
+;; SimpleAgent：message 位置直接给部件向量（内部照常包成 user 消息）
+(ka/chat agent [(content/text-part "这张图里有几只猫？")
+                (content/image-part "https://example.com/cats.png")])
+
+;; 本地文件自动 base64 + 猜 media type；内联 base64 须显式给 :media-type
+(msg/user [(content/image-part (clojure.java.io/file "cat.png"))])
+(msg/user [(content/file-part pdf-b64 {:media-type "application/pdf" :filename "报告.pdf"})])
+```
+
+OpenAI 兼容端点收 `image_url` / `input_audio`（wav、mp3）/ `file.file_data`（PDF）；
+Anthropic 收 `image` / `document` 块，**不收音频**。不支持的组合抛
+`:validation-error`（不可重试），**不静默丢内容**。厂商原生块（`:type` 为字符串）
+照旧原样透传，可与中立部件混用。详见
+[`clj-agent-provider` README](modules/clj-agent-provider/README.md)。
+
+### 文本向量化（Embedding）
+
+embedding 模型与对话模型是两种模型，因此走**独立实例 + 独立可选协议**
+（`IEmbeddingProvider`，无 Object 兜底 → 能力探测不撒谎）：
+
+```clojure
+(require '[im.ttalk.agent.provider.embeddings :as emb])
+
+(def e (emb/create-provider :openai))          ;; 亦支持 :zhipu :siliconflow :dashscope
+                                               ;;       :ollama :gemini :mistral :openai-compat :mock
+(emb/embed e ["你好" "世界"])
+;; => {:embeddings [[...] [...]] :model "text-embedding-3-small"
+;;     :usage {:input-tokens 8 :total-tokens 8} :provider :openai}
+
+(emb/embed-one e {:dimensions 256} "只要一条")
+```
+
+超批自动切片、按原序拼回、usage 累加；返回向量与入参同序等长，条数对不上宁可
+抛错也不给错位向量。Anthropic 没有 embedding 服务 → 表里没有条目，
+`(emb/supported-providers)` 一看便知。
 
 ## 高级用法：完整示例
 

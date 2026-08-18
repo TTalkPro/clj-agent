@@ -40,6 +40,8 @@ core 对记忆与循环零感知。
 |---------|------|
 | `im.ttalk.agent.model` | `ILLMProvider` 协议（端口，中立消息边界） |
 | `im.ttalk.agent.model.message` / `.response` / `.error` | 中立消息、统一响应、错误 |
+| `im.ttalk.agent.model.content` | 中立多模态内容部件（图片 / PDF / 音频；wire 层按 media type 分派） |
+| `im.ttalk.agent.model.embedding` | `IEmbeddingProvider` 协议（**可选**能力，无 Object 兜底 → `satisfies?` 可信） |
 | `im.ttalk.agent.model.service` | 通用 create-service（仅凭协议包装任意 provider） |
 | `im.ttalk.agent.tool-calling-manager` | `ToolCallingManager` 工具批次执行协议 |
 
