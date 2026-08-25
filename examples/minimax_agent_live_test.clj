@@ -17,7 +17,7 @@
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.service :as service]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.provider.minimax :as minimax]))
 
 ;;; ============================================================

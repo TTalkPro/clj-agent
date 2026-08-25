@@ -1,5 +1,5 @@
 (ns structured-output-live-test
-  "结构化输出自我修正（`validation-turn-filter` + `advisor/structured-output`）
+  "结构化输出自我修正（`validation-turn-filter` + `filter/structured-output`）
    × MiniMax 真实 provider 端到端验证。
 
    对标 Spring AI 2.0 `StructuredOutputValidationAdvisor`；设计见
@@ -51,9 +51,9 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.advisor :as flt]
-            [im.ttalk.agent.advisor.memory :as ma]
-            [im.ttalk.agent.advisor.structured-output :as so]
+            [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.filter.memory :as ma]
+            [im.ttalk.agent.filter.structured-output :as so]
             [im.ttalk.agent.react :as react]
             [im.ttalk.agent.provider.minimax :as minimax]))
 

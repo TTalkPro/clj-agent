@@ -38,8 +38,8 @@
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.advisor.memory :as ma]
-            [im.ttalk.agent.advisor.tool-search :as ts]
+            [im.ttalk.agent.filter.memory :as ma]
+            [im.ttalk.agent.filter.tool-search :as ts]
             [im.ttalk.agent.react :as react]
             [im.ttalk.agent.provider.minimax :as minimax]))
 

@@ -2,7 +2,7 @@
   "P0 验证实验：thinking 块不回传，到底会不会降级？
 
    出处：`docs/provider-variant-design.md` §6 P0。那份设计的全部推导来自代码
-   （`advisor/memory.clj` 与 `wire/anthropic.clj` 会把 thinking 块抹平），
+   （`filter/memory.clj` 与 `wire/anthropic.clj` 会把 thinking 块抹平），
    **但没有一条来自真机**。本仓库的惯例是这类判断不能靠推导定案——所以先做实验，
    **实验为否则 P3 撤回**。
 

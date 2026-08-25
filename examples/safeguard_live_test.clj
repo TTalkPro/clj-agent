@@ -6,7 +6,7 @@
 
    ## live 验的是什么
 
-   拦截逻辑本身有单测（`advisor_test.clj`，7 组）。live 值得验的是单测证明不了
+   拦截逻辑本身有单测（`filter_test.clj`，7 组）。live 值得验的是单测证明不了
    的三件事：
 
    1. **拦下时真的一次 LLM 都没调**——短路在 `:turn` 层，连接都没建。这既是
@@ -32,8 +32,8 @@
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.advisor :as flt]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.react :as react]
             [im.ttalk.agent.provider.minimax :as minimax]))
 

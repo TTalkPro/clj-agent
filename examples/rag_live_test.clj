@@ -1,5 +1,5 @@
 (ns rag-live-test
-  "RAG 注入（`advisor/rag`）× MiniMax 真实 provider 端到端验证。
+  "RAG 注入（`filter/rag`）× MiniMax 真实 provider 端到端验证。
 
    对标 Spring AI `QuestionAnswerAdvisor`；设计见
    `docs/advisor-alignment-design.md` §7.1。
@@ -38,8 +38,8 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.advisor.memory :as ma]
-            [im.ttalk.agent.advisor.rag :as rag]
+            [im.ttalk.agent.filter.memory :as ma]
+            [im.ttalk.agent.filter.rag :as rag]
             [im.ttalk.agent.react :as react]
             [im.ttalk.agent.provider.minimax :as minimax]))
 

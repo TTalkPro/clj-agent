@@ -13,7 +13,7 @@
   (:require [clojure.edn]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.kernel :as kernel]
-            [im.ttalk.agent.advisor :as filters]
+            [im.ttalk.agent.filter :as filters]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.service :as service]
             [im.ttalk.agent.provider.zhipu :as zhipu]
