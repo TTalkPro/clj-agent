@@ -3,8 +3,8 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.advisor :as flt]
-            [im.ttalk.agent.advisor.structured-output :as so]))
+            [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.filter.structured-output :as so]))
 
 (def ^:private schema
   {:type "object"

@@ -1,7 +1,7 @@
-(ns im.ttalk.agent.advisor.structured-output
+(ns im.ttalk.agent.filter.structured-output
   "结构化输出校验（对标 Spring AI 2.0 `StructuredOutputValidationAdvisor`）
 
-   `advisor/validation-turn-filter` 提供的是**机制**（不合格 → 反馈重入循环 →
+   `filter/validation-turn-filter` 提供的是**机制**（不合格 → 反馈重入循环 →
    重试上限）；它的 validate-fn 一直得用户自己写。Spring 的价值恰恰在
    validate-fn 本身：按 JSON Schema 校验，并把失败原因写成模型能据以自我修正的
    人话（\"missing required field 'actor'\" / \"expected 'array', got 'string'\"）

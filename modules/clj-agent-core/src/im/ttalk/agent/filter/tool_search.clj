@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.advisor.tool-search
+(ns im.ttalk.agent.filter.tool-search
   "ToolSearch —— 渐进式工具披露（对标 Spring AI 2.0 `ToolSearchToolCallingAdvisor`）
 
    **动机**：工具一多，全量 schema 每轮都进 prompt。Spring 的实测是 28 个工具
@@ -72,7 +72,8 @@
      （多召回两个无关工具，模型直接忽略，成本 ~100 token）。`:limit` 是控制
      暴露量的旋钮。"
   (:require [clojure.set :as set]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [im.ttalk.agent.filter :as flt]))
 
 (set! *warn-on-reflection* true)
 
@@ -281,7 +282,7 @@
                                     {discovered-slot (into #{} (map :name) hits)})))))
 
      :filter
-     {:name :tool-search
+     (flt/create-filter :tool-search
       :chat (fn [req chain]
               (let [all (:tools req)]
                 (if (empty? all)
@@ -292,7 +293,7 @@
                         exposed (filterv #(or (contains? discovered (:name %))
                                               (contains? always (:name %)))
                                          catalog)]
-                    (chain (assoc req :tools (into [st-schema] exposed)))))))}
+                    (chain (assoc req :tools (into [st-schema] exposed))))))))
 
      :state-slots {discovered-slot {:init #{} :reduce into}}}))
 

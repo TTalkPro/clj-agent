@@ -35,7 +35,8 @@
       invoke-tool: {:value v (:writes {k v})}   ;; context 只读，写意图经 :writes
       invoke-chat: {:response r :context ctx}
       invoke:      {:response r :context ctx :tool-calls-made [...]}"
-  (:require [im.ttalk.agent.advisor :as filters]
+  (:require [clojure.string]
+            [im.ttalk.agent.filter :as filters]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.error :as err]
             [im.ttalk.agent.tool :as tool]
@@ -49,9 +50,14 @@
 
 ;; inline-handlers: {keyword -> (fn [args ctx] result)} — 内联工具处理函数，
 ;; 由 delegate-tool 等动态构建的工具填充，与 tool-vars（var 引用）互补。
-;; inline-meta: {keyword -> {:serial :retry :timeout :return-direct}} —
-;; 装配期预计算的内联工具声明，消除运行期 by-name O(n) 线性扫描。
-(defrecord Kernel [service filters tools tool-vars inline-handlers inline-meta settings tool-manager])
+;; tool-meta: {keyword -> ToolMeta} — 装配期预计算的**全部**工具声明，var 与
+;; 内联工具同表。运行期的五个查询（func-def / :serial / :retry / :timeout /
+;; :return-direct）全部退化成一次 map 查找 + 一次字段读。
+;; hooks: filter/CompiledHooks — 装配期预折叠的四条链（:chat/:tool/:turn/
+;; :iteration 各是 (fn [terminal] -> chain)，:token-xform 是 (fn [sink] -> rf)），
+;; 同款思路：把 keep + reverse + reduce 从每次 invoke 挪到 build-kernel。
+;; **读它请走 `filter-hooks`，改 :filters 请走 `with-filters`**（见两者 docstring）。
+(defrecord Kernel [service filters hooks tools tool-vars inline-handlers tool-meta settings tool-manager])
 
 ;;; ============================================================
 ;;; Build API
@@ -82,12 +88,86 @@
     (throw (ex-info (str "内联工具 " name " 的 :retry 必须为 nil / true / 正整数 map，实为 " (pr-str retry))
                     {:tool name :retry retry}))))
 
+(defn- validate-unique-tool-names!
+  "工具名必须唯一（var 之间、内联之间、var 与内联之间都算），否则装配期即抛。
+
+   同名工具没有合理用例，只有坏结果：`:tools` schema 列表里两份定义都发给 LLM
+   （模型看见两个同名工具），而 `tool-meta` / `inline-handlers` 只留得下一个——
+   于是「模型看到的」与「实际执行的」对不上，且这种错配没有任何运行期症状可查。
+
+   **刻意不给优先级规则**。此前是两套：四个声明查询 var 优先、`invoke-tool` 的
+   执行分派内联优先——同名时「按 var 的策略执行内联的 handler」。合表时曾把它们
+   统一成内联优先，但「选一个赢家」本身就是在给配置错误编造语义：调用方要替换
+   某个工具，该在传 `:tools` 之前处理自己的列表，而不是指望框架替他猜。"
+  [var-tools inline-tools]
+  (let [names (concat (for [v var-tools :when (tool/tool-function? v)]
+                        (keyword (:name (tool/get-schema v))))
+                      (map #(keyword (:name %)) inline-tools))
+        dups  (->> names frequencies (keep (fn [[k n]] (when (> n 1) k))) sort vec)]
+    (when (seq dups)
+      (throw (ex-info (str "工具名重复: " (clojure.string/join ", " (map str dups))
+                           "——同一个 kernel 内工具名必须唯一（var 与内联工具共用一个命名空间）")
+                      {:duplicates dups})))))
+
+(defn- build-func-def
+  "构建 ToolRequest 的 :function 信息（供 tool filter 读取）。装配期调用，
+   结果存进 `ToolMeta` 的 `:func-def`——运行期不再重建。
+
+   **var 工具与内联工具共用本函数**——曾经两个构造点分头维护，正是 `:timeout`
+   对内联工具静默失效的根因（`:serial`/`:retry`/`:return-direct` 都有 inline
+   分支，独 `:timeout` 漏了）。新增字段请只加在这里。"
+  [fn-name tool-var]
+  ;; 超时不在此列：它由 terminal 在 filter 链**之内**强制（只包裹工具本体，
+  ;; 不包裹 filter 链——R1: 审批等待不再吃掉超时预算）。
+  {:name      fn-name
+   :schema    (when tool-var (:tool/schema (meta tool-var)))
+   :sensitive (boolean (when tool-var (:tool/sensitive (meta tool-var))))})
+
+;;; ------------------------------------------------------------
+;;; ToolMeta：一个工具的全部装配期声明，一张表答完
+;;; ------------------------------------------------------------
+
+;; 曾经是四个查询函数各自 `(if-let [v (get tool-vars k)] (读 var 元数据)
+;; (查 inline-meta))`——同一段双分支手抄四遍。`:timeout` 就是在这种重复里漏掉
+;; inline 分支、对内联工具静默失效的（见 build-func-def docstring）。现在两个
+;; 来源在**装配期**汇成一张表，运行期只有一条路径。
+(defrecord ToolMeta [func-def serial retry timeout return-direct])
+
+(def ^:private default-retry-policy
+  {:max-retries 2 :initial-delay-ms 200})
+
+(defn- normalize-retry
+  "`:retry` 声明（nil / true / map）→ 归一化策略 map 或 nil。装配期做一次。"
+  [spec]
+  (when spec
+    (merge default-retry-policy (when (map? spec) spec))))
+
+(defn- var-tool-meta
+  "var 工具的声明取自 `:tool/*` 元数据。"
+  [fn-key v]
+  (->ToolMeta (build-func-def fn-key v)
+              (tool/serial-tool? v)
+              (normalize-retry (tool/retry-spec v))
+              (tool/timeout-spec v)
+              (tool/return-direct-tool? v)))
+
+(defn- inline-tool-meta
+  "内联工具（delegate-tool 等动态构建）的声明取自其 map 自身的同名键。"
+  [fn-key t]
+  (->ToolMeta (build-func-def fn-key nil)
+              (boolean (:serial t))
+              (normalize-retry (:retry t))
+              (:timeout t)
+              (boolean (:return-direct t))))
+
 (defn build-kernel
   "构建 Kernel 实例
 
     参数 opts map:
     - :service     LLM Service map（必需）
-    - :tools       tool var 向量（如 [#'get-weather]）
+    - :tools       tool var 向量（如 [#'get-weather]），也可混入内联工具 map
+                   （含 :handler，由 delegate-tool 等动态构建）。**工具名必须
+                   唯一**——var 与内联共用一个命名空间，重名装配期即抛
     - :filters     filter 向量（如 [memory-filter logging-filter]），注册顺序即执行顺序
     - :settings    额外设置（可选），如 {:max-tool-iterations 10}
     - :state-slots 状态槽声明（可选）{k {:init v0 :reduce (fn [old new] merged)}}——
@@ -121,30 +201,69 @@
         compiled-inline-tools (mapv #(dissoc % :handler) inline-tools)
         inline-handler-map    (into {} (mapv #(vector (keyword (:name %)) (:handler %))
                                              inline-tools))
-        ;; 装配期预计算内联工具声明 → O(1) 查询（替代 4 处运行期 by-name O(n) 扫描）
-        inline-meta-map       (into {} (mapv (fn [t]
-                                               [(keyword (:name t))
-                                                (select-keys t [:serial :retry :timeout :return-direct])])
-                                             inline-tools))
+        ;; 名字唯一先于一切：重名时 var-map / inline-handler-map 已经把重复
+        ;; 悄悄吃掉了（into 后者胜），再校验别的就是在错误的地基上校验
+        _ (validate-unique-tool-names! var-tools inline-tools)
+        ;; **校验必须先于建表**：normalize-retry 会把非法声明 merge 成看似合法的
+        ;; 策略，先归一化就等于把错误藏起来
         _ (validate-tool-timeouts! var-map inline-tools)
         _ (validate-tool-retries! var-map inline-tools)
         _ (when (some? tool-manager)
-            (tool/check-timeout! ":tool-manager" (:timeout tool-manager)))]
+            (tool/check-timeout! ":tool-manager" (:timeout tool-manager)))
+        ;; 装配期一次：两个来源汇成一张 ToolMeta 表。名字唯一已校验过，
+        ;; 故这里的 into 不存在覆盖——两个来源的键集互不相交。
+        tool-meta-map (into (into {} (map (fn [[k v]] [k (var-tool-meta k v)])) var-map)
+                            (map (fn [t] [(keyword (:name t)) (inline-tool-meta (keyword (:name t)) t)]))
+                            inline-tools)
+        ;; 装配期一次：归一化 filter → Filter record，四条链各预折一次
+        hooks (filters/compile-hooks filters)]
 
     (->Kernel service
-              (vec filters)
+              (:source hooks)          ;; 归一化后的 filter 向量（hooks 与之同源）
+              hooks
               (into compiled-var-tools compiled-inline-tools)
               var-map
               inline-handler-map
-              inline-meta-map
+              tool-meta-map
               (cond-> settings
                 state-slots (assoc :state-slots state-slots)
                 eligibility-fn (assoc :eligibility-fn eligibility-fn))
               tool-manager)))
 
 ;;; ============================================================
+;;; Filter 链访问
+;;; ============================================================
+
+(defn filter-hooks
+  "kernel 的预编译 filter 链（`filter/CompiledHooks`）。
+
+   正常路径下就是 `build-kernel` 装配期算好的那份，直接返回。若有人绕过
+   `with-filters` 直接 `(assoc kernel :filters ...)`，hooks 就与 `:filters`
+   脱钩了——此时**现场重编译**兜底：语义永远跟着 `:filters` 走，宁可慢也
+   不能静默用旧链（filter 悄悄失效是这套机制最难查的一类 bug）。"
+  [kernel]
+  (let [hooks (:hooks kernel)
+        fs    (:filters kernel)]
+    (if (identical? (:source hooks) fs)
+      hooks
+      (filters/compile-hooks fs))))
+
+(defn with-filters
+  "换掉 kernel 的 filter 链，同时重编译 hooks。**改 `:filters` 走这里**——
+   直接 assoc 虽有 `filter-hooks` 兜底，但那是每次 invoke 都重编一遍，白扔
+   装配期成果。"
+  [kernel fs]
+  (let [hooks (filters/compile-hooks fs)]
+    (assoc kernel :filters (:source hooks) :hooks hooks)))
+
+;;; ============================================================
 ;;; Query API
 ;;; ============================================================
+
+(defn- tool-key
+  "函数名（关键字或字符串）→ 表的键。"
+  [fn-name]
+  (if (keyword? fn-name) fn-name (keyword fn-name)))
 
 (defn find-function
   "在 Kernel 中查找函数
@@ -156,9 +275,8 @@
     返回:
     {:tool-var var} 或 nil"
   [kernel fn-name]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (when-let [v (get (:tool-vars kernel) fn-key)]
-      {:tool-var v})))
+  (when-let [v (get (:tool-vars kernel) (tool-key fn-name))]
+    {:tool-var v}))
 
 (defn list-functions
   "列出 Kernel 中所有注册的函数名称
@@ -168,55 +286,50 @@
   [kernel]
   (keys (:tool-vars kernel)))
 
-(defn serial-tool?
-  "工具是否声明 :serial（副作用工具；批内并行时整批退化为按序执行）。
-   var 工具查 :tool/serial 元数据；内联工具查 inline-meta 预计算 map（O(1)）。"
+(defn tool-meta
+  "工具的装配期预计算声明（`ToolMeta` record），未注册则 nil。
+
+   下面四个查询都是它的一层薄封装——**var 与内联工具在装配期就汇成了一张表**，
+   运行期没有分支可走岔。"
   [kernel fn-name]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (if-let [v (get (:tool-vars kernel) fn-key)]
-      (tool/serial-tool? v)
-      (boolean (get-in (:inline-meta kernel) [fn-key :serial])))))
+  (get (:tool-meta kernel) (tool-key fn-name)))
+
+(defn serial-tool?
+  "工具是否声明 :serial（副作用工具；批内并行时整批退化为按序执行）。"
+  [kernel fn-name]
+  (boolean (:serial (tool-meta kernel fn-name))))
 
 (defn return-direct-tool?
   "工具是否声明 :return-direct（结果即最终答案，不再回灌 LLM）。
-   var 工具查 :tool/return-direct 元数据；内联工具查 inline-meta 预计算 map（O(1)）。
 
    对标 Spring AI ToolCallingAdvisor 的 return direct。"
   [kernel fn-name]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (if-let [v (get (:tool-vars kernel) fn-key)]
-      (tool/return-direct-tool? v)
-      (boolean (get-in (:inline-meta kernel) [fn-key :return-direct])))))
-
-(def ^:private default-retry-policy
-  {:max-retries 2 :initial-delay-ms 200})
+  (boolean (:return-direct (tool-meta kernel fn-name))))
 
 (defn retry-policy
-  "工具的 :retry 声明（归一化）。仅 :transient 类错误按此策略重试；
-   声明即承诺幂等（重试会重跑整条 tool filter 链）。
+  "工具的 :retry 声明（归一化已在装配期做掉）。仅 :transient 类错误按此策略
+   重试；声明即承诺幂等（重试会重跑整条 tool filter 链）。
 
    返回: nil（未声明，不重试）| {:max-retries n :initial-delay-ms ms}"
   [kernel fn-name]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))
-        spec (if-let [v (get (:tool-vars kernel) fn-key)]
-               (tool/retry-spec v)
-               (get-in (:inline-meta kernel) [fn-key :retry]))]
-    (when spec
-      (merge default-retry-policy (when (map? spec) spec)))))
+  (:retry (tool-meta kernel fn-name)))
 
 (defn tool-timeout
-  "工具**自己声明**的 `:timeout`（毫秒）。var 工具查 `:tool/timeout` 元数据；
-   **内联工具查 inline-meta 预计算 map（O(1)）**——与 `serial-tool?` / `retry-policy` /
-   `return-direct-tool?` 逐字同款。
+  "工具**自己声明**的 `:timeout`（毫秒）。
 
    只答「这个工具声明了什么」，不含引擎缺省——那一层见 `effective-tool-timeout`。
 
    返回: nil（未声明）| 正整数毫秒"
   [kernel fn-name]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (if-let [v (get (:tool-vars kernel) fn-key)]
-      (tool/timeout-spec v)
-      (get-in (:inline-meta kernel) [fn-key :timeout]))))
+  (:timeout (tool-meta kernel fn-name)))
+
+(defn- effective-timeout*
+  "`effective-tool-timeout` 的表体，吃已查好的 `ToolMeta`——让 `invoke-tool`
+   能复用它已经查到的那一份，不必为超时再查一次表。"
+  [kernel tmeta]
+  (or (:timeout tmeta)
+      tcm/*active-manager-timeout*
+      (tcm/manager-timeout (:tool-manager kernel))))
 
 (defn effective-tool-timeout
   "该工具**实际生效**的超时（毫秒），nil = 不超时。
@@ -237,26 +350,11 @@
    超时只包裹工具本体（terminal 内），不包裹 filter 链——审批等待不再吃掉超时
    预算（R1）。"
   [kernel fn-name]
-  (or (tool-timeout kernel fn-name)
-      tcm/*active-manager-timeout*
-      (tcm/manager-timeout (:tool-manager kernel))))
+  (effective-timeout* kernel (tool-meta kernel fn-name)))
 
 ;;; ============================================================
 ;;; Invoke API - invoke-tool（函数调用，经过 Filter 管道）
 ;;; ============================================================
-
-(defn- build-func-def
-  "构建 ToolRequest 的 :function 信息（供 tool filter 读取）。
-
-   **var 工具与内联工具共用本函数**——曾经两个构造点分头维护，正是 `:timeout`
-   对内联工具静默失效的根因（`:serial`/`:retry`/`:return-direct` 都有 inline
-   分支，独 `:timeout` 漏了）。新增字段请只加在这里。"
-  [fn-name tool-var]
-  ;; 超时不在此列：它由 terminal 在 filter 链**之内**强制（只包裹工具本体，
-  ;; 不包裹 filter 链——R1: 审批等待不再吃掉超时预算）。
-  {:name      fn-name
-   :schema    (when tool-var (:tool/schema (meta tool-var)))
-   :sensitive (boolean (when tool-var (:tool/sensitive (meta tool-var))))})
 
 (defn- timeout-result
   "超时时 terminal 返回的结果形状。`:transient` 类故可被 `:retry` 重试；
@@ -292,7 +390,7 @@
 (defn invoke-tool
   "调用 Kernel 中注册的函数（经 tool filter 洋葱链）
 
-    组装 ToolRequest {:function :args :context} → build-chain(:tool filters) 包裹
+    组装 ToolRequest {:function :args :context} → 预编译的 :tool 链包裹
     → terminal 执行函数。filter 可改写 args、短路(不调 chain，如审批拒绝/熔断/
     限流/安全策略)、around(超时计时)。**:context 是请求侧只读字段**：filter 与
     工具都不改写它；工具的写意图经返回值 :writes 声明，由批次屏障处的
@@ -312,60 +410,51 @@
     :error 分类信息 {:class :semantic|:transient|:environment}，供屏障路由；
     失败调用无 :writes——写意图不生效）"
   [kernel fn-name args context]
-  (let [fn-key (if (keyword? fn-name) fn-name (keyword fn-name))]
-    (if-let [inline-handler (get (:inline-handlers kernel) fn-key)]
-      ;; 内联工具（由 delegate-tool 等构建）：通过同一 filter 链执行
-      (let [func-def (build-func-def fn-key nil)
-            t-ms     (effective-tool-timeout kernel fn-key)
-             terminal (fn [req]
-                        (exec-with-timeout t-ms
-                          (fn []
-                            (try
-                              (let [raw (inline-handler (:args req) (:context req))
-                                    [res writes] (if (and (map? raw) (contains? raw :writes))
-                                                   [(:result raw) (:writes raw)]
-                                                   [raw nil])]
-                                (cond-> {:result (if (string? res) res (pr-str res))}
-                                  (seq writes) (assoc :writes writes)))
-                              (catch Throwable t
-                                (let [{:keys [message class]} (err/contain-throwable t)]
-                                  {:result (str "错误: " message)
-                                   :error  {:class class :message message}}))))))
-            chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
-            out   (chain {:function func-def :args args :context context})]
-        (cond-> {:value (:result out)}
-          (:writes out) (assoc :writes (:writes out))
-          (:error out)  (assoc :error (:error out))))
-
-      ;; 普通 var 工具
-      (let [found (find-function kernel fn-key)
-            _ (when-not found
-                (throw (ex-info (str "函数未找到: " fn-key)
-                                {:fn-name fn-key
-                                 :available (list-functions kernel)})))
-            {:keys [tool-var]} found
-            func-def (build-func-def fn-key tool-var)
-            t-ms     (effective-tool-timeout kernel fn-key)
-            terminal (fn [req]
-                       (exec-with-timeout t-ms
-                         (fn []
-                            (let [exec (try (tool/invoke tool-var (:args req) (:context req))
-                                            (catch Throwable t
-                                              (let [{:keys [message class]} (err/contain-throwable t)]
-                                                {:success false
-                                                 :error message
-                                                 :error-class class})))]
-                             (if (:success exec)
-                               (cond-> {:result (:result exec)}
-                                 (:writes exec) (assoc :writes (:writes exec)))
-                               {:result (str "错误: " (:error exec))
-                                :error  {:class (or (:error-class exec) :semantic)
-                                         :message (:error exec)}})))))
-            chain (filters/build-chain (keep :tool (:filters kernel)) terminal)
-            out   (chain {:function func-def :args args :context context})]
-        (cond-> {:value (:result out)}
-          (:writes out) (assoc :writes (:writes out))
-          (:error out)  (assoc :error (:error out)))))))
+  (let [fn-key (tool-key fn-name)
+        ;; 一次查表拿全：ToolRequest 的 :function 段与超时声明都在 ToolMeta 里，
+        ;; 装配期定死（名字 / schema / :sensitive / :timeout 全来自声明）。
+        ;; 表里同时有内联工具与 var 工具，「函数未找到」也在这里一次判完。
+        tmeta (or (get (:tool-meta kernel) fn-key)
+                  (throw (ex-info (str "函数未找到: " fn-key)
+                                  {:fn-name fn-key
+                                   :available (list-functions kernel)})))
+        func-def (:func-def tmeta)
+        t-ms (effective-timeout* kernel tmeta)
+        ;; 工具本体：内联 handler 与 var 工具只在这里分叉，外面的
+        ;; ToolRequest 组装 / filter 链 / 返回值拆包三段完全共用
+        body (if-let [inline-handler (get (:inline-handlers kernel) fn-key)]
+               (fn [req]
+                 (try
+                   (let [raw (inline-handler (:args req) (:context req))
+                         [res writes] (if (and (map? raw) (contains? raw :writes))
+                                        [(:result raw) (:writes raw)]
+                                        [raw nil])]
+                     (cond-> {:result (if (string? res) res (pr-str res))}
+                       (seq writes) (assoc :writes writes)))
+                   (catch Throwable t
+                     (let [{:keys [message class]} (err/contain-throwable t)]
+                       {:result (str "错误: " message)
+                        :error  {:class class :message message}}))))
+               (let [tool-var (get (:tool-vars kernel) fn-key)]
+                 (fn [req]
+                   (let [exec (try (tool/invoke tool-var (:args req) (:context req))
+                                   (catch Throwable t
+                                     (let [{:keys [message class]} (err/contain-throwable t)]
+                                       {:success false
+                                        :error message
+                                        :error-class class})))]
+                     (if (:success exec)
+                       (cond-> {:result (:result exec)}
+                         (:writes exec) (assoc :writes (:writes exec)))
+                       {:result (str "错误: " (:error exec))
+                        :error  {:class (or (:error-class exec) :semantic)
+                                 :message (:error exec)}})))))
+        terminal (fn [req] (exec-with-timeout t-ms #(body req)))
+        chain ((:tool (filter-hooks kernel)) terminal)
+        out   (chain {:function func-def :args args :context context})]
+    (cond-> {:value (:result out)}
+      (:writes out) (assoc :writes (:writes out))
+      (:error out)  (assoc :error (:error out)))))
 
 ;;; ============================================================
 ;;; Invoke API - invoke-chat（纯 LLM 调用，带 chat filter）
@@ -374,7 +463,7 @@
 (defn invoke-chat
   "发送 Chat Completion 请求（经 chat filter 洋葱链，不含工具调用循环）
 
-    组装 ChatRequest → build-chain(:chat filters) 包裹 → terminal 调 LLM。
+    组装 ChatRequest → 预编译的 :chat 链包裹 → terminal 调 LLM。
     memory 等「读历史 / 改写请求 / 加工响应」能力以 chat filter 形态注入；
     filter 可 around（短路 / 重试 / 计时），详见 kernel.filter。
 
@@ -410,9 +499,7 @@
                                      (some? (:system-prompt req)) (assoc :system-prompt (:system-prompt req)))]
                      {:response (chat-fn (:messages req) chat-opts)
                       :context  (:context req)}))
-        chain (filters/build-chain
-                (keep :chat (:filters kernel))
-                terminal)]
+        chain ((:chat (filter-hooks kernel)) terminal)]
     (chain request)))
 
 (defn invoke-chat-stream
@@ -447,7 +534,9 @@
                  :system-prompt (:system-prompt opts)
                  :on-token      (:on-token opts)
                  :context       context}
-        token-xforms (seq (keep :token-xform (:filters kernel)))
+        hooks (filter-hooks kernel)
+        ;; 装配期预 comp 好的 (fn [sink] -> rf)，无 :token-xform filter 则 nil
+        make-rf (:token-xform hooks)
         terminal (fn [req]
                    (let [chat-opts (cond-> {}
                                      (some? (:tools req))         (assoc :tools (:tools req))
@@ -455,11 +544,9 @@
                                      (some? (:system-prompt req)) (assoc :system-prompt (:system-prompt req)))
                          sink (:on-token req)
                          ;; :token-xform 链：chat 链之后组装（包裹链上存活的 on-token）。
-                         ;; rf 每次现场实例化——有状态 xform 的作用域 = 单次 LLM 流。
-                         rf (when token-xforms
-                              ((apply comp token-xforms)
-                               (fn ([acc] acc)
-                                   ([acc tok] (when sink (sink tok)) acc))))
+                         ;; comp 在装配期做过，rf 每次现场实例化——有状态 xform
+                         ;; 的作用域 = 单次 LLM 流。
+                         rf (when make-rf (make-rf sink))
                          on-tok (if rf
                                   (let [done (volatile! false)]
                                     (fn [tok]
@@ -474,7 +561,5 @@
                      (when rf (rf nil))
                      {:response response
                       :context  (:context req)}))
-        chain (filters/build-chain
-                (keep :chat (:filters kernel))
-                terminal)]
+        chain ((:chat hooks) terminal)]
     (chain request)))

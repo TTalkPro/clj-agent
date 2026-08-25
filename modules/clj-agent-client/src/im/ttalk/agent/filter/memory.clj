@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.advisor.memory
+(ns im.ttalk.agent.filter.memory
   "Memory Filter - 按 conversation-id 读写历史
 
     以 around-chat filter 形态挂进 kernel 的 filter 链：
@@ -13,7 +13,8 @@
     (build-kernel {:service svc
                    :tools tools
                    :filters [(memory-filter store)]})"
-  (:require [im.ttalk.agent.memory :as mem]
+  (:require [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.memory :as mem]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as resp]))
 
@@ -43,9 +44,11 @@
 
     应作为 filters vector 的第一个元素注册，确保其他 filter 看到完整对话历史。"
   [store]
-  {:name :memory
+  (flt/map->Filter
+   {:name :memory
    ;; 暴露绑定的 store，便于 create-agent 在传入预构建 kernel 时复用同一实例
-   ;; （react heal/clear 与 kernel 落库必须用同一 store，见 client/create-agent）
+   ;; （react heal/clear 与 kernel 落库必须用同一 store，见 client/create-agent）。
+   ;; 四个钩子之外的键 → Filter record 的 ext-map，`(:store f)` 照常可读。
    :store store
    :chat (fn [req chain]
            (if-let [cid (get-in req [:context :conversation-id])]
@@ -54,4 +57,4 @@
                (let [resp (chain (assoc req :messages (mem/mem-get store cid)))] ;; 展开历史 → 下游
                  (mem/mem-add store cid [(response->neutral (:response resp))]) ;; 存回复
                  resp))
-             (chain req)))})
+             (chain req)))}))

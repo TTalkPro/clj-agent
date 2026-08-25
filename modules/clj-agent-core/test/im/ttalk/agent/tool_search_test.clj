@@ -6,7 +6,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.context :as ctx]
-            [im.ttalk.agent.advisor.tool-search :as ts]))
+            [im.ttalk.agent.filter.tool-search :as ts]))
 
 ;;; ============================================================
 ;;; 测试用工具目录

@@ -5,7 +5,7 @@
     1→N flush / 异常不 flush / 组合顺序 / hold-release 两分支 /
     退化路径 / reasoning-token 透传 / 最终响应不被变换。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.advisor :as flt]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.response :as resp]))
 

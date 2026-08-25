@@ -30,7 +30,7 @@
    那一方消费，认不出就当它不存在（降级路径见 wire/anthropic）。
 
    来源：service 归一化时经可选协议 model/IReplayableResponse 抽取，
-   由 advisor/memory 的 response->neutral 挂上来。
+   由 filter/memory 的 response->neutral 挂上来。
    动机与实测代价见 docs/provider-variant-design.md（不回传：正确率 100%→82.5%）。")
 
 (set! *warn-on-reflection* true)

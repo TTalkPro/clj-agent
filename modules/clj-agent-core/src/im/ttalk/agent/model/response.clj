@@ -271,7 +271,7 @@
 
    由 service 归一化时经可选协议 im.ttalk.agent.model/IReplayableResponse 抽取；
    provider 不实现该协议即恒为 nil（原路径不变）。
-   下游：advisor/memory 的 response->neutral 把它挂到中立消息的 :blocks。"
+   下游：filter/memory 的 response->neutral 把它挂到中立消息的 :blocks。"
   [resp]
   (:replay-blocks resp))
 

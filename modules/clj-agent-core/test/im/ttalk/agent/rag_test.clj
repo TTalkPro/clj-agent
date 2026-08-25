@@ -2,8 +2,8 @@
   "检索增强 turn filter 测试（对标 Spring QuestionAnswerAdvisor）"
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string]
-            [im.ttalk.agent.advisor :as flt]
-            [im.ttalk.agent.advisor.rag :as rag]))
+            [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.filter.rag :as rag]))
 
 (defn- fake-retriever
   "记录 query/top-k，返回预置文档。"

@@ -3,7 +3,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.context :as context]
             [im.ttalk.agent.tool :as tool :refer [deftool]]
-            [im.ttalk.agent.advisor :as filters]
+            [im.ttalk.agent.filter :as filters]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.kernel :as core]))
 

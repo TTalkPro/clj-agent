@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.advisor-test
+(ns im.ttalk.agent.filter-test
   "Filter 执行器测试
 
     覆盖：注册顺序 / around 改写 / 短路 / 重试 / chat+tool 并存 / 空链
@@ -9,7 +9,7 @@
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.tool :as tool :refer [deftool]]
             [im.ttalk.agent.tool-calling-manager :as tcm]
-            [im.ttalk.agent.advisor :as flt]))
+            [im.ttalk.agent.filter :as flt]))
 
 ;;; ============================================================
 ;;; 注册顺序即执行顺序
@@ -592,3 +592,141 @@
         (with-in-str "n\n"
           (is (clojure.string/includes?
                 (:result (run-tool-chain f terminal req)) "拒绝")))))))
+
+;;; ============================================================
+;;; Filter record 归一化
+;;; ============================================================
+
+(deftest as-filter-normalizes-test
+  (testing "map 字面量 → Filter record"
+    (let [f (flt/as-filter {:name :x :chat identity})]
+      (is (flt/filter? f))
+      (is (= :x (:name f)))
+      (is (= identity (:chat f)))))
+
+  (testing "四个钩子之外的键进 ext-map，照常可读（memory filter 的 :store 靠这条活着）"
+    (let [store (Object.)
+          f (flt/as-filter {:name :memory :store store :chat identity})]
+      (is (flt/filter? f))
+      (is (identical? store (:store f)))))
+
+  (testing "已是 record → 原样返回，不重建"
+    (let [f (flt/create-filter :x :chat identity)]
+      (is (identical? f (flt/as-filter f)))))
+
+  (testing "create-filter 产出 record；未给的钩子为 nil"
+    (let [f (flt/create-filter :x :turn identity)]
+      (is (flt/filter? f))
+      (is (= identity (:turn f)))
+      (is (nil? (:chat f)))
+      (is (nil? (:iteration f)))
+      (is (nil? (:token-xform f)))))
+
+  (testing "五个钩子可任意并存"
+    (let [f (flt/create-filter :all :chat identity :tool identity
+                               :turn identity :iteration identity
+                               :token-xform (map identity))]
+      (is (every? some? [(:chat f) (:tool f) (:turn f) (:iteration f) (:token-xform f)]))))
+
+  (testing "非 map 非 record → 装配期即抛"
+    (is (thrown? clojure.lang.ExceptionInfo (flt/as-filter :not-a-filter)))))
+
+;;; ============================================================
+;;; compile-chain：装配期预折叠
+;;; ============================================================
+
+(deftest compile-chain-test
+  (testing "空序列 → identity：链就是 terminal 本身，一层包装都不加"
+    (let [terminal (fn [req] {:n (:n req)})
+          build (flt/compile-chain [])]
+      (is (identical? terminal (build terminal)))
+      (is (= {:n 1} ((build terminal) {:n 1})))))
+
+  (testing "与 build-chain 等价：靠前者在最外层"
+    (let [log (atom [])
+          mk (fn [tag] (fn [req chain]
+                         (swap! log conj [:pre tag])
+                         (let [r (chain req)]
+                           (swap! log conj [:post tag])
+                           r)))
+          fns [(mk :a) (mk :b)]
+          terminal (fn [_] :done)]
+      (is (= :done ((flt/build-chain fns terminal) {})))
+      (let [via-build @log]
+        (is (= [[:pre :a] [:pre :b] [:post :b] [:post :a]] via-build))
+        (reset! log [])
+        (let [build (flt/compile-chain fns)]
+          (is (= [] @log) "compile-chain 本身不执行任何 filter")
+          (is (= :done ((build terminal) {})))
+          (is (= via-build @log)
+              "同一序列，compile-chain 与 build-chain 的执行顺序逐字相同")))))
+
+  (testing "同一 builder 可反复吃不同 terminal"
+    (let [build (flt/compile-chain [(fn [req chain] (chain (update req :n inc)))])]
+      (is (= 2 ((build (fn [req] (:n req))) {:n 1})))
+      (is (= 20 ((build (fn [req] (* 10 (:n req)))) {:n 1}))))))
+
+;;; ============================================================
+;;; compile-hooks：四条链各收各的钩子
+;;; ============================================================
+
+(deftest compile-hooks-test
+  (testing ":source 是归一化后的 filter 向量"
+    (let [hooks (flt/compile-hooks [{:name :a :chat identity}])]
+      (is (every? flt/filter? (:source hooks)))))
+
+  (testing "每条链只收对应钩子——挂 :chat 的 filter 不该跑在 tool 链上"
+    (let [hits (atom [])
+          f {:name :multi
+             :chat      (fn [req chain] (swap! hits conj :chat) (chain req))
+             :tool      (fn [req chain] (swap! hits conj :tool) (chain req))
+             :iteration (fn [req chain] (swap! hits conj :iteration) (chain req))}
+          hooks (flt/compile-hooks [f])
+          terminal (fn [_] :done)]
+      (((:chat hooks) terminal) {})
+      (is (= [:chat] @hits))
+      (reset! hits [])
+      (((:tool hooks) terminal) {})
+      (is (= [:tool] @hits))
+      (reset! hits [])
+      (((:iteration hooks) terminal) {})
+      (is (= [:iteration] @hits))
+      (reset! hits [])
+      (((:turn hooks) terminal) {})
+      (is (= [] @hits) "没挂 :turn → turn 链是纯 terminal")))
+
+  (testing "无 :token-xform filter → :token-xform 为 nil（流式路径据此走零开销分支）"
+    (is (nil? (:token-xform (flt/compile-hooks [{:name :a :chat identity}]))))
+    (is (some? (:token-xform (flt/compile-hooks
+                               [(flt/token-redact-filter #"x" "*")]))))))
+
+;;; ============================================================
+;;; kernel 侧：预编译链的装配、替换与兜底
+;;; ============================================================
+
+(deftest kernel-hooks-test
+  (testing "build-kernel 归一化 :filters 为 record，hooks 与之同源"
+    (let [k (kernel/build-kernel {:service {} :filters [{:name :a :chat identity}]})]
+      (is (every? flt/filter? (:filters k)))
+      (is (identical? (:filters k) (:source (:hooks k))))
+      (is (identical? (:hooks k) (kernel/filter-hooks k))
+          "同源时 filter-hooks 直接返回装配期那份，不重编")))
+
+  (testing "with-filters 换链 → hooks 跟着重编"
+    (let [k  (kernel/build-kernel {:service {} :filters [{:name :a :chat identity}]})
+          k2 (kernel/with-filters k [{:name :b :chat identity}])]
+      (is (= [:b] (mapv :name (:filters k2))))
+      (is (identical? (:filters k2) (:source (:hooks k2))))
+      (is (= [:a] (mapv :name (:filters k))) "原 kernel 不受影响")))
+
+  (testing "绕过 with-filters 直接 assoc :filters → filter-hooks 现场重编兜底"
+    (let [seen (atom nil)
+          k (kernel/build-kernel
+              {:service {:chat-fn (fn [_ opts] (reset! seen opts) {:text "ok"})}
+               :filters []})
+          rogue {:name :rogue
+                 :chat (fn [req chain] (chain (assoc req :tool-choice :forced)))}
+          k2 (assoc k :filters [rogue])]     ;; 刻意绕开 API
+      (kernel/invoke-chat k2 [{:role :user :content "hi"}] {})
+      (is (= :forced (:tool-choice @seen))
+          "hooks 与 :filters 脱钩时必须重编——静默用旧链会让 filter 悄悄失效"))))

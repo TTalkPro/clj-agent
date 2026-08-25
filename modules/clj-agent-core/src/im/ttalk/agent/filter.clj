@@ -1,11 +1,35 @@
-(ns im.ttalk.agent.advisor
+(ns im.ttalk.agent.filter
   "Filter 系统 - 扁平 vector，注册顺序即执行顺序
 
     所有 filter 都是 around：(fn [req chain] -> resp)。
-    filter 通过 :chat / :tool / :turn 三个键挂到对应的链上，可任意并存：
+    filter 通过 :chat / :tool / :turn / :iteration 四个键挂到对应的链上，
+    可任意并存。四条链从外到内：
+
+        :turn        每 turn 一次        包整个工具循环
+         └ :iteration 每轮一次           包 LLM 调用 + 本轮工具批次
+            ├ :chat    每轮一次          只包 LLM 调用
+            │  └ :token-xform 每 token
+            └ :tool    每 tool call 一次 单个工具执行
 
     - :chat  包单次 LLM 调用（工具循环内每轮执行；memory/日志/重试）
     - :tool  包单次工具执行（并行任务内各自生效；超时/审批/限流）
+    - :iteration 包**单轮迭代**（LLM 调用 + 该轮工具批次；单轮预算/单轮重试/
+             基于本轮工具结果的收尾决策）。IterationRequest
+             {:messages :context :index :remaining}，前两者可改写；
+             IterationResult 为 {:status :continue :messages :context}
+             （本轮跑完工具、还要接着转）或既有终态（:completed/:paused/
+             :cancelled）。filter 可改写下一轮 delta、递归重入重跑这一轮、
+             或不调 chain 短路成 :completed。
+             **硬规则同 :turn**：:paused/:cancelled 结果必须透传、不得重入。
+             **暂停照常出链**：暂停是终端的返回值而非异常，:paused 结果沿链
+             回流，around 后半段照常执行、filter 看得见暂停——单轮计时/预算
+             记账在 HITL 下也能正常收尾。
+             **但 resume 的那半批不算一轮**：resume 执行的是「暂停那一轮的
+             下半截」（批次已定、无新 LLM 调用），不经过本链；续跑的循环从下
+             一个完整轮重新进链，:index 也从 0 重新计。
+             **重入即记账**：重入一轮 = 那一轮的 LLM 调用与工具批次真的又跑了
+             一遍，`remaining` 由循环本体在实际执行工具批次后扣减，故 filter
+             重入自然计入，max-iterations 仍是硬上限。
     - :turn  包**整个工具循环**（每 turn 一次；RAG 注入/最终答案校验/
              guardrail/turn 级预算）。TurnRequest {:messages :context (:resume?)}
              可改写；TurnResult 为循环结果 {:status :response :tool-context ...}。
@@ -18,7 +42,7 @@
              注入等）应在 :resume? 时跳过首次改写；响应侧（校验/guardrail）
              无需感知，递归重入照常。
 
-    第四钩子 :token-xform（流式专用，非 around 形状）：值为一个 **transducer**，
+    第五钩子 :token-xform（流式专用，非 around 形状）：值为一个 **transducer**，
     作用于出站 token-data 流（{:token ...} / {:reasoning-token ...}）。
     组装在 invoke-chat-stream 的 terminal 内（chat 链之后）：
     provider 原始 token → :token-xform 链（注册顺序，靠前者先见原始 token）→
@@ -27,12 +51,22 @@
     不改 stream-fn 返回的最终 :response（memory/turn 用原文）。
     设计见 docs/token-stream-filter-design.md。
 
-    Filter 定义:
+    Filter 定义（`Filter` record，五个钩子字段固定；写普通 map 也行，
+    `build-kernel` 会经 `as-filter` 归一化）:
       {:name :my-filter
        :chat (fn [req chain] ...)     ;; 可选，挂到 chat 链
        :tool (fn [req chain] ...)     ;; 可选，挂到 tool 链
        :turn (fn [req chain] ...)     ;; 可选，挂到 turn 链
+       :iteration (fn [req chain] ...);; 可选，挂到 iteration 链
        :token-xform xform}            ;; 可选，流式 token 变换（transducer）
+
+    五个钩子之外的键（如 memory filter 的 `:store`）照常可读——record 的
+    ext-map 收着，`(:store f)` 不变。
+
+    **装配期预编译**：`compile-hooks` 在 `build-kernel` 时把五条链各折一次，
+    产出 `CompiledHooks`；运行期只做 `(chain-builder terminal)`。此前每次
+    `invoke-tool` / `invoke-chat` 都要 `keep` 全量 filters + `reverse` + `reduce`
+    重建一遍链——工具循环里每轮每个 tool call 一次。
 
     filter 可以通过闭包携带自己的上下文：
       (defn caching-filter []
@@ -59,6 +93,28 @@
 ;;; Filter 创建
 ;;; ============================================================
 
+(defrecord Filter [name chat tool turn iteration token-xform])
+
+(defn filter?
+  "是否已是 `Filter` record（归一化后的形态）。"
+  [x]
+  (instance? Filter x))
+
+(defn as-filter
+  "把 filter 定义归一化成 `Filter` record（已是 record 则原样返回）。
+
+   五个钩子键落到 record 字段（读取走字段而非 hash 查找），其余键进 ext-map
+   照常可读——memory filter 暴露的 `:store` 正是靠这条活着。
+
+   `build-kernel` 对 `:filters` 逐个调用本函数，所以用户侧写 map 字面量、
+   写 `create-filter`、写 record 三种形态等价。"
+  [f]
+  (cond
+    (filter? f) f
+    (map? f)    (map->Filter f)
+    :else       (throw (ex-info (str "filter 必须是 map 或 Filter record，实为 " (pr-str (type f)))
+                                {:filter f}))))
+
 (defn create-filter
   "创建 filter 定义。
 
@@ -68,16 +124,14 @@
       :chat (fn [req chain] resp)  — around 单次 LLM 调用，可选
       :tool (fn [req chain] resp)  — around 单次工具执行，可选
       :turn (fn [req chain] resp)  — around 整个工具循环（每 turn 一次），可选
+      :iteration (fn [req chain] resp) — around 单轮迭代（LLM 调用 + 本轮工具
+                                     批次），可选
       :token-xform xform           — 流式出站 token 变换（transducer），可选
-      四者可任意并存
+      五者可任意并存
 
-    返回: filter 定义 map"
-  [name & {:keys [chat tool turn token-xform]}]
-  (cond-> {:name name}
-    chat (assoc :chat chat)
-    tool (assoc :tool tool)
-    turn (assoc :turn turn)
-    token-xform (assoc :token-xform token-xform)))
+    返回: `Filter` record"
+  [name & {:keys [chat tool turn iteration token-xform]}]
+  (->Filter name chat tool turn iteration token-xform))
 
 ;;; ============================================================
 ;;; 洋葱链构建
@@ -87,12 +141,65 @@
   "把 around 函数序列折成洋葱，最内层为 terminal。
 
     序列中靠前的函数在最外层（最先处理请求，最后处理响应）。
-    返回 (fn [req] -> resp)。"
+    返回 (fn [req] -> resp)。
+
+    一次性用法（测试 / 手搓一条链）。**装配期已知 filter 集合时用
+    `compile-chain`**——它把 `reverse` 和序列遍历折在装配期，运行期只剩
+    「给 terminal 折 n 层闭包」。"
   [around-fns terminal]
   (reduce (fn [downstream f]
             (fn [req] (f req downstream)))
           terminal
           (reverse around-fns)))
+
+(defn compile-chain
+  "预折叠 around 序列 → `(fn [terminal] -> chain)`。装配期调一次，运行期
+   每次调用只把 terminal 塞进去。
+
+   **空序列返回 `identity`**：没有 filter 时链就是 terminal 本身，一层包装
+   都不加——`invoke-tool` 在无 tool filter 的常见配置下由此彻底零开销。"
+  [around-fns]
+  (let [fs (vec (reverse around-fns))]
+    (if (zero? (count fs))
+      identity
+      (fn [terminal]
+        (reduce (fn [downstream f]
+                  (fn [req] (f req downstream)))
+                terminal
+                fs)))))
+
+;;; ============================================================
+;;; 装配期预编译：CompiledHooks
+;;; ============================================================
+
+(defn- compile-token-xform
+  "预 comp `:token-xform` 链 → `(fn [sink] -> rf)`，无则 nil。
+
+   `sink` 是链上存活的 on-token。返回的 rf **每次流现场实例化**（有状态
+   xform 的作用域 = 单次 LLM 流），但 `comp` 只在装配期做一次。"
+  [xforms]
+  (when-let [xf (some->> (seq xforms) (apply comp))]
+    (fn [sink]
+      (xf (fn ([acc] acc)
+            ([acc tok] (when sink (sink tok)) acc))))))
+
+(defrecord CompiledHooks [source chat tool turn iteration token-xform])
+
+(defn compile-hooks
+  "把 filter 向量编成五条预折叠的链构造器（四条 around + 一条 token xform）。
+
+   - `:source`      归一化后的 filter 向量；持有者据此判断 hooks 是否仍与
+                    自己的 `:filters` 同源（见 `kernel/filter-hooks`）
+   - `:chat` / `:tool` / `:turn` / `:iteration`  `(fn [terminal] -> chain)`
+   - `:token-xform` `(fn [sink] -> rf)` 或 nil"
+  [filters]
+  (let [fs (mapv as-filter filters)]
+    (->CompiledHooks fs
+                     (compile-chain (keep :chat fs))
+                     (compile-chain (keep :tool fs))
+                     (compile-chain (keep :turn fs))
+                     (compile-chain (keep :iteration fs))
+                     (compile-token-xform (keep :token-xform fs)))))
 
 ;;; ============================================================
 ;;; 内置 filter: 日志
@@ -100,7 +207,7 @@
 
 (def logging-filter
   "日志 filter —— 打印工具调用信息与结果。"
-  {:name :logging
+  (create-filter :logging
    :tool (fn [req chain]
            (let [name (get-in req [:function :name])]
              (println (str "[Kernel] 调用工具: " name " 参数: " (pr-str (:args req))))
@@ -110,7 +217,7 @@
                              (if (and (string? r) (> (count r) 100))
                                (str (subs r 0 100) "...")
                                (pr-str r))))
-               resp)))})
+               resp)))))
 
 ;;; ============================================================
 ;;; 内置 filter: LLM 调用日志（:chat）
@@ -131,7 +238,7 @@
                  (if (and preview (> (count s) preview))
                    (str (subs s 0 preview) "...")
                    s)))]
-    {:name :logging-chat
+    (create-filter :logging-chat
      :chat (fn [req chain]
              (emit (str "[Chat] → messages=" (count (:messages req))
                         " tools=" (count (:tools req))
@@ -143,7 +250,7 @@
                           (if (seq calls)
                             (str "tool-calls=" (pr-str (mapv :name calls)))
                             (str "text=" (clip (resp/response-text r))))))
-               resp))}))
+               resp)))))
 
 ;;; ============================================================
 ;;; 内置 filter: 敏感词短路（:turn）
@@ -188,7 +295,7 @@
                    (map (comp clojure.string/lower-case str))
                    (remove clojure.string/blank?)
                    set)]
-    {:name :safeguard
+    (create-filter :safeguard
      :turn (fn [req chain]
              (let [text (->> (:messages req)
                              (map message-text)
@@ -202,7 +309,7 @@
                   :tool-context (:context req)
                   :tool-calls-made []
                   :blocked-by :safeguard}      ;; 观察用；调用方可据此计数/告警
-                 (chain req))))}))
+                 (chain req)))))))
 
 ;;; ============================================================
 ;;; 内置 filter: RE2 重读（:turn）
@@ -224,7 +331,7 @@
   [& {:keys [template]}]
   (let [render (or template
                    (fn [q] (str q "\nRead the question again: " q)))]
-    {:name :re-reading
+    (create-filter :re-reading
      :turn (fn [req chain]
              (if (or (:resume? req) (empty? (:messages req)))
                (chain req)
@@ -234,7 +341,7 @@
                                         (if (and (= :user (:role m)) (string? (:content m)))
                                           (assoc m :content (render (:content m)))
                                           m))
-                                      ms))))))}))
+                                      ms)))))))))
 
 ;;; ============================================================
 ;;; 内置 filter: 敏感工具审批
@@ -260,13 +367,13 @@
                            (flush)
                            (= "y" (clojure.string/lower-case (or (read-line) ""))))
          approve (or approve-fn default-approve)]
-     {:name :approval
+     (create-filter :approval
       :tool (fn [req chain]
               (if (get-in req [:function :sensitive])
                 (if (approve (get-in req [:function :name]) (:args req))
                   (chain req)
                   {:result "用户拒绝了此敏感工具调用"})
-                (chain req)))})))
+                (chain req)))))))
 
 ;;; ============================================================
 ;;; 内置 filter: 最终答案校验（turn 链，递归重试）
@@ -293,7 +400,7 @@
                         (fn [problem]
                           (msg/user (str "你的上一个回答未通过校验：" problem
                                          "。请修正后重新回答。"))))]
-    {:name :validation
+    (create-filter :validation
      :turn (fn [req chain]
              (loop [attempt 0, req req]
                (let [result (chain req)]
@@ -308,7 +415,7 @@
                               (-> req
                                   (dissoc :resume?)
                                   (assoc :messages [(mk-feedback problem)]))))
-                     result)))))}))
+                     result))))))))
 
 ;;; ============================================================
 ;;; 内置 filter: token 流变换（:token-xform，流式专用）
@@ -322,11 +429,11 @@
    已知限制：秘密被切在两个 chunk 之间时漏检——跨 chunk 检测需有状态
    缓冲，按需自写 transducer 或改用 hold-release-filter。"
   [re replacement]
-  {:name :token-redact
+  (create-filter :token-redact
    :token-xform (map (fn [tok]
                     (if (:token tok)
                       (update tok :token clojure.string/replace re replacement)
-                      tok)))})
+                      tok)))))
 
 (defn hold-release-filter
   "先审后放 filter（:token-xform）：缓冲整条流不外泄，正常完流时 check-fn
@@ -342,7 +449,7 @@
    注意：只影响交付给 on-token 的流；最终 :response 仍是原始完整答案，
    要改写答案本身请用 validation-turn-filter（turn 链）。"
   [check-fn]
-  {:name :hold-release
+  (create-filter :hold-release
    :token-xform (fn [rf]
                (let [buf (volatile! [])]
                  (fn
@@ -357,4 +464,4 @@
                       (rf acc)))
                    ([acc tok]
                     (vswap! buf conj tok)
-                    acc))))})
+                    acc))))))

@@ -37,7 +37,7 @@
    - tool->schema            工具转 Schema
 
    注：历史上的 build-assistant-message / build-result-messages 已移除——对话历史
-   由 advisor/memory 的 response->neutral（中立消息）统一构建，provider 无需也不再
+   由 filter/memory 的 response->neutral（中立消息）统一构建，provider 无需也不再
    实现这两个方法。"
 
   ;; 基本信息

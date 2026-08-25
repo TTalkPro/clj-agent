@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.advisor.rag
+(ns im.ttalk.agent.filter.rag
   "检索增强（对标 Spring AI `QuestionAnswerAdvisor`）
 
    > **决策变更（2026-07-15）**：此前记录为「不跟本体（需 vector store，超出
@@ -43,7 +43,8 @@
    `RetrievalAugmentationAdvisor`（模块化 RAG：查询改写/扩展/压缩/重排）——
    那是一整套 `org.springframework.ai.rag` 构件的门面。需要的话，这些环节
    在 `IRetriever` 实现内部做，或自己写 turn filter；机制都在。"
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [im.ttalk.agent.filter :as flt]))
 
 (set! *warn-on-reflection* true)
 
@@ -115,7 +116,7 @@
   (when-not (satisfies? IRetriever retriever)
     (throw (ex-info "qa-turn-filter 需要 IRetriever 实现" {:retriever retriever})))
   (let [render (or template default-template)]
-    {:name :qa
+    (flt/create-filter :qa
      :turn (fn [req chain]
              (let [idx (when-not (:resume? req)
                          (last-user-index (:messages req)))
@@ -127,4 +128,4 @@
                    (if (and (str/blank? context-text) (not inject-when-empty?))
                      (chain req)
                      (chain (assoc-in req [:messages idx :content]
-                                      (render question context-text))))))))}))
+                                      (render question context-text)))))))))))

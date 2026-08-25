@@ -114,7 +114,7 @@
      返回最终归一化响应（与 chat-fn 同形）。provider 不支持流式时回退同步，并把全文作为
      单个 token emit（保证 chat-stream 对任何 provider 都可用）。
 
-   说明：历史的 :build-result-msgs 已移除——对话历史由 advisor/memory 的
+   说明：历史的 :build-result-msgs 已移除——对话历史由 filter/memory 的
    response->neutral 用中立消息统一构建，service 无需再提供该函数。"
   [provider config]
   {:chat-fn
