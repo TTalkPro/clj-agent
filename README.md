@@ -35,7 +35,7 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 - **Kernel + Tool 编排**：`deftool` 宏定义工具，`build-kernel` 声明式注册并统一调度
 - **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）；工具调用循环由 SimpleAgent 提供
-- **Filter 中间件**：洋葱式 around 链（对标 Spring AI 2.0 Advisor），:chat / :tool / :turn / :token-xform 四类钩子，可短路/重试/计时/递归重入
+- **Filter 中间件**：洋葱式 around 链（对标 Spring AI 2.0 Advisor），:chat / :tool / :iteration / :turn / :token-xform 五类钩子，可短路/重试/计时/递归重入
 - **Spring AI 2.0 Advisor 对齐**：ToolSearch 渐进式工具披露（省 34–64% token）、return-direct、可插拔续跑判据、SafeGuard 敏感词、RAG 注入、结构化输出自我修正、RE2 重读——检索/向量库一律经协议注入，框架零新增依赖（见 `docs/advisor-alignment-design.md`）
 - **Service 抽象**：LLM 服务通过 `{:chat-fn :stream-fn}` map 接入，无耦合
 - **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）、xAI、Moonshot、OpenRouter、SiliconFlow 及 OpenAI 兼容协议
@@ -288,7 +288,7 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 
 ```clojure
 (require '[im.ttalk.agent.kernel :as kernel])
-(require '[im.ttalk.agent.advisor :as filters])
+(require '[im.ttalk.agent.filter :as filters])
 (require '[im.ttalk.agent.model.service :as service])
 
 ;; 创建 LLM Service（通用：仅凭协议包装任意 provider）
@@ -354,6 +354,11 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 (throw (ex-info "网络抖动" {:error-class :transient}))    ;; 声明 :retry 的工具自动重试
 (throw (ex-info "凭证失效" {:error-class :environment}))  ;; :on-env-error :pause 时屏障处暂停等人
 ;; 工具内调 provider 的 canonical error（:retryable?/:auth-error）自动获得正确分类
+
+;; 工具名在一个 kernel 内必须唯一（var 之间、与内联工具之间都算），重名 build-kernel
+;; 当场抛 {:duplicates [...]}——同名的两份 schema 都会发给 LLM，而 handler 只留得下
+;; 一个，「模型看到的」与「实际执行的」就此对不上且无运行期症状。要替换某个工具，
+;; 请在传 :tools 之前处理自己的列表。:timeout/:retry 的非法值同样装配期即拒。
 ```
 
 ### Kernel API
@@ -378,7 +383,19 @@ Kernel 提供三类 API：
 (:service kernel)                     ;; 获取 service
 (kernel/find-function kernel :name)   ;; 查找函数
 (kernel/list-functions kernel)        ;; 列出所有函数名
+;; 工具声明查询 —— 都是 tool-meta 表的薄封装（var 与内联工具同表，装配期汇好）
+(kernel/tool-meta kernel :name)       ;; ToolMeta record（:func-def/:serial/:retry
+                                      ;;   /:timeout/:return-direct），未注册则 nil
+(kernel/serial-tool? kernel :name)    ;; / return-direct-tool? / retry-policy
+(kernel/effective-tool-timeout kernel :name) ;; 实际生效的超时（含引擎缺省）
+;; filter 链
+(kernel/filter-hooks kernel)          ;; 装配期预编译的四条链
+(kernel/with-filters kernel fs)       ;; 换链并重编 hooks —— 改 :filters 走这里
 ```
+
+**装配期把能算的都算掉**：`build-kernel` 预折四条 filter 链（存 `hooks`）、
+预 `comp` `:token-xform`、把每个工具的全部声明汇成一张 `tool-meta` 表。运行期
+`invoke-tool` / `invoke-chat` 只做「给链塞 terminal」+「查一次表」。
 
 ### Service 接口
 
@@ -395,18 +412,21 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
 ### Filter 中间件（洋葱式 around，对标 Spring AI Advisor）
 
 根抽象是 `around(req, chain)`：chain 是下游，由 filter 决定调不调、调几次、前后干什么
-（可短路 / 重试 / 计时）。一个 filter 通过 `:chat` / `:tool` / `:turn` 三个键挂到对应链上，
-可任意并存。**执行顺序即 `:filters` 向量中的注册顺序**（无 `:order`/`:phase`）；
-靠前的 filter 在最外层（最先看到 req、最后看到 resp）。
+（可短路 / 重试 / 计时）。一个 filter 通过 `:chat` / `:tool` / `:iteration` / `:turn`
+四个键挂到对应链上，可任意并存。**执行顺序即 `:filters` 向量中的注册顺序**
+（无 `:order`/`:phase`）；靠前的 filter 在最外层（最先看到 req、最后看到 resp）。
 
-三条链的粒度：`:chat` 包**单次 LLM 调用**（工具循环内每轮执行，memory 在此）；
-`:tool` 包**单次工具执行**（并行任务内各自生效）；`:turn` 包**整个工具循环**
-（每 turn 一次——RAG 注入、最终答案校验/guardrail、turn 级预算的正确位置；
-闭包链天然"仅下游"，turn filter 可多次 `(chain req)` 递归重入实现校验重试，
-但 `:paused`/`:cancelled`/`:error` 结果必须透传）。
+四条链的粒度：`:chat` 包**单次 LLM 调用**（工具循环内每轮执行，memory 在此）；
+`:tool` 包**单次工具执行**（并行任务内各自生效）；`:iteration` 包**单轮迭代**
+（LLM 调用 + 本轮工具批次——与 `:chat` 同频，差别是它看得见本轮工具跑出了什么，
+故单轮预算/单轮重试/基于工具结果的收尾决策在此）；`:turn` 包**整个工具循环**
+（每 turn 一次——RAG 注入、最终答案校验/guardrail、turn 级预算的正确位置）。
+闭包链天然"仅下游"，`:turn` 与 `:iteration` 都可多次 `(chain req)` 递归重入
+（前者重跑整个循环、后者重跑一轮），但 `:paused`/`:cancelled`/`:error` 结果
+必须透传。
 
 ```clojure
-;; 自定义 filter —— create-filter 接受 name 后跟 :chat / :tool 关键字参数
+;; 自定义 filter —— create-filter 接受 name 后跟钩子关键字参数，产出 Filter record
 (def my-filter
   (filters/create-filter :my-filter
     :tool (fn [req chain]                      ;; around-tool
@@ -419,7 +439,18 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
     :chat (fn [req chain] (chain (update req :messages conj sys-msg)))
     :tool (fn [req chain] (chain req))))
 
+;; :iteration —— 看得见本轮工具跑出了什么（:chat 只能看到 LLM 那一半）
+(def round-budget
+  (filters/create-filter :round-budget
+    :iteration (fn [req chain]                 ;; req: {:messages :context :index :remaining}
+                 (let [t0 (System/currentTimeMillis)
+                       r  (chain req)]         ;; r: {:status :continue :messages :context}
+                   (println "第" (:index req) "轮耗时"
+                            (- (System/currentTimeMillis) t0) "ms")
+                   r))))                       ;; :paused/:cancelled 必须原样透传
+
 ;; 也可直接写 map：{:name :x :chat (fn [req chain] ...) :tool (fn [req chain] ...)}
+;; —— build-kernel 会经 as-filter 归一化成 record，两种写法等价
 
 ;; 内置 filter
 filters/logging-filter        ;; 调用前后日志（:tool）
@@ -436,11 +467,16 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 ;; 注册：filters 向量顺序即洋葱层序（越靠前越外层）
 (kernel/build-kernel {:service svc :tools tools :filters [my-filter both]})
 ;; 链类型：:chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
+;;       | :iteration（run-tool-loop 单轮）| :turn（run-tool-loop 整体）
 ;; tool 链契约：请求 {:function :args :context(只读)}，响应 {:result (:writes)}——
 ;; filter 可改写 :args、短路、around；无需（也不应）回传 :context。
 ;; 注意：同一轮的多个 tool-call 并行执行，交互式审批请放 agent 的 :tool-gate（批前串行），
 ;; 勿放 tool filter（会在并行任务中并发弹提示）。
+;; 改已建好的 kernel 的 :filters 走 kernel/with-filters（链在装配期预编译，
+;; 直接 assoc 会让 hooks 与之脱钩——有兜底重编译，但白扔装配期成果）。
 ```
+
+四条链的完整契约、硬规则与装配期预编译见 [`docs/filter-chain-design.md`](docs/filter-chain-design.md)。
 
 ### ToolSearch —— 渐进式工具披露（对标 Spring AI `ToolSearchToolCallingAdvisor`）
 
@@ -450,7 +486,7 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 工具列表。
 
 ```clojure
-(require '[im.ttalk.agent.advisor.tool-search :as ts])
+(require '[im.ttalk.agent.filter.tool-search :as ts])
 
 (kernel/build-kernel
   (ts/with-tool-search                       ;; 工具 / filter / 状态槽三处一次装好
@@ -472,7 +508,7 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 每 turn 检索一次并拼进用户问题。**不含向量库**——检索经 `IRetriever` 注入：
 
 ```clojure
-(require '[im.ttalk.agent.advisor.rag :as rag])
+(require '[im.ttalk.agent.filter.rag :as rag])
 
 (def retriever
   (reify rag/IRetriever
@@ -488,11 +524,11 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 ### 结构化输出校验（对标 Spring AI `StructuredOutputValidationAdvisor`）
 
 `validation-turn-filter` 是机制（不合格 → 反馈重入 → 重试上限），
-`advisor/structured-output` 是判据（按 JSON Schema 校验 + 人话报错，
+`filter/structured-output` 是判据（按 JSON Schema 校验 + 人话报错，
 模型据此自我修正而非盲目重试）：
 
 ```clojure
-(require '[im.ttalk.agent.advisor.structured-output :as so]
+(require '[im.ttalk.agent.filter.structured-output :as so]
          '[cheshire.core :as json])
 
 (filters/validation-turn-filter

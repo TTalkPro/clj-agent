@@ -1112,3 +1112,179 @@
   答对只可能来自真看见）、URL 图片、embedding 语义排序（同义 > 无关，这条才是
   判据本身：随便返回一堆数能过形状断言，过不了语义排序）、批次切片。
   缺哪个 key 跳哪段。**在真机跑通前，这三块只能算「单测通过」，不算验收**。
+
+---
+
+## `:iteration` 钩子——补齐「内层 advisor」那一层（2026-08-25 立项）
+
+> **来源**：用户提出的四层中间件模型对照。**用户拍板实施**——我的评估是
+> 「先别加，等具体用例」（三个 HITL 语义坑，见 §3），用户看过评估后要求做。
+> 评估意见保留在此备查，实现按用户决定推进。
+
+### 1. 缺口是什么
+
+用户的四层模型 vs 现状：
+
+| 用户模型 | 频次 | 我们 | |
+|---|---|---|---|
+| 外层 advisor | 一次对话进出各一次 | `:turn` | ✅ 严格对上（还支持递归重入） |
+| 循环 advisor | 驱动 while | 硬编码 `loop/recur` + 参数化扩展点 | ⚠️ 形态不同，控制点齐全，刻意不改 |
+| **内层 advisor** | **每轮复入一次** | **无** | ❌ **本项要补的** |
+| provider 中间件 | 每次 LLM 调用 | `:chat` | ✅ 对上 |
+
+`:chat` 每轮触发一次，频次与「内层 advisor」相同，但**只包 LLM 调用那一半**：
+它的 resp 是 LLM 响应，看不到本轮工具跑出了什么。工具那一半被
+`ToolCallingManager` 与 `:tool` 链接管。两半之间没有把它们合起来的 around。
+
+因此做不了：单轮墙钟预算（LLM + 工具一起计时）、单轮重试/回滚（这一轮整个
+重来——`:turn` 能重来但是重来*全部*）、本轮收尾时基于工具结果决策。
+
+**现有绕法及其洞**：下一轮 `:chat` 的 delta 就是上一轮的工具结果消息
+（`react.clj` 的 `(recur messages ...)`），所以「回头看」能做。但**末轮没有
+下一次 `:chat`**——`return-direct` 收尾、或工具执行后循环结束时，那批工具结果
+永远不经过 `:chat` 链。想靠这条路做「每轮必然执行一次」的逻辑会在末轮静默漏掉。
+callbacks 覆盖了这些位置但只能观察，不能改写/短路/重试。
+
+### 2. 设计
+
+第五钩子 `:iteration`，形状与其余 around 一致 `(fn [req chain] -> resp)`，
+挂在 `run-tool-loop` 的**每轮迭代**外面（一轮 = LLM 调用 + 该轮工具批次）。
+
+IterationRequest（filter 可改写 `:messages` / `:context`）：
+
+```clojure
+{:messages  本轮 delta（首轮=turn 入口消息；后续轮=上一轮的工具结果消息）
+ :context   本轮起始 tool-context
+ :index     轮序号（0 起）
+ :remaining 进入本轮时的剩余迭代预算（只读快照）}
+```
+
+IterationResult：`:continue`（本轮跑完工具、还要接着转）或既有终态
+（`:completed` / `:paused` / `:cancelled`）逐字不变。
+
+```clojure
+{:status :continue :messages <下一轮 delta> :context <折叠后的 ctx>}
+```
+
+filter 能做：改写下一轮 delta、改写 context、`(chain req)` 重入重跑这一轮、
+不调 chain 短路成 `:completed`。
+
+**层次全景**（补齐后）：
+
+```
+:turn        每 turn 一次           包整个工具循环
+ └ :iteration 每轮一次              包 LLM 调用 + 本轮工具批次   ← 本项
+    ├ :chat    每轮一次             只包 LLM 调用
+    │  └ :token-xform  每 token
+    └ :tool    每 tool call 一次    单个工具执行
+```
+
+### 3. 三个坑与决定
+
+- [x] **坑 1：暂停语义**。~~立项时判断：暂停发生在一轮中途，调用栈直接返回
+      `:paused`，该轮 around 的后半段永不执行，故不能用来做「每轮必然收尾」的
+      记账。~~ **写测试时证伪**（`iteration-pause-semantics-test` 第一版按这个
+      假设断言 `exited = 0`，实测是 1）：**暂停是终端的返回值而非异常**，
+      `:paused` 沿链正常回流，around 后半段照常执行、filter 看得见暂停。
+      所以单轮计时/预算记账在 HITL 下**能**正常收尾——比立项时预计的好。
+      （`:turn` 一直也是这个行为；其硬规则说的是「看到 :paused 不得重入」，
+      不是「后半段不执行」，是我立项时误读了自己的文档。）
+      **仍然成立的那半条**：resume 执行的是「暂停那一轮的下半截」（批次已定、
+      无新 LLM 调用），**不经过 `:iteration` 链**；续跑的循环从下一个完整轮
+      重新进链，`:index` 从 0 重新计。
+      **决定**：沿用 `:turn` 的硬规则「`:paused` / `:cancelled` 结果必须透传、
+      不得重入」，两处语义（回流、resume 半批）都写进 docstring 并有测试钉住。
+
+- [x] **坑 2：预算记账**。filter 重入一轮 = 那一轮的 LLM 调用与工具批次**真的
+      又跑了一遍**，若 `remaining` 只按循环本体推进扣减，filter 无限重入就能
+      绕过 `max-iterations`。
+      **决定**：`remaining` 从 loop 参数改为 run-tool-loop 作用域内的 volatile，
+      **由 terminal 在实际执行工具批次后扣减**——谁真跑了谁记账。语义与现状
+      一致（`remaining` = 还能再执行几批工具，检查点仍在「LLM 要调工具但预算
+      为 0」处），但 filter 重入自然计入，`max-iterations` 仍是硬上限。
+      暂停时 `loop-state :remaining` 读 volatile 当前值。
+
+- [x] **坑 3：与 `:turn` 递归重入叠加**。`:turn` 重入 = 全新 `run-tool-loop` =
+      全新 `max-iterations` 预算（既有设计），故也是全新的 iteration 计数与
+      volatile。filter 自身的闭包状态跨 turn 共享——与 `:chat` / `:tool` 同，
+      无新问题。
+
+- [x] **records 累积**：与 remaining 同处理（volatile，如实累积）。filter 重入
+      导致同一轮工具执行两次时，两次都记进 `:tool-calls-made`——如实记录发生
+      过什么，而不是记录「逻辑上算几轮」。
+
+### 4. 实施清单
+
+- [x] `filter.clj`：`Filter` record 加 `iteration` 字段（顺序置于 `turn` 之后、
+      `token-xform` 之前，按层次从外到内）；`create-filter` 的 `->Filter` 位置
+      参数同步；`compile-hooks` / `CompiledHooks` 加第五条链。
+- [x] `react.clj`：`run-tool-loop` 的循环体抽成单轮 terminal，`remaining` /
+      `records` 改 volatile，外层 loop 按 `:continue` 推进；`:iteration` 链在
+      `run-tool-loop` 内组装（每次 turn 一条，terminal 现做）。
+- [x] 既有终态形状、`loop-state`、resume 三条路径（approval / env / turn 重入）
+      逐字不变——本项**只加一层包装，不改任何既有语义**。
+- [x] 测试（`client/iteration_filter_test.clj`，7 deftest / 26 assertions）：轮次触发计数（含末轮）、改写下一轮 delta、短路成 `:completed`、
+      重入重跑一轮且预算如实扣减、`max-iterations` 对重入仍是硬上限、
+      暂停时后半段不执行且 resume 后不重复进链、与 `:turn` 叠加。
+- [x] 文档：`docs/filter-chain-design.md`（§0 层次图 + §2.3 契约 + 硬规则）、
+      三个 README 的钩子表、CHANGELOG。`bb check` 绿。
+
+### 5. 验收
+
+- [x] `bb check` 全绿：**370 tests / 1591 assertions / 0 failures** + check-docs 绿。
+      既有 363 tests 一条断言没改——改造前后语义等价由它们背书。
+- [x] 无 `:iteration` filter 时链是 `identity`，终端即循环体本身
+      （`no-iteration-filter-unchanged-test`）。**措辞修正**：不是「逐字相同」——
+      外层 loop 多了一次 `{:status :continue …}` map 的构造与判读，这是把
+      `recur` 换成「终端返回、外层推进」的必要代价。语义等价，开销可忽略。
+
+---
+
+## `ToolMeta` 表——四个查询合成一张（2026-08-25）
+
+> 上一节收尾时记的「另起一轮」，用户当场要求做掉。
+
+- [x] `serial-tool?` / `return-direct-tool?` / `retry-policy` / `tool-timeout`
+      此前各自手抄同一段 `(if-let [v (get tool-vars k)] 读var元数据 查inline-meta)`
+      双分支——**四遍**。`:timeout` 正是在这种重复里漏掉 inline 分支、对内联工具
+      静默失效的（见 CHANGELOG 0.3.0 与 `build-func-def` docstring）。
+      现在 `build-kernel` 把两个来源汇成一张 `ToolMeta` 表，四个查询是它的薄封装
+      （签名不变），`:retry` 的默认值 merge 也从每次查询挪到装配期。
+      `inline-meta` 与上一轮刚加的 `func-defs` 一并被它取代。
+- [x] **顺带逮到一处不一致**：那四处双分支是 **var 优先**，而 `invoke-tool` 的
+      执行分派一直是 **内联优先**——同名时会「按 var 的超时/重试策略执行内联的
+      handler」。合表后统一为内联优先（与实际执行的那一个对齐）。同名工具本就是
+      配置错误，但框架得有确定且自洽的行为。
+      **随后用户拍板做掉了这条**（见下节）：不选优先级，装配期直接拒绝重名。
+- [x] **校验必须先于建表**：`normalize-retry` 会把非法声明 merge 成看似合法的
+      策略，先归一化就等于把错误藏起来。`validate-tool-*!` 保持在建表之前，
+      有测试钉住（`validation-precedes-normalization-test`）。
+- [x] 测试 `core/tool_meta_test.clj`（6 deftest / 34 assertions）：var 与内联
+      各四个声明、无声明的缺省、`:retry` 两种形态的装配期归一化、关键字/字符串
+      两种写法、未注册工具不抛、同名内联优先（查询与执行同一优先级）、
+      `:func-def` 段、校验先于归一化。
+- [x] `bb check` 全绿：**376 tests / 1628 assertions / 0 failures** + check-docs 绿。
+
+---
+
+## 同名工具装配期拒绝（2026-08-25，紧随上节）
+
+> 上节留的未清项，用户当场要求做掉。
+
+- [x] `validate-unique-tool-names!`：var 之间、内联之间、var 与内联之间重名一律
+      在 `build-kernel` 抛 `ex-info`（`:duplicates` 点名**全部**重复的键，不止
+      第一个）。**排在其它装配期校验之前**——重名时 `var-map` / `inline-handler-map`
+      已经被 `into` 把重复悄悄吃掉了，再校验别的就是在错误的地基上校验。
+- [x] **不选赢家的理由**：同名工具没有合理用例，只有坏结果——`:tools` schema
+      列表里两份定义都发给 LLM（模型看见两个同名工具），而 `tool-meta` /
+      `inline-handlers` 只留得下一个，「模型看到的」与「实际执行的」就此对不上，
+      且没有任何运行期症状可查。上一节把两套相反的优先级统一成「内联优先」，
+      那仍然是在给配置错误编造语义。要替换某个工具，调用方该在传 `:tools` 之前
+      处理自己的列表。
+- [x] 上一节的 `inline-wins-over-var-test` 随之改写为
+      `duplicate-tool-names-rejected-test`（6 组：var×内联 / 内联×内联 /
+      同一 var 两次 / `:duplicates` 列全 / 重名校验先于 timeout 校验 /
+      不同名照常共存）。
+- [x] 既有 376 tests 无一依赖重名注册（`management-tools` 的 5 个工具互不重名，
+      `delegate-tool` 的名字由调用方给）。
+- [x] `bb check` 全绿：**376 tests / 1630 assertions / 0 failures** + check-docs 绿。

@@ -3,9 +3,9 @@
 Agent 运行时模块（2026-07 自 clj-agent-core 下沉，命名空间不变）：
 
 - **client**：高层 Agent（`create-agent`/`chat`/`chat-stream`/`resume`），内置按 conversation-id 的记忆
-- **react**：ReAct 工具调用循环（invoke / resume / execute-batch / heal），工具批次 MapReduce 化（并行 + 屏障折叠）
+- **react**：ReAct 工具调用循环（invoke / resume / execute-batch / heal），工具批次 MapReduce 化（并行 + 屏障折叠）；`:turn` 与 `:iteration` 两条 filter 链在此组装
 - **Memory**：ChatMemory 协议 + in-memory / windowed / SQLite store
-- **advisor.memory**：按 conversation-id 串历史的记忆 advisor（挂进 kernel 洋葱链）
+- **filter.memory**：按 conversation-id 串历史的记忆 filter（挂进 kernel 洋葱链）
 - **pause**：HITL 暂停态持久化（PauseStore 协议 + in-memory / SQLite）——进程重启后同 conversation-id 重建 agent 即可 resume
 - **timeline**：对话时间线与多分支（BranchStore 协议；fork-as-new-conversation + 血缘记录）
 - **callbacks**：Agent 生命周期回调（on-llm-call / on-tool-call / on-interrupt / …）
@@ -33,9 +33,9 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 | 命名空间 | 职责 |
 |---------|------|
 | `im.ttalk.agent.client` | 高级 Agent API（create-agent / chat / chat-stream / resume） |
-| `im.ttalk.agent.react` | ReAct 工具调用循环 |
+| `im.ttalk.agent.react` | ReAct 工具调用循环；`:turn`（整个循环）与 `:iteration`（单轮 = LLM 调用 + 本轮工具批次）两条 filter 链的组装点 |
 | `im.ttalk.agent.memory` / `.memory.sqlite` | ChatMemory store（`ChatMemory` 协议） |
-| `im.ttalk.agent.advisor.memory` | 记忆 advisor（around-chat filter） |
+| `im.ttalk.agent.filter.memory` | 记忆 filter（around-chat filter） |
 | `im.ttalk.agent.pause` | HITL 暂停态持久化（`PauseStore` 协议；`in-memory-pause-store` / `sqlite-pause-store`） |
 | `im.ttalk.agent.timeline` | 时间线与多分支（`BranchStore` 协议；`fork!` / `rollback!` / `lineage` / `ancestry` / `prune!`） |
 | `im.ttalk.agent.callbacks` | 生命周期回调 |
@@ -106,8 +106,12 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 ## Agent 层契约（易踩）
 
 - **`create-agent` 不接受 `:filters`**——agent 层只暴露 `:callbacks`（传了会被
-  忽略并 warn）。要挂 kernel filter，请自建 kernel 后以 `:kernel` 传入；此时
-  memory store 会复用该 kernel 上 memory-filter 绑定的实例。
+  忽略并 warn）。要挂 kernel filter（含 `:turn` / `:iteration` 这两条本模块组装
+  的链），请自建 kernel 后以 `:kernel` 传入；此时 memory store 会复用该 kernel 上
+  memory-filter 绑定的实例。
+- **`callbacks` 与 filter 的分工**：`:on-llm-call` / `:on-tool-result` 之类是
+  **观察者**——能看，不能改写、短路或重试。要在每轮做那三件事，用 `:iteration`
+  filter（契约见 `docs/filter-chain-design.md` §2.3）。
 - **`on-tool-call` / `on-tool-result` 的 `tool-name` 是字符串**（不是 keyword）。
   拿 keyword 去 `=` 比较会永不相等——`on-tool-call` 的中断判断于是**静默失效**
   （曾真的踩过：`examples/minimax_agent_live_test.clj` 的中断场景因此假装通过）。

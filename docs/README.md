@@ -19,8 +19,8 @@
 
 | 文档 | 讲什么 |
 |---|---|
-| [`filter-chain-design.md`](filter-chain-design.md) | Filter/Advisor 体系**整合权威参考**：洋葱机制、`:tool`/`:chat`/`:turn` 三链的粒度与契约、递归重入、内置 filter、硬规则 |
-| [`token-stream-filter-design.md`](token-stream-filter-design.md) | 第四钩子 `:token-xform`（transducer 变换出站 token 流）的权威参考。三链见上一份，本文只讲 token 粒度 |
+| [`filter-chain-design.md`](filter-chain-design.md) | Filter 体系**整合权威参考**：洋葱机制、装配期预编译、`:tool`/`:chat`/`:iteration`/`:turn` 四链的粒度与契约、递归重入、内置 filter、硬规则 |
+| [`token-stream-filter-design.md`](token-stream-filter-design.md) | 第五钩子 `:token-xform`（transducer 变换出站 token 流）的权威参考。四条 around 链见上一份，本文只讲 token 粒度 |
 | [`hitl-timeline-design.md`](hitl-timeline-design.md) | HITL（暂停/resume/审批）与 Timeline 多分支的**整合权威参考** |
 | [`agent-loop-concurrency-design.md`](agent-loop-concurrency-design.md) | Agent 并发模型：§9 工具批 MapReduce（`:writes` + `:state-slots` 屏障折叠）、§11 暂停持久化、§12 timeline |
 | [`tool-calling-manager-design.md`](tool-calling-manager-design.md) | 工具**执行引擎**（线程模型 + 隔离边界 + 调度策略）；含 `deftool :backend` 的否决记录（§5） |
@@ -31,7 +31,7 @@
 | 文档 | 讲什么 |
 |---|---|
 | [`provider-variant-design.md`](provider-variant-design.md) | 一个标准 provider 如何承载多套厂商方言（MiniMax thinking）：**三类差异三种机制**，不动 `ILLMProvider` 而用**可选协议 + `satisfies?` 探测**。修了 config 白名单（provider 专属键递不到底）与 thinking 回传丢失（实测正确率 100%→82.5%）。**也是「预注册判据双向作数」的范例**：判据先否掉一次、卡住一次，最后才放行同一个结论 |
-| [`tool-timeout-design.md`](tool-timeout-design.md) | 工具超时：借鉴 beamai 但**不照搬三层**（JVM 无 `exit(Pid,kill)`，超时=放弃等待≠终止执行）。修了 `:timeout` 死选项与 `timeout-filter` 平台线程两个真 bug |
+| [`tool-timeout-design.md`](tool-timeout-design.md) | 工具超时：借鉴 beamai 但**不照搬三层**（JVM 无 `exit(Pid,kill)`，超时=放弃等待≠终止执行）。修了 `:timeout` 死选项与 `timeout-filter` 平台线程两个真 bug；§5.7 记工具声明查询合成 `ToolMeta` 一张表 + 同名工具装配期拒绝 |
 | [`streaming-async-design.md`](streaming-async-design.md) | 真增量 SSE 传输选型 + 异步框架整合。**也是 §2《框架无关》的出处** |
 | [`onion-filter.md`](onion-filter.md) | 洋葱式 filter + kernel 瘦身（loop/memory 下沉 client 模块） |
 | [`memory-filter-refactor.md`](memory-filter-refactor.md) | 消除显式 Context，转向 Memory Filter + 中立消息 |

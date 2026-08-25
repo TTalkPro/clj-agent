@@ -9,15 +9,15 @@
 `clj-agent-core` 是**协议（端口）层**与 **kernel 原语**：
 
 - **协议 / 契约**：`ILLMProvider`、中立消息、统一响应、通用 Service —— 任何实现协议的 jar 都能作为 provider 注入
-- **Kernel**：中央编排器，提供 `invoke-chat` / `invoke-tool` 原语（经 advisor 洋葱链）
+- **Kernel**：中央编排器，提供 `invoke-chat` / `invoke-tool` 原语（经 filter 洋葱链）
 - **deftool**：宏，同时定义函数和生成 LLM tool schema
-- **Advisor**：洋葱式 around 中间件执行器（对标 Spring AI 2.0 Advisor），四钩子
-  `:chat` / `:tool` / `:turn` / `:token-xform`；内含 ToolSearch、结构化输出判据、
+- **Filter**：洋葱式 around 中间件执行器（对标 Spring AI 2.0 Advisor），五钩子
+  `:chat` / `:tool` / `:iteration` / `:turn` / `:token-xform`；内含 ToolSearch、结构化输出判据、
   RAG 注入等对齐实现——**检索/向量库一律经协议注入，本模块外部依赖仍为零**
 - **Context**：请求级共享状态
 - **streaming**：流式取消令牌
 
-Agent 运行时（client / ReAct 循环 / ChatMemory / 记忆 advisor / callbacks / subagent）
+Agent 运行时（client / ReAct 循环 / ChatMemory / 记忆 filter / callbacks / subagent）
 已于 2026-07 下沉至 [`clj-agent-client`](../clj-agent-client/README.md)（命名空间不变）；
 core 对记忆与循环零感知。
 
@@ -51,23 +51,23 @@ core 对记忆与循环零感知。
 |---------|------|
 | `im.ttalk.agent.kernel` | Kernel 构建、调用、查询 API |
 | `im.ttalk.agent.tool` | `deftool` 宏定义 |
-| `im.ttalk.agent.advisor` | Advisor 洋葱链执行器与内置 filter |
+| `im.ttalk.agent.filter` | Filter 洋葱链执行器、装配期预编译与内置 filter |
 | `im.ttalk.agent.context` | Context 状态管理 |
 | `im.ttalk.agent.streaming` | 流式取消令牌 |
 
-**Advisor（Spring AI 2.0 对齐，各自独立命名空间）**
+**对齐 Spring AI 2.0 Advisor 的内置 filter（各自独立命名空间）**
 
 | 命名空间 | 对标 | 说明 |
 |---------|------|------|
-| `im.ttalk.agent.advisor.tool-search` | `ToolSearchToolCallingAdvisor` | 渐进式工具披露；`IToolIndex` 协议 + 零依赖内置索引 |
-| `im.ttalk.agent.advisor.structured-output` | `StructuredOutputValidationAdvisor` | JSON Schema 判据 + 人话报错（配 `validation-turn-filter` 用） |
-| `im.ttalk.agent.advisor.rag` | `QuestionAnswerAdvisor` | 检索增强注入；`IRetriever` 协议 |
+| `im.ttalk.agent.filter.tool-search` | `ToolSearchToolCallingAdvisor` | 渐进式工具披露；`IToolIndex` 协议 + 零依赖内置索引 |
+| `im.ttalk.agent.filter.structured-output` | `StructuredOutputValidationAdvisor` | JSON Schema 判据 + 人话报错（配 `validation-turn-filter` 用） |
+| `im.ttalk.agent.filter.rag` | `QuestionAnswerAdvisor` | 检索增强注入；`IRetriever` 协议 |
 
 > 三者**都不引任何检索/向量依赖**（core 外部依赖仍为零）——向量库/embedding
-> 经协议注入。`advisor.memory`（memory filter）在 `clj-agent-client`。
+> 经协议注入。`filter.memory`（memory filter）在 `clj-agent-client`。
 
 > 各厂商实现（`im.ttalk.agent.provider.*`）在 `clj-agent-provider`；Agent 运行时
-> （`client`/`react`/`memory`/`advisor.memory`/`callbacks`/`subagent`/`common`）在
+> （`client`/`react`/`memory`/`filter.memory`/`callbacks`/`subagent`/`common`）在
 > `clj-agent-client`——两者都依赖本模块。
 
 ## API 参考
@@ -85,9 +85,29 @@ core 对记忆与循环零感知。
 ;; 声明式构建：一次性传入 service / tools / filters / settings
 (kernel/build-kernel
   {:service  my-service
-   :tools    [#'get-weather #'get-time]   ;; tool var 向量
+   :tools    [#'get-weather #'get-time]   ;; tool var 向量，也可混入内联工具 map
    :filters  [memory-filter logging-filter]
    :settings {:max-tool-iterations 10}})  ;; 返回 Kernel record
+```
+
+**装配期把能算的都算掉**，运行期不再重建：
+
+| 预计算 | 内容 | 省掉的运行期开销 |
+|---|---|---|
+| `hooks` | 四条 around 链各预折一次 + `:token-xform` 预 `comp` | 每次 invoke 的 `keep` 全量扫描 + `reverse` + `reduce` |
+| `tool-meta` | 每个工具的 `:func-def` / `:serial` / `:retry` / `:timeout` / `:return-direct` | 四个查询各自的 var/inline 双分支 + ToolRequest `:function` 段的重建 |
+
+**装配期即拒绝**（宁可构建时炸，不要运行期静默走错）：
+
+```clojure
+;; 工具名重复（var 之间、内联之间、var 与内联之间都算）
+;; => ex-info "工具名重复: :foo……" {:duplicates [:foo]}
+;; 同名没有合理用例：两份 schema 都会发给 LLM，而 handler 只留得下一个,
+;; 「模型看到的」与「实际执行的」就此对不上，且无运行期症状可查。
+;; 要替换某个工具，请在传 :tools 之前处理自己的列表。
+
+;; 非法 :timeout（非正整数）/ 非法 :retry（非 nil/true/正整数 map）
+;; / :tool-manager 的非法 :timeout —— 同样装配期抛
 ```
 
 ### Kernel Invoke API
@@ -116,9 +136,19 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 (:service kernel)                     ;; LLM Service map
 (kernel/find-function kernel :name)   ;; => {:tool-var v} 或 nil
 (kernel/list-functions kernel)        ;; => [:fn1 :fn2 ...]
-(kernel/serial-tool? kernel :name)    ;; 是否声明 :serial
+
+;; 工具声明查询 —— 全部是 tool-meta 表的薄封装（var 与内联工具同表，
+;; 装配期汇好，运行期一次 map 查找 + 一次字段读）
+(kernel/tool-meta kernel :name)           ;; => ToolMeta record，未注册则 nil
+(kernel/serial-tool? kernel :name)        ;; 是否声明 :serial
 (kernel/return-direct-tool? kernel :name) ;; 是否声明 :return-direct
-(kernel/retry-policy kernel :name)    ;; :retry 声明（归一化）或 nil
+(kernel/retry-policy kernel :name)        ;; :retry 声明（归一化已在装配期做掉）或 nil
+(kernel/tool-timeout kernel :name)        ;; 工具自己声明的 :timeout，或 nil
+(kernel/effective-tool-timeout kernel :name) ;; 实际生效的超时（含引擎缺省）
+
+;; filter 链
+(kernel/filter-hooks kernel)          ;; 预编译的四条链（CompiledHooks）
+(kernel/with-filters kernel fs)       ;; 换 filter 链并重编 hooks —— **改 :filters 走这里**
 ```
 
 ### deftool 宏
@@ -146,18 +176,22 @@ kernel 只提供两个原语（均经 filter 洋葱链）；**工具调用循环
 ### Filter API（洋葱式 around，对标 Spring AI 2.0 Advisor）
 
 ```clojure
-(require '[im.ttalk.agent.advisor :as filters])
+(require '[im.ttalk.agent.filter :as filters])
 
 ;; 创建 Filter —— 根抽象 around(req, chain)：chain 是下游，
 ;; 由 filter 决定调不调（短路）、调几次（重试/递归重入）、前后干什么
 (filters/create-filter :my-filter
   :chat (fn [req chain] ... (chain req') ...)   ;; 单次 LLM 调用
   :tool (fn [req chain] ... (chain req') ...))  ;; 单次工具执行
-;; 也可直接写 map：{:name :x :chat (fn [req chain] ...)}
+;; 产出 Filter record；也可直接写 map：{:name :x :chat (fn [req chain] ...)}
+;; —— build-kernel 经 as-filter 归一化，两种写法等价。五个钩子之外的键
+;; （如 memory filter 的 :store）进 ext-map，照常可读。
 
-;; 四个钩子（可任意并存，各挂各的链）：
+;; 五个钩子（可任意并存，各挂各的链）：
 ;;   :chat        单次 LLM 调用（工具循环内每轮；memory 在此）
 ;;   :tool        单次工具执行（并行任务内各自生效）
+;;   :iteration   单轮迭代 = LLM 调用 + 本轮工具批次（与 :chat 同频，但看得见
+;;                本轮工具结果；可多次 (chain req) 重跑这一轮）
 ;;   :turn        整个工具循环（每 turn 一次；可多次 (chain req) 递归重入）
 ;;   :token-xform 流式出站 token 变换（transducer，非 around 形状）
 ;; 执行顺序 = :filters 向量的注册顺序（无 order/phase）；靠前者在最外层
@@ -174,10 +208,10 @@ filters/logging-filter          ;; :tool  调用前后日志
                                 ;; :turn  命中即不进循环直接拒答（≈ SafeGuardAdvisor）
 (filters/re-reading-filter)     ;; :turn  RE2 重读（≈ ReReadingAdvisor）
 
-;; 独立 advisor 命名空间
-im.ttalk.agent.advisor.tool-search        ;; 渐进式工具披露（≈ ToolSearchToolCallingAdvisor）
-im.ttalk.agent.advisor.structured-output  ;; JSON Schema 判据（≈ StructuredOutputValidationAdvisor）
-im.ttalk.agent.advisor.rag                ;; 检索增强注入（≈ QuestionAnswerAdvisor）
+;; 独立 filter 命名空间
+im.ttalk.agent.filter.tool-search        ;; 渐进式工具披露（≈ ToolSearchToolCallingAdvisor）
+im.ttalk.agent.filter.structured-output  ;; JSON Schema 判据（≈ StructuredOutputValidationAdvisor）
+im.ttalk.agent.filter.rag                ;; 检索增强注入（≈ QuestionAnswerAdvisor）
 
 ;; 挂载 + 执行
 (kernel/build-kernel {:service svc :filters [my-filter]}) ;; 经 :filters 挂载
@@ -186,12 +220,41 @@ im.ttalk.agent.advisor.rag                ;; 检索增强注入（≈ QuestionAn
 
 对齐记录见 `docs/advisor-alignment-design.md`，机制契约见 `docs/filter-chain-design.md`。
 
+`:iteration` 与 `:chat` 同频（每轮一次），差别是它看得见**本轮工具跑出了什么**：
+
+```clojure
+;; 单轮墙钟预算：LLM + 本轮工具一起计时（:chat 只能计到 LLM 那一半）
+(filters/create-filter :round-budget
+  :iteration (fn [req chain]
+               (let [t0 (System/currentTimeMillis)
+                     r  (chain req)]
+                 (println "第" (:index req) "轮耗时" (- (System/currentTimeMillis) t0) "ms")
+                 r)))
+
+;; 改写下一轮 delta / 重跑这一轮
+(filters/create-filter :round-guard
+  :iteration (fn [req chain]
+               (let [r (chain req)]
+                 (if (= :continue (:status r))
+                   (update r :messages conj (msg/system "本轮工具结果已复核"))
+                   r))))                        ;; :paused/:cancelled 必须原样透传
+;; IterationRequest  {:messages 本轮 delta :context :index 轮序 :remaining 剩余预算}
+;; IterationResult   {:status :continue :messages 下一轮 delta :context}
+;;                   或终态 :completed / :paused / :cancelled
+;; 重入即记账：重跑一轮 = LLM 与工具真的又跑一遍，remaining/records 如实计入，
+;; 故 max-iterations 对重入仍是硬上限。契约见 docs/filter-chain-design.md §2.3
+```
+
+**改 kernel 的 `:filters` 请走 `kernel/with-filters`**——链在装配期预编译好存在
+`hooks` 字段，直接 `(assoc kernel :filters …)` 会让两者脱钩（`filter-hooks` 检测到
+不同源会现场重编译兜底，语义始终正确，但每次 invoke 都重编）。
+
 ### ToolSearch API（渐进式工具披露，对标 `ToolSearchToolCallingAdvisor`）
 
 初始只暴露 `search_tools`，模型检索到的工具**下一轮**才进工具列表。
 
 ```clojure
-(require '[im.ttalk.agent.advisor.tool-search :as ts])
+(require '[im.ttalk.agent.filter.tool-search :as ts])
 
 ;; 装配：工具 / :chat filter / 状态槽三处一次装好
 (kernel/build-kernel
@@ -234,7 +297,7 @@ tool-context 里，故暂停/resume/持久化白拿正确。
 `validation-turn-filter` 是机制（不合格 → 反馈重入 → 重试上限），本 ns 是判据。
 
 ```clojure
-(require '[im.ttalk.agent.advisor.structured-output :as so])
+(require '[im.ttalk.agent.filter.structured-output :as so])
 
 ;; 纯函数：校验已解析的值，零依赖
 (so/validate-value {:actor "K"} schema)
@@ -257,7 +320,7 @@ keyword 与字符串键都认；只报第一个问题（一次给模型一个明
 ### RAG API（检索增强注入，对标 `QuestionAnswerAdvisor`）
 
 ```clojure
-(require '[im.ttalk.agent.advisor.rag :as rag])
+(require '[im.ttalk.agent.filter.rag :as rag])
 
 (kernel/build-kernel
   {:service svc
@@ -320,32 +383,40 @@ keyword 与字符串键都认；只报第一个问题（一次给模型一个明
 `clj-agent-core` is the **protocol (port) layer** plus **kernel primitives**:
 
 - **Protocol / contract**: `ILLMProvider`, neutral messages, unified response, generic Service — any jar implementing the protocol can be injected as a provider
-- **Kernel**: Central orchestrator exposing `invoke-chat` / `invoke-tool` primitives (through the advisor onion chain)
+- **Kernel**: Central orchestrator exposing `invoke-chat` / `invoke-tool` primitives (through the filter onion chain)
 - **deftool**: Macro that defines a function and generates its LLM tool schema
 - **Advisor**: Onion-style around middleware executor (mirrors Spring AI 2.0 Advisor),
-  four hooks — `:chat` / `:tool` / `:turn` / `:token-xform` — plus the aligned advisors
+  five hooks — `:chat` / `:tool` / `:iteration` / `:turn` / `:token-xform` — plus the aligned filters
   (ToolSearch, structured-output validation, RAG injection). **Retrieval and vector
   stores are injected through protocols, so this module still has zero external deps.**
 - **Context**: Per-request shared state
 
-The Agent runtime (client / ReAct loop / ChatMemory / memory advisor / callbacks /
+The Agent runtime (client / ReAct loop / ChatMemory / memory filter / callbacks /
 subagent) moved to [`clj-agent-client`](../clj-agent-client/README.md) in 2026-07
 (namespaces unchanged); core knows nothing about memory or loops.
 
 ### Key APIs
 
-- `kernel/build-kernel {:service :tools :filters :settings}` - Declarative kernel construction
-- `kernel/invoke-tool` / `kernel/invoke-chat` - Primitives through the :tool / :chat advisor chains
+- `kernel/build-kernel {:service :tools :filters :settings}` - Declarative kernel
+  construction. Assembly time pre-folds the four around chains (`hooks`) and collects
+  every tool declaration into one `tool-meta` table; duplicate tool names and illegal
+  `:timeout` / `:retry` values are rejected here rather than surfacing at runtime
+- `kernel/invoke-tool` / `kernel/invoke-chat` - Primitives through the :tool / :chat filter chains
   (the tool-calling loop lives in `clj-agent-client`, not the kernel)
+- `kernel/tool-meta` / `serial-tool?` / `return-direct-tool?` / `retry-policy` /
+  `effective-tool-timeout` - Tool declaration queries; all thin wrappers over the
+  one `tool-meta` table (vars and inline tools share it)
+- `kernel/filter-hooks` / `kernel/with-filters` - The pre-compiled chains, and the
+  supported way to swap a kernel's `:filters`
 - `deftool` - Define tool with auto-generated schema (`:sensitive` / `:serial` / `:retry` / `:return-direct` / `:timeout`)
 - `service/create-service` - Wrap any `ILLMProvider` into a kernel service (protocol-only)
 - `ctx/create`, `ctx/get-var`, `ctx/set-var`, `ctx/set-vars`, `ctx/with-conversation-id` - Context
-- `advisor.tool-search/with-tool-search` - Progressive tool disclosure; bring your own
+- `filter.tool-search/with-tool-search` - Progressive tool disclosure; bring your own
   index via the `IToolIndex` protocol (mirrors `ToolSearchToolCallingAdvisor`)
-- `advisor.structured-output/validate-fn` - JSON-Schema predicate for
+- `filter.structured-output/validate-fn` - JSON-Schema predicate for
   `validation-turn-filter`; you inject the JSON parser via `:parse-fn`
   (mirrors `StructuredOutputValidationAdvisor`)
-- `advisor.rag/qa-turn-filter` - Retrieval injection, once per turn; bring your own
+- `filter.rag/qa-turn-filter` - Retrieval injection, once per turn; bring your own
   retriever via the `IRetriever` protocol (mirrors `QuestionAnswerAdvisor`)
 
 Full alignment record: `docs/advisor-alignment-design.md`.

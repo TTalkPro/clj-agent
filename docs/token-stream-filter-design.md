@@ -1,11 +1,11 @@
 # Token 流变换链设计（`:token-xform`）
 
 > **状态：✅ 已实施（2026-07-14，全套 253 tests / 1039 assertions / 0）。**
-> 本文是 filter 体系第四钩子 `:token-xform` 的权威参考。三链体系
+> 本文是 filter 体系第五钩子 `:token-xform` 的权威参考。四链体系
 > （:tool/:chat/:turn）见 `filter-chain-design.md`；本文只讲 token 粒度。
 > 动机来自与 Spring AI `StreamAdvisor` 的对照（§5）。
 >
-> 实现：`core/advisor.clj`（契约 + 内置 filter）、`core/kernel.clj`
+> 实现：`core/filter.clj`（契约 + 内置 filter）、`core/kernel.clj`
 > （invoke-chat-stream terminal 组装点）。
 
 ---
@@ -32,7 +32,7 @@ advisor 用 Reactor 算子对流做 `map/filter/buffer`，逐 chunk 变换是原
 - **跨 chunk 状态**：敏感词被切在两片之间、按句重组，需要状态机；
 - **流末 flush**：流结束时缓冲区残留必须有机会冲出——需要 end-of-stream 信号。
 
-## 1. 结论：第四钩子 `:token-xform`，用 transducer 承接
+## 1. 结论：第五钩子 `:token-xform`，用 transducer 承接
 
 Clojure 的 transducer 恰好原生满足全部三条：
 
@@ -48,7 +48,7 @@ Clojure 的 transducer 恰好原生满足全部三条：
 
 ## 2. 契约
 
-filter map 增加可选键 `:token-xform`，与 `:tool/:chat/:turn` 并存：
+filter map 增加可选键 `:token-xform`，与 `:tool/:chat/:iteration/:turn` 并存：
 
 ```clojure
 {:name :redact
@@ -66,7 +66,7 @@ filter map 增加可选键 `:token-xform`，与 `:tool/:chat/:turn` 并存：
 - **状态作用域 = 单次 LLM 流**：`(xform rf)` 在 terminal 每次调用现场实例化，
   工具循环每轮 LLM 调用各自新状态。存在 filter map 里的 transducer 值本身
   无状态，可安全复用（这是 transducer 的标准性质）；
-- **同步路径（invoke-chat）完全忽略 `:token-xform`**；`:tool`/`:turn` 链与
+- **同步路径（invoke-chat）完全忽略 `:token-xform`**；`:tool`/`:iteration`/`:turn` 链与
   token 流无关。
 
 ## 3. 组装点与数据流

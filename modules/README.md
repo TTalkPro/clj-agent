@@ -33,7 +33,7 @@ clj-agent/
 **Kernel 原语**:
 - `im.ttalk.agent.kernel` - Kernel（build-kernel / invoke-chat / invoke-tool）
 - `im.ttalk.agent.tool` - deftool 宏（≈ `ToolCallback`）
-- `im.ttalk.agent.advisor` - Advisor 洋葱链执行器（≈ `CallAdvisorChain`）
+- `im.ttalk.agent.filter` - 洋葱链执行器与装配期预编译（≈ `CallAdvisorChain`）；四条 around 链 `:chat`/`:tool`/`:iteration`/`:turn` + `:token-xform`
 - `im.ttalk.agent.context` - 请求级上下文
 - `im.ttalk.agent.streaming` - 流式取消令牌
 
@@ -48,7 +48,7 @@ clj-agent/
 - `im.ttalk.agent.client` - 高级 Agent API（≈ `ChatClient`）
 - `im.ttalk.agent.react` - ReAct 工具调用循环
 - `im.ttalk.agent.memory` / `.memory.sqlite` - ChatMemory
-- `im.ttalk.agent.advisor.memory` - 记忆 advisor（≈ `MessageChatMemoryAdvisor`）
+- `im.ttalk.agent.filter.memory` - 记忆 filter（≈ `MessageChatMemoryAdvisor`）
 - `im.ttalk.agent.callbacks` - 生命周期回调
 - `im.ttalk.agent.subagent.*` - 子 agent 体系
 - `im.ttalk.agent.common` - 共享 Kernel 构建

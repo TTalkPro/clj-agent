@@ -12,6 +12,109 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### 💥 破坏性变更
 
+- **`im.ttalk.agent.advisor` → `im.ttalk.agent.filter`**（2026-08-25）。ns 名是
+  最后一处还叫 advisor 的地方——docstring、配置键 `:filters`、全部函数名
+  （`create-filter` / `safeguard-turn-filter` / …）早已统一在 filter 上，只有
+  require 路径还留着历史名，引用方普遍靠 `:as filters` / `:as flt` 别名绕开它。
+  改名涉及：
+
+      im.ttalk.agent.advisor                  → im.ttalk.agent.filter
+      im.ttalk.agent.advisor.rag              → im.ttalk.agent.filter.rag
+      im.ttalk.agent.advisor.structured-output→ im.ttalk.agent.filter.structured-output
+      im.ttalk.agent.advisor.tool-search      → im.ttalk.agent.filter.tool-search
+      im.ttalk.agent.advisor.memory (client)  → im.ttalk.agent.filter.memory
+
+  **迁移**：只改 `require` 里的 ns 名，别名与调用点全部不动。
+  「对标 Spring AI Advisor」的说法保留——那是外部专有名词，不是我们的类型名。
+- **filter 归一化为 `Filter` record**：`create-filter` 与全部内置 filter 现在
+  返回 record，`build-kernel` 对 `:filters` 逐个 `as-filter`。**用户侧写 map
+  字面量照常工作**（归一化在装配期做掉），四个钩子之外的键（memory filter 的
+  `:store`）进 ext-map 照常可读。受影响的只有拿 filter 与裸 map 做 `=` 比较的
+  代码。
+- **Kernel record 字段变动**：新增 `hooks` 与 `tool-meta`，移除 `inline-meta`
+  （被 `tool-meta` 取代）。位置参数构造 `->Kernel` 的 arity 变了；`build-kernel`
+  与 `map->Kernel` 不受影响。
+
+### ✨ 新增
+
+- **第四条 around 链 `:iteration`**（2026-08-25）——包**单轮迭代**（LLM 调用 +
+  该轮工具批次），在 `react/run-tool-loop` 每轮外面。补的是四层中间件模型里
+  「内层 advisor」那一层：`:chat` 与它同频（每轮一次），但只包 LLM 调用那一半，
+  看不到本轮工具跑出了什么——工具那一半被 `ToolCallingManager` 与 `:tool` 链
+  接管，两半之间此前没有把它们合起来的 around。
+
+  能做的事：单轮墙钟预算（LLM + 工具一起计时）、单轮重试/回滚（这一轮整个重来，
+  `:turn` 只能重来*全部*）、本轮收尾时基于工具结果决策。
+  **此前的绕法及其洞**：下一轮 `:chat` 的 delta 就是上一轮的工具结果消息，
+  所以「回头看」能做——但**末轮没有下一次 `:chat`**（return-direct 收尾、或
+  工具执行后循环结束），那批结果永远不经过 `:chat` 链，靠这条路做「每轮必然
+  一次」的逻辑会在末轮静默漏掉。
+
+      IterationRequest {:messages 本轮 delta :context :index 轮序 :remaining 剩余预算}
+      IterationResult  {:status :continue :messages 下一轮 delta :context}
+                       或既有终态 :completed / :paused / :cancelled
+
+  语义要点（全部有测试钉住）：
+  - **重入即记账**：重入一轮 = 那一轮的 LLM 调用与工具批次真的又跑了一遍，
+    `remaining` 与 `records` 都如实计入——记「发生过什么」，不记「逻辑上算几轮」。
+    `max-iterations` 因此对 filter 重入仍是硬上限。为此 `run-tool-loop` 的
+    `remaining` / `records` 从 loop 参数改为 volatile，扣减点在批次实际执行之后，
+    与改造前 `(recur … (dec remaining) …)` 的时机逐字相同。
+  - **暂停照常出链**：暂停是终端的返回值而非异常，`:paused` 沿链回流、around
+    后半段照常执行，filter 看得见暂停——单轮计时/记账在 HITL 下也能正常收尾。
+    （立项时的判断相反，写测试时被证伪，见 TASK.md 该节坑 1。）
+  - **但 resume 的那半批不算一轮**：resume 执行的是「暂停那一轮的下半截」
+    （批次已定、无新 LLM 调用），不经过本链；续跑的循环从下一个完整轮重新进链。
+  - **硬规则同 `:turn`**：`:paused` / `:cancelled` 结果必须透传、不得重入。
+  - 没挂 `:iteration` filter 时链是 `identity`，循环行为与加这层之前一致。
+
+  `Filter` record 随之增加 `iteration` 字段（位置构造 `->Filter` 的 arity 变了），
+  `CompiledHooks` 增加第四条链。契约见 `docs/filter-chain-design.md` §2.3。
+
+### ⚡ 性能 / 内部结构
+
+- **filter 链装配期预编译**：`compile-hooks` 在 `build-kernel` 时把
+  `:chat` / `:tool` / `:turn` 三条链各折成一个 `(fn [terminal] -> chain)`，
+  `:token-xform` 预 `comp` 成 `(fn [sink] -> rf)`，一并存进 Kernel 的 `hooks`
+  字段。此前**每次** `invoke-tool` / `invoke-chat` 都要 `keep` 全量 filters +
+  `reverse` + `reduce` 重建整条链——工具循环里每轮每个 tool call 一次。
+  空链走 `identity`：没挂 tool filter 的 kernel 一层包装都不加。
+  链的**结构**是装配期声明，只有 terminal 必须每次现做——拆开的正是这两者。
+- **改 `:filters` 请走 `kernel/with-filters`**（同步重编 hooks）。直接
+  `(assoc kernel :filters ...)` 仍然正确——`kernel/filter-hooks` 检测到 hooks
+  与 `:filters` 不同源会现场重编译兜底（宁可慢也不能静默用旧链，filter 悄悄
+  失效是这套机制最难查的一类 bug），但那是每次 invoke 都重编。
+  `client/with-memory-filter` 已改走 `with-filters`。
+- **工具声明合成一张 `ToolMeta` 表**：`build-kernel` 把 var 与内联工具的全部
+  装配期声明（`:func-def` / `:serial` / `:retry` / `:timeout` / `:return-direct`）
+  汇进 `tool-meta`，`serial-tool?` / `return-direct-tool?` / `retry-policy` /
+  `tool-timeout` 四个查询退化成一次 map 查找 + 一次字段读（签名不变）。
+  此前是**同一段 `(if-let [v (get tool-vars k)] 读var元数据 查inline-meta)`
+  双分支手抄四遍**——`:timeout` 正是在这种重复里漏掉 inline 分支、对内联工具
+  静默失效的。`:retry` 的默认值 merge 也从每次查询挪到装配期。
+  `inline-meta` 与 `func-defs` 两个字段被它取代。
+- **💥 同名工具在 `build-kernel` 装配期直接拒绝**（var 之间、内联之间、var 与
+  内联之间都算，抛 `ex-info` 带 `:duplicates`）。合表时暴露出此前有**两套相反的
+  优先级**：四个声明查询 var 优先、`invoke-tool` 的执行分派内联优先——同名时
+  「按 var 的超时/重试策略执行内联的 handler」。
+  **处置不是选一个赢家，而是不许重名**：同名工具没有合理用例，只有坏结果——
+  `:tools` schema 列表里两份定义都发给 LLM（模型看见两个同名工具），而
+  `tool-meta` / `inline-handlers` 只留得下一个，「模型看到的」与「实际执行的」
+  就此对不上，且没有任何运行期症状可查。「选一个赢家」是在给配置错误编造语义；
+  要替换某个工具，调用方该在传 `:tools` 之前处理自己的列表。
+  重名校验排在其它装配期校验之前——名字都不唯一时，别的校验是在错误的地基上做的。
+  **迁移**：此前靠重名做覆盖的（若有）会在 `build-kernel` 当场抛，按报错点名的
+  名字去重即可。
+- **ToolRequest 的 `:function` 段预建**：`build-func-def` 从每次 `invoke-tool`
+  挪到 `build-kernel`（存进 `ToolMeta` 的 `:func-def`）。`invoke-tool` 的
+  inline / var 双分支随之合并——此前两支除工具本体外逐字重复（ToolRequest 组装、
+  filter 链、返回值拆包），且现在一次查表就同时拿到 `:function` 与超时声明。
+- **请求对象刻意不做 record**：filter 会 `assoc`/`update`/`dissoc` ChatRequest
+  与 TurnRequest（`validation-turn-filter` 就 `dissoc` 掉 `:resume?`），而 record
+  一旦 `dissoc` 已声明字段就降级成普通 map。record 用在声明上（Filter /
+  CompiledHooks / Kernel），不用在流动的数据上。详见
+  `docs/filter-chain-design.md` §1.1。
+
 - **缺省的 ToolCallingManager 改为串行**（2026-07-16 用户拍板）。不指定
   `:tool-manager` 时，同一轮的多个 tool-call **按调用序依次执行**。
   **要并发须显式注入** `(virtual-thread-tool-calling-manager)`（或 thread-pool 版）。

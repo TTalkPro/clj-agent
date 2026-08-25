@@ -10,7 +10,7 @@ English | [中文](README.md)
 
 - **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, `build-kernel` declaratively registers and schedules them
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM); the tool-calling loop is provided by SimpleAgent
-- **Filter Middleware**: onion-style around chain (mirrors Spring AI 2.0 Advisor), four hooks — :chat / :tool / :turn / :token-xform — can short-circuit/retry/time/recurse
+- **Filter Middleware**: onion-style around chain (mirrors Spring AI 2.0 Advisor), five hooks — :chat / :tool / :iteration / :turn / :token-xform — can short-circuit/retry/time/recurse
 - **Spring AI 2.0 Advisor Alignment**: ToolSearch progressive tool disclosure (78% prompt-token savings measured), return-direct, pluggable loop-continuation predicate, SafeGuard, RAG injection, self-correcting structured output, RE2 — retrieval and vector stores are injected via protocols, so the framework adds zero deps (see `docs/advisor-alignment-design.md`)
 - **Service Abstraction**: LLM services via `{:chat-fn :stream-fn}` map, zero coupling
 - **Multi-Provider Support**: Anthropic, OpenAI, DeepSeek, Zhipu, Ollama, Gemini, Mistral, MiniMax, DashScope (Alibaba), and OpenAI-compatible protocols
@@ -166,7 +166,7 @@ Use the Kernel directly for maximum flexibility:
 
 ```clojure
 (require '[im.ttalk.agent.kernel :as kernel])
-(require '[im.ttalk.agent.advisor :as filters])
+(require '[im.ttalk.agent.filter :as filters])
 (require '[im.ttalk.agent.model.service :as service])
 
 ;; Create LLM Service (generic: wraps any provider via protocol only)
@@ -256,20 +256,33 @@ Core's generic `im.ttalk.agent.model.service/create-service` (protocol-only) bui
 
 The root abstraction is `around(req, chain)`: the filter holds the downstream `chain`
 and decides whether/when/how many times to call it (short-circuit / retry / recurse).
-A filter carries any of four hooks; execution order is simply the `:filters` vector
-order (no `:order`/`:phase`) — earlier = outer.
+A filter carries any of five hooks; execution order is simply the `:filters` vector
+order (no `:order`/`:phase`) — earlier = outer. The four around chains, outermost first:
+`:turn` > `:iteration` > `:chat` / `:tool`.
 
 ```clojure
-;; Custom filter — a plain map (or use create-filter)
+;; Custom filter — create-filter yields a Filter record; a plain map works too
+;; (build-kernel normalizes it via as-filter, so the two are equivalent)
 (filters/create-filter :my-filter
   :chat (fn [req chain] (chain (update req :messages conj sys-msg)))
   :tool (fn [req chain]
           (println "Before tool call:" (get-in req [:function :name]))
           (chain req)))               ;; not calling chain => short-circuit
 
-;; The four hooks:
+;; :iteration — sees what this round's tools returned (:chat only sees the LLM half)
+(filters/create-filter :round-budget
+  :iteration (fn [req chain]          ;; req: {:messages :context :index :remaining}
+               (let [t0 (System/currentTimeMillis)
+                     r  (chain req)]  ;; r: {:status :continue :messages :context}
+                 (println "round" (:index req) "took"
+                          (- (System/currentTimeMillis) t0) "ms")
+                 r)))                 ;; :paused / :cancelled must pass through untouched
+
+;; The five hooks:
 ;;   :chat        one LLM call    (each round inside the tool loop; memory lives here)
 ;;   :tool        one tool call   (applies inside each parallel task)
+;;   :iteration   one round = LLM call + that round's tool batch (same cadence as
+;;                :chat, but it sees what the tools returned; may re-enter to rerun the round)
 ;;   :turn        the whole tool loop (once per turn; may call (chain req) again to recurse)
 ;;   :token-xform outbound streaming token transform (a transducer, not an around fn)
 
@@ -286,15 +299,29 @@ filters/logging-filter          ;; :tool  pre/post-call logging
 (filters/re-reading-filter)     ;; :turn  RE2 re-reading (~ ReReadingAdvisor)
 
 ;; Standalone advisor namespaces (Spring AI 2.0 alignment)
-im.ttalk.agent.advisor.tool-search        ;; progressive tool disclosure (~ ToolSearchToolCallingAdvisor)
-im.ttalk.agent.advisor.structured-output  ;; JSON-Schema validator (~ StructuredOutputValidationAdvisor)
-im.ttalk.agent.advisor.rag                ;; retrieval injection (~ QuestionAnswerAdvisor)
+im.ttalk.agent.filter.tool-search        ;; progressive tool disclosure (~ ToolSearchToolCallingAdvisor)
+im.ttalk.agent.filter.structured-output  ;; JSON-Schema validator (~ StructuredOutputValidationAdvisor)
+im.ttalk.agent.filter.rag                ;; retrieval injection (~ QuestionAnswerAdvisor)
 ```
 
 Retrieval/vector stores are never bundled — they are injected through the
 `IToolIndex` / `IRetriever` protocols, so the framework keeps zero extra deps.
 Full alignment record: `docs/advisor-alignment-design.md`; mechanism contracts:
 `docs/filter-chain-design.md`.
+
+**Chains are compiled at assembly time.** `build-kernel` pre-folds all four around
+chains (stored in the kernel's `hooks` field) and pre-`comp`s the `:token-xform`
+chain, so a call only has to hand the terminal to a ready-made chain builder. To
+swap the filters of an existing kernel use `kernel/with-filters` — a bare
+`(assoc kernel :filters …)` leaves `hooks` out of sync (`filter-hooks` detects this
+and recompiles on the spot, so semantics always follow `:filters`, but you pay for
+it on every invoke).
+
+**Tool names must be unique** within a kernel (across vars, across inline tools, and
+between the two); duplicates make `build-kernel` throw with `{:duplicates [...]}`.
+Both schemas would otherwise reach the LLM while only one handler survives — what the
+model sees and what actually runs drift apart with no runtime symptom. Illegal
+`:timeout` / `:retry` declarations are rejected at assembly time too.
 
 ### ToolSearch — Progressive Tool Disclosure (mirrors Spring AI `ToolSearchToolCallingAdvisor`)
 
@@ -305,7 +332,7 @@ with "retrieve on demand": only a `search_tools` tool is exposed initially, and
 whatever the model retrieves enters the tool list on the **next** round.
 
 ```clojure
-(require '[im.ttalk.agent.advisor.tool-search :as ts])
+(require '[im.ttalk.agent.filter.tool-search :as ts])
 
 (kernel/build-kernel
   (ts/with-tool-search                       ;; wires tool + filter + state-slot in one shot
@@ -333,7 +360,7 @@ Retrieves once per turn and folds the result into the user's question.
 **No vector store is bundled** — retrieval is injected via `IRetriever`:
 
 ```clojure
-(require '[im.ttalk.agent.advisor.rag :as rag])
+(require '[im.ttalk.agent.filter.rag :as rag])
 
 (def retriever
   (reify rag/IRetriever
@@ -355,11 +382,11 @@ nothing to do with retrieval. Pass `:inject-when-empty? true` for Spring's seman
 ### Structured Output Validation (mirrors Spring AI `StructuredOutputValidationAdvisor`)
 
 `validation-turn-filter` is the **mechanism** (invalid → re-enter with feedback → retry
-cap); `advisor/structured-output` is the **predicate** (validate against a JSON Schema
+cap); `filter/structured-output` is the **predicate** (validate against a JSON Schema
 and phrase the failure so the model can self-correct, rather than blindly retry):
 
 ```clojure
-(require '[im.ttalk.agent.advisor.structured-output :as so]
+(require '[im.ttalk.agent.filter.structured-output :as so]
          '[cheshire.core :as json])
 
 (filters/validation-turn-filter
