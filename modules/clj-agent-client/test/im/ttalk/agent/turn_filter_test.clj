@@ -3,13 +3,13 @@
    turn 一次 vs chat 每轮 / 递归校验重试 / paused 透传 / 入口消息改写（RAG 形态）/
    重试耗尽 / validation-turn-filter。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.advisor :as flt]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.context :as context]
             [im.ttalk.agent.kernel :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.react :as agent-loop]
             [im.ttalk.agent.tool :refer [deftool]]))
 

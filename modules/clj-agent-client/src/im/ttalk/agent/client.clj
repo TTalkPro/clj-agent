@@ -42,7 +42,8 @@
      (when (= :paused (:status r))
        (resume a \"approved\")))"
   (:refer-clojure :exclude [reset!])
-  (:require [im.ttalk.agent.advisor.memory :as memory-filter]
+  (:require [im.ttalk.agent.filter.memory :as memory-filter]
+            [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.message :as msg]
@@ -77,12 +78,14 @@
   "返回把 memory-filter(store) 挂到（或替换进）kernel 的副本。
    store 为 nil 时只移除原有 memory-filter（无记忆 kernel）。
    memory-filter 始终放最前，确保其他 filter 看到完整历史。"
-  [kernel store]
-  (let [others (vec (remove #(= :memory (:name %)) (:filters kernel)))]
-    (assoc kernel :filters
-           (if store
-             (into [(memory-filter/memory-filter store)] others)
-             others))))
+  [k store]
+  (let [others (vec (remove #(= :memory (:name %)) (:filters k)))]
+    ;; 必须走 with-filters：直接 assoc :filters 会让 kernel 预编译的 hooks 与之
+    ;; 脱钩（filter-hooks 每次重编兜底，但那是白扔装配期成果）
+    (kernel/with-filters k
+      (if store
+        (into [(memory-filter/memory-filter store)] others)
+        others))))
 
 (defn create-agent
   "创建 Agent

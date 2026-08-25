@@ -3,7 +3,7 @@
 
    Agent 的持久状态 = 对话历史（ChatMemory 中的 append-only 日志），
    日志本身就是 timeline；分支 = fork-as-new-conversation——前缀复制到
-   新 conversation-id + 一条血缘记录。所有既有组件（memory advisor /
+   新 conversation-id + 一条血缘记录。所有既有组件（memory filter /
    PauseStore / react 循环）按 conversation-id 工作，换分支即换 conv-id
    建 agent，无组件感知\"树\"。
 

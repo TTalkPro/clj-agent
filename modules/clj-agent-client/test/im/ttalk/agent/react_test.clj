@@ -10,7 +10,7 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.memory :as memory]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.tool-calling-manager :as tcm]
             [im.ttalk.agent.react :as agent-loop]))
 

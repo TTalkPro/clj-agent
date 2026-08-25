@@ -9,7 +9,7 @@
             [im.ttalk.agent.kernel :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.pause :as pause]
             [im.ttalk.agent.react :as agent-loop]
             [im.ttalk.agent.test-support :as ts]
@@ -70,6 +70,12 @@
 ;;; ============================================================
 ;;; react 层：loop-state EDN 往返后 resume 照常工作
 ;;; ============================================================
+;;; 这两个 deftest 同时是 loop-state 形状的**护栏**：它在存档时不走
+;;; pause/strip-unserializable（那只剥 tool-context），所以里面一旦混进
+;;; record 或别的不可 EDN 往返的值，sqlite-pause-store 的 pause-load 就会抛，
+;;; 而 in-memory-pause-store 毫发无伤——「单进程测试全绿、重启后 resume 崩」。
+;;; 下面的 pr-str → read-string → resume 把那条路提前跑在单测里。
+;;; 若为了「顺手补全」把 loop-state 里的东西改成 record，先看这里为什么红。
 
 (defn- mock-svc [responses-fn] {:chat-fn (fn [_ _] (responses-fn))})
 

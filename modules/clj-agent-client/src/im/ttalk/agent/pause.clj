@@ -9,6 +9,15 @@
    callbacks 由代码侧在 resume 时重新提供）。tool-context 存档前剥离
    不可 EDN 序列化的 value（如 :kernel），恢复时由调用方按需注回。
 
+   **loop-state 与 pending-tool 不走剥离，必须自身可 EDN 往返**——尤其
+   **不能放 record**：record 打印成 `#ns.Foo{...}`，`edn/read-string` 没有对应
+   reader tag 会**抛**，于是 `sqlite-pause-store` 的 `pause-load` 整份快照读不
+   回来。而 `in-memory-pause-store` 直接存对象、毫发无伤——「单进程测试全绿，
+   重启后 resume 崩」正是这个组合的形态。护栏在 `pause-test` 的
+   `loop-state-edn-roundtrip-test`（审批与 :env-retry 两个 phase 各钉一次
+   `pr-str` → `read-string` → resume）。构造点见 react.clj 的 `env-pause`
+   与 run-tool-loop 的审批暂停分支。
+
    边界：只持久化「暂停点」这个一致快照；批次执行中途的进程崩溃恢复
    （durable execution）不在此范围。
 
@@ -56,7 +65,13 @@
 
 (defn snapshot
   "由 react 层的 :paused 结果构造可持久化快照（纯 EDN 数据）。
-   tool-context 中不可序列化的 key 被剥离并 warn（恢复时由代码侧注回）。"
+   tool-context 中不可序列化的 key 被剥离并 warn（恢复时由代码侧注回）。
+
+   **只有 tool-context 走剥离**：它装的是调用方的任意状态，混进 `:kernel` 这类
+   活对象是正常的。`loop-state` / `pending-tool` 则完全由 react 构造，形状是框架
+   自己的责任——剥离它们只会得到一个字段残缺、resume 到一半失败的快照，比读取
+   时当场抛更难查。所以这里不检查、不剥离，由 ns docstring 的约束 +
+   `loop-state-edn-roundtrip-test` 在**构造侧**保证。"
   [conv-id paused-result]
   (let [[ctx stripped] (strip-unserializable (:tool-context paused-result))]
     (when (seq stripped)

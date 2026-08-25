@@ -13,7 +13,6 @@
    在循环关键节点直接触发，不走 filter 链。gate 评估结果缓存，确保每个工具调用
    恰好触发一次观察回调（不重复）。"
   (:require [clojure.string]
-            [im.ttalk.agent.advisor :as filters]
             [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.context :as ctx]
@@ -465,7 +464,12 @@
 (defn- env-pause
   "构造环境类错误的暂停返回值（屏障处策略钩子，S2）。
    批次已执行完且结果/写折叠均已落定；暂停发生在「结果交给模型之前」。
-   resume 决策：:retry（环境已修复，重跑失败调用）| :proceed（错误结果交给模型）。"
+   resume 决策：:retry（环境已修复，重跑失败调用）| :proceed（错误结果交给模型）。
+
+   **`:loop-state` 只放可 EDN 往返的值——尤其不放 record**：PauseStore 存档时
+   它不走 `pause/strip-unserializable`（那只剥 tool-context），record 会让
+   `sqlite-pause-store` 的 `pause-load` 抛而 in-memory 毫发无伤，即「单进程测试
+   全绿、重启后 resume 崩」。护栏见 `pause-test/loop-state-edn-roundtrip-test`。"
   [env-errors batch-messages records remaining tctx]
   {:status :paused
    :pause-reason (str "环境类错误，需人工介入: "
@@ -491,6 +495,17 @@
    policy: {:on-env-error :pause|:proceed}——屏障处发现 :environment 类错误时
    暂停等人（HITL）还是照常把错误结果交给模型（缺省 :proceed）。
 
+   **每轮经 `:iteration` 链**（filter.clj 第四条 around 链）：一轮 = LLM 调用 +
+   该轮工具批次。终端返回 `{:status :continue :messages <下一轮 delta> :context c}`
+   或既有终态；外层 loop 只在 `:continue` 时推进。没挂 `:iteration` filter 时链是
+   `identity`——终端即循环体本身，与加这层之前逐句等价。
+
+   **remaining / records 是跨轮累积量，故存 volatile 而非 loop 参数**：
+   `:iteration` filter 重入一轮时，那一轮的 LLM 调用与工具批次**真的又跑了一遍**，
+   预算与记录都该如实计入（记「发生过什么」，不记「逻辑上算几轮」）——这也让
+   `max-iterations` 对 filter 重入仍是硬上限。扣减点在**批次实际执行之后**，
+   与改造前 `(recur … (dec remaining) …)` 的时机逐字相同。
+
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}
@@ -498,97 +513,115 @@
   [kernel delta remaining records tctx gate chat-opts callbacks policy]
   (let [token (:cancel-token chat-opts)
         meta (or (:metadata callbacks) {})
-        on-tool-result (:on-tool-result callbacks)]
-    (loop [delta delta, remaining remaining, records records, tctx tctx]
-      (if (streaming/cancelled? token)
-        {:status :cancelled :tool-context tctx :tool-calls-made records}
-        (do
-          ;; 每次 LLM 调用前触发（观察用，不影响流程）
-          (cb/invoke callbacks :on-llm-call delta meta)
-          (let [{:keys [response context]}
-                (if (:on-token chat-opts)
-                  (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
-                    (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx)))
-                  (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
-                tctx context
-                calls (response/response-tool-calls response)]
-            ;; 每次 LLM 返回后触发（观察用，不影响流程）
-            (cb/invoke callbacks :on-llm-result response meta)
-            (cond
-              (streaming/cancelled? token)
-              {:status :cancelled :response response
-               :tool-context tctx :tool-calls-made records}
+        on-tool-result (:on-tool-result callbacks)
+        remaining* (volatile! remaining)
+        records*   (volatile! records)
+        iteration-terminal
+        (fn [ireq]
+          (let [delta (:messages ireq)
+                tctx  (:context ireq)]
+            (if (streaming/cancelled? token)
+              {:status :cancelled :tool-context tctx :tool-calls-made @records*}
+              (do
+                ;; 每次 LLM 调用前触发（观察用，不影响流程）
+                (cb/invoke callbacks :on-llm-call delta meta)
+                (let [{:keys [response context]}
+                      (if (:on-token chat-opts)
+                        (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
+                          (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx)))
+                        (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
+                      tctx context
+                      calls (response/response-tool-calls response)]
+                  ;; 每次 LLM 返回后触发（观察用，不影响流程）
+                  (cb/invoke callbacks :on-llm-result response meta)
+                  (cond
+                    (streaming/cancelled? token)
+                    {:status :cancelled :response response
+                     :tool-context tctx :tool-calls-made @records*}
 
-              (empty? calls)
-              {:status :completed :response response
-               :tool-context tctx :tool-calls-made records}
+                    (empty? calls)
+                    {:status :completed :response response
+                     :tool-context tctx :tool-calls-made @records*}
 
-              ;; 续跑判据（对标 Spring AI ToolExecutionEligibilityChecker）：
-              ;; 判据说停 → 带 tool-call 的响应也按最终答案收尾（工具不执行）
-              (not ((or (get-in kernel [:settings :eligibility-fn]) (constantly true))
-                    response tctx))
-              {:status :completed :response response
-               :tool-context tctx :tool-calls-made records}
+                    ;; 续跑判据（对标 Spring AI ToolExecutionEligibilityChecker）：
+                    ;; 判据说停 → 带 tool-call 的响应也按最终答案收尾（工具不执行）
+                    (not ((or (get-in kernel [:settings :eligibility-fn]) (constantly true))
+                          response tctx))
+                    {:status :completed :response response
+                     :tool-context tctx :tool-calls-made @records*}
 
-              ;; gate 评估缓存：按 :id 存结果，确保每个 tool-call 恰好评估一次。
-              ;; 这修正了原来 some+filter 两阶段导致的双重触发问题，
-              ;; 使 on-tool-call 集成在 gate 中时能保证「每工具恰好一次」语义。
-              :else
-              (let [gate-cache (when gate
-                                 (into {} (mapv #(vector (:id %) (gate %)) calls)))
-                    cached-gate (when gate-cache
-                                  (fn [tc] (get gate-cache (:id tc) :proceed)))
-                    paused-call (when gate-cache
-                                  (first (filter #(= :pause (get gate-cache (:id %) :proceed)) calls)))]
-                (cond
-                  (some? paused-call)
-                  {:status :paused
-                   :pause-reason (str "需要审批: " (:name paused-call))
-                   :loop-state {:tool-calls calls :remaining (dec remaining)
-                                :records records
-                                :pending-id (:id paused-call)}   ;; resume payload 定位用
-                   :pending-tool {:name (:name paused-call)
-                                  :args (:args paused-call)
-                                  :tool-call paused-call}
-                   :tool-calls-made records
-                   :tool-context tctx}
+                    ;; gate 评估缓存：按 :id 存结果，确保每个 tool-call 恰好评估一次。
+                    ;; 这修正了原来 some+filter 两阶段导致的双重触发问题，
+                    ;; 使 on-tool-call 集成在 gate 中时能保证「每工具恰好一次」语义。
+                    :else
+                    (let [gate-cache (when gate
+                                       (into {} (mapv #(vector (:id %) (gate %)) calls)))
+                          cached-gate (when gate-cache
+                                        (fn [tc] (get gate-cache (:id tc) :proceed)))
+                          paused-call (when gate-cache
+                                        (first (filter #(= :pause (get gate-cache (:id %) :proceed)) calls)))]
+                      (cond
+                        (some? paused-call)
+                        {:status :paused
+                         :pause-reason (str "需要审批: " (:name paused-call))
+                         ;; 批次尚未执行，故这里**预扣**一次：resume 时执行它就是那一次消耗。
+                         ;; :loop-state 只放可 EDN 往返的值（不放 record）——理由同
+                         ;; env-pause 的 docstring；护栏是 loop-state-edn-roundtrip-test
+                         :loop-state {:tool-calls calls :remaining (dec @remaining*)
+                                      :records @records*
+                                      :pending-id (:id paused-call)}   ;; resume payload 定位用
+                         :pending-tool {:name (:name paused-call)
+                                        :args (:args paused-call)
+                                        :tool-call paused-call}
+                         :tool-calls-made @records*
+                         :tool-context tctx}
 
-                  (<= remaining 0)
-                  (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
-                                  {:reason :max-iterations-exceeded
-                                   :tool-call-count (count records)
-                                   :tool-calls-made records}))
+                        (<= @remaining* 0)
+                        (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
+                                        {:reason :max-iterations-exceeded
+                                         :tool-call-count (count @records*)
+                                         :tool-calls-made @records*}))
 
-                  :else
-                  (let [batch-opts {:gate cached-gate
-                                    :tool-context tctx
-                                    :records records
-                                    :on-tool-result on-tool-result}
-                        {:keys [messages records context errors]}
-                        (if-let [tm (:tool-manager kernel)]
-                          (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
-                          (execute-batch kernel calls cached-gate tctx records on-tool-result))
-                        env-errors (when (= :pause (:on-env-error policy))
-                                     (filterv #(= :environment (:class %)) errors))]
-                    (cond
-                      ;; 屏障处策略钩子：环境类失败 → 带一致快照暂停等人
-                      (seq env-errors)
-                      (env-pause env-errors messages records (dec remaining) context)
+                        :else
+                        (let [batch-opts {:gate cached-gate
+                                          :tool-context tctx
+                                          :records @records*
+                                          :on-tool-result on-tool-result}
+                              {:keys [messages records context errors]}
+                              (if-let [tm (:tool-manager kernel)]
+                                (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
+                                (execute-batch kernel calls cached-gate tctx @records* on-tool-result))
+                              ;; 批次真跑了 → 当场记账。filter 重入会再跑一次，也再记一次。
+                              _ (vreset! records* records)
+                              _ (vswap! remaining* dec)
+                              env-errors (when (= :pause (:on-env-error policy))
+                                           (filterv #(= :environment (:class %)) errors))]
+                          (cond
+                            ;; 屏障处策略钩子：环境类失败 → 带一致快照暂停等人
+                            (seq env-errors)
+                            (env-pause env-errors messages records @remaining* context)
 
-                      ;; return direct：结果即最终答案，不再回灌 LLM。
-                      ;; :direct-messages 交给调用方落库——正常路径下工具结果是靠
-                      ;; **下一次 invoke-chat** 经 memory filter 落库的，这里没有
-                      ;; 下一次，不补落库就会在历史里留下悬空 tool_use。
-                      (return-direct-batch? kernel calls)
-                      {:status :completed
-                       :response (direct-response messages)
-                       :tool-context context
-                       :tool-calls-made records
-                       :direct-messages messages
-                       :return-direct true}
+                            ;; return direct：结果即最终答案，不再回灌 LLM。
+                            ;; :direct-messages 交给调用方落库——正常路径下工具结果是靠
+                            ;; **下一次 invoke-chat** 经 memory filter 落库的，这里没有
+                            ;; 下一次，不补落库就会在历史里留下悬空 tool_use。
+                            (return-direct-batch? kernel calls)
+                            {:status :completed
+                             :response (direct-response messages)
+                             :tool-context context
+                             :tool-calls-made records
+                             :direct-messages messages
+                             :return-direct true}
 
-                      :else
-                      (recur messages (dec remaining) records context))))))))))))
+                            :else
+                            {:status :continue :messages messages :context context}))))))))))
+        iteration-chain ((:iteration (kernel/filter-hooks kernel)) iteration-terminal)]
+    (loop [delta delta, tctx tctx, index 0]
+      (let [result (iteration-chain {:messages delta :context tctx
+                                     :index index :remaining @remaining*})]
+        (if (= :continue (:status result))
+          (recur (:messages result) (:context result) (inc index))
+          result)))))
 
 (defn- kernel-memory-store
   "取 kernel 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
@@ -659,7 +692,7 @@
                                                callbacks
                                                {:on-env-error (or (:on-env-error opts) :proceed)})
                                 (persist-direct-messages! kernel conv-id)))
-            turn-chain (filters/build-chain (keep :turn (:filters kernel)) turn-terminal)
+            turn-chain ((:turn (kernel/filter-hooks kernel)) turn-terminal)
             result (turn-chain {:messages messages :context init-ctx})]
         (when (and ephemeral? store (= :completed (:status result)))
           (memory/mem-clear store conv-id))
@@ -760,7 +793,7 @@
                                         {:on-env-error (or (:on-env-error opts) :proceed)}))
                        ;; 延续与重入都可能撞上 return-direct 收尾
                        (persist-direct-messages! kernel (ctx/conversation-id tctx))))
-        turn-chain (filters/build-chain (keep :turn (:filters kernel)) terminal)]
+        turn-chain ((:turn (kernel/filter-hooks kernel)) terminal)]
     (turn-chain {:resume? true :messages nil :context tctx})))
 
 (defn- resume-approval

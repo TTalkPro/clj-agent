@@ -4,8 +4,8 @@
             [im.ttalk.agent.memory :as mem]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as resp]
-            [im.ttalk.agent.advisor.memory :as mf]
-            [im.ttalk.agent.advisor :as flt]))
+            [im.ttalk.agent.filter.memory :as mf]
+            [im.ttalk.agent.filter :as flt]))
 
 ;;; ============================================================
 ;;; P2: store

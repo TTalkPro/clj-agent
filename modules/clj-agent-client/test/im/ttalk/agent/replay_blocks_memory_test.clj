@@ -7,7 +7,7 @@
    还钉一条容易在重构里丢掉的性质：**载荷要能跨轮活下来**，即经 memory store
    存取往返后仍在。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.advisor.memory :as am]
+            [im.ttalk.agent.filter.memory :as am]
             [im.ttalk.agent.memory :as mem]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as resp]))

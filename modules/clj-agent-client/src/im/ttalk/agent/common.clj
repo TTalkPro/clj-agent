@@ -6,7 +6,7 @@
     Agent 自身只持 conversation-id + 轻量 state。"
   (:require [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.service :as service]
-            [im.ttalk.agent.advisor.memory :as memory-filter]))
+            [im.ttalk.agent.filter.memory :as memory-filter]))
 
 (set! *warn-on-reflection* true)
 

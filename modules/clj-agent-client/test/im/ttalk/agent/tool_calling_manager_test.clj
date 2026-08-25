@@ -1,7 +1,7 @@
 (ns im.ttalk.agent.tool-calling-manager-test
   "ToolCallingManager 协议与 Kernel 注入边界测试。"
   (:require [clojure.test :refer [deftest is testing]]
-            [im.ttalk.agent.advisor :as filters]
+            [im.ttalk.agent.filter :as filters]
             [im.ttalk.agent.context :as context]
              [im.ttalk.agent.kernel :as kernel]
              [im.ttalk.agent.model.response :as response]

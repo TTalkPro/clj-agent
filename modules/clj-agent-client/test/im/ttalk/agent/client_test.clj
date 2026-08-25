@@ -8,7 +8,7 @@
             [im.ttalk.agent.test-support :as ts]
             [im.ttalk.agent.kernel :as kernel]
             [im.ttalk.agent.model.service :as service]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.memory.sqlite :as sqlite]
             [im.ttalk.agent.model.content :as content]

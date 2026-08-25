@@ -9,7 +9,7 @@
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.advisor.memory :as ma]
+            [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.react :as react]))
 
 (deftool handoff
