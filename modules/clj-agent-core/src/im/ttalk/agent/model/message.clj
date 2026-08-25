@@ -29,7 +29,7 @@
    **中立层只搬运、不解释**；区别是 wire 层**会**消费它，但只由认得 :format 的
    那一方消费，认不出就当它不存在（降级路径见 wire/anthropic）。
 
-   来源：service 归一化时经可选协议 model/IReplayableResponse 抽取，
+   来源：chat-model 归一化时经可选协议 model/IReplayableResponse 抽取，
    由 filter/memory 的 response->neutral 挂上来。
    动机与实测代价见 docs/provider-variant-design.md（不回传：正确率 100%→82.5%）。")
 

@@ -64,7 +64,7 @@
   (testing "未声明 → nil（invoke-tool 据此回落引擎缺省或不超时）"
     (is (nil? (tool/timeout-spec #'round-num)))
     (is (nil? (tool/timeout-spec #'greet-ctx))))
-  (testing "裸 tool/invoke（不经 kernel）不超时——超时由 kernel/invoke-tool 强制，
+  (testing "裸 tool/invoke（不经 chat-client）不超时——超时由 chat-client/invoke-tool 强制，
             tool/invoke 是更内层的原语，不消费 :timeout 声明（语义钉子）"
     (let [r (tool/invoke #'declares-timeout {:x "ok"})]
       (is (:success r))

@@ -47,7 +47,7 @@ beamai 的三层超时**全部建立在 `exit(Pid, kill)` 这一个原语上**�
 
 `advisor.clj:243` `timeout-filter` —— future + `deref` 带超时 + `future-cancel`，
 超时归类 `:transient`、不带 `:writes`（事务性）。**这个 filter 是对的**：位置对
-（`:tool` 洋葱链包住每次工具调用）、形状对（`{:result :error}`，经 `kernel.clj:226`
+（`:tool` 洋葱链包住每次工具调用）、形状对（`{:result :error}`，经 `chat_client.clj:226`
 映射为 `:value`）、分类对（transient → 可被 `:retry` 重试）。
 
 它是**唯一**的时间防线，而且是 opt-in 的：不挂就没有。
@@ -95,7 +95,7 @@ var 元数据实际产出（注意 `:tool/timeout` **不在其中**）：
 
 - **错误分类体系**：`:transient | :semantic | :environment`，与 beamai 的
   `beamai_tool_error:classify/1` 同构。超时归 `:transient` 已是 `timeout-filter` 的现状行为。
-- **重试**：`react.clj:75` `invoke-with-retry` 包在 `kernel/invoke-tool` **外面**，
+- **重试**：`react.clj:75` `invoke-with-retry` 包在 `chat-client/invoke-tool` **外面**，
   故 filter 链（含超时）在重试循环**内部**——超时 → transient → 重试。
   与 beamai 的 `invoke_with_retry/6` 语义一致。**这条链路已经是通的**，
   只要超时能真的发生。
@@ -256,7 +256,7 @@ after Timeout ->
 >    故在此配置——而非散落在 app env 或逐个工具声明」*。**本文原方案把它放在 filter
 >    里，就是那句话说的「散落」**。
 >
-> 两者都由 `kernel/invoke-tool` 强制（§3.5 修订块），**开箱即生效**。
+> 两者都由 `chat-client/invoke-tool` 强制（§3.5 修订块），**开箱即生效**。
 >
 > **`timeout-filter` 已删除（同日，用户拍板）**。它曾短暂退为「第三层兜底」，但
 > 按 §1 四问过秤：它的两个职责（强制力、整体缺省）已分别被 `invoke-tool` 与引擎
@@ -290,7 +290,7 @@ after Timeout ->
 | c | 保持现状 | ❌ **不可接受**。沉默 no-op |
 
 选 a。`:retry` 就是现成的先例：`tool.clj:351` `retry-spec` 读元数据，
-`kernel.clj:163` `retry-policy` 归一化，`react.clj:75` 消费。`:timeout` 照抄这条路径即可。
+`chat_client.clj:163` `retry-policy` 归一化，`react.clj:75` 消费。`:timeout` 照抄这条路径即可。
 
 ### 3.3 P1 —— `timeout-filter` 读 `:tool/timeout` + 跑在虚拟线程上
 
@@ -306,9 +306,9 @@ after Timeout ->
    工具最清楚自己要跑多久。filter 的 `timeout-ms` 降级为**缺省值**，
    对应 beamai 的 manager 级 `tool_timeout`。
 
-   `req` 里已有 `:function` → `{:name :schema :sensitive}`（`kernel.clj:176`
+   `req` 里已有 `:function` → `{:name :schema :sensitive}`（`chat_client.clj:176`
    `build-func-def`）。**注意**：`build-func-def` 目前不透传 timeout，需一并补上
-   （或由 filter 自己查 var）。inline tools（`kernel.clj:210`）无 var、无元数据，
+   （或由 filter 自己查 var）。inline tools（`chat_client.clj:210`）无 var、无元数据，
    只能吃 filter 缺省值——这是既有的 inline 盲点，与 `:sensitive` 现状一致，不新增。
 
 2. **不要用 `clojure.core/future`**（§4 的 bug）：改用虚拟线程，
@@ -339,7 +339,7 @@ worker 崩溃或超时 → 整批合成 error + context 回滚。
    > `Error` 全部逃逸，一个工具的深递归 `StackOverflowError` 会打死整个 agent 循环。
    > 这是**我在论证「不需要层 3」时对自家防线的过度自信**：结论（不移植层 3）不变
    > ——层 3 防的是 BEAM 的 link 传播，我们确实没有——但支撑它的「边界已完备」这条
-   > 事实当时是错的。**已修**：四个 catch 点（`tool/invoke`、kernel 的 inline/var
+   > 事实当时是错的。**已修**：四个 catch 点（`tool/invoke`、chat-client 的 inline/var
    > terminal、`invoke-one`）改收 `Throwable`，非致命 Error 收敛为该工具的错误结果，
    > 致命的（OOM 等，判据见 `model.error/fatal-throwable?`）仍原样上抛。
    > 现在这句话才成立。
@@ -397,11 +397,11 @@ worker 崩溃或超时 → 整批合成 error + context 回滚。
 >
 > Review 逮到的真问题（#4）：把强制力放在 filter 里，使 `:timeout` 成了**唯一**
 > 需要用户手动挂 filter 才生效的 `deftool` 选项——`:serial` / `:retry` /
-> `:return-direct` 都由 kernel/react 直接消费、开箱生效。用户写下 `{:timeout 5000}`
+> `:return-direct` 都由 chat-client/react 直接消费、开箱生效。用户写下 `{:timeout 5000}`
 > 不挂 filter → 编译通过、无警告、零效果，**与 §1.2 那个死选项 bug 的可观察症状
 > 逐字相同**。我们只是把「白名单收下但没人读」换成了「元数据发出但没人读」。
 >
-> **现在的落点：`kernel/invoke-tool`，且只在声明时起线程。**
+> **现在的落点：`chat-client/invoke-tool`，且只在声明时起线程。**
 > （⚠️ 本块写作时包裹的是整条 filter 链——**又被 P9 review 修正为只包 terminal**，
 > 见 §5.6。「落在 invoke-tool、声明才起线程」两点仍准确。）
 > - 与方案 C 的差别是**条件化**：未声明 → 零开销，不起线程，与从前逐字相同。
@@ -411,7 +411,7 @@ worker 崩溃或超时 → 整批合成 error + context 回滚。
 >   **单次工具调用**的时间上限，那正是 `invoke-tool` 自己的事。放对层的收益是
 >   **不需要任何协调**：谁调 invoke-tool 谁就拿到超时（react / 手搓循环 /
 >   `run-tools` / 直调皆然）。
->   （实施中一度放进 react，随即发现 `kernel/invoke-tool` 直调就没有超时了——
+>   （实施中一度放进 react，随即发现 `chat-client/invoke-tool` 直调就没有超时了——
 >   filter 已让位、react 又不在场。**放错层的代价就是要发明协调**。）
 > - `timeout-filter` 因此**退为纯缺省**：只管**没声明**的工具，见到声明即让位。
 >   优先级「声明 > filter 缺省」由让位实现，而非比大小——同一个 deadline 不套两层线程。
@@ -458,7 +458,7 @@ worker 崩溃或超时 → 整批合成 error + context 回滚。
 |---|---|---|---|
 | ✅ P0-1 | `deftool` 发出 `:tool/timeout` 元数据（四个 `defn` 分支各一处） | `tool.clj` | 修死选项 |
 | ✅ P0-2 | 加 `timeout-spec` 读取函数（对称 `retry-spec`） | `tool.clj` | 修死选项 |
-| ✅ P0-3 | `build-func-def` 透传 `:timeout` 供 filter 读取 | `kernel.clj` | 修死选项 |
+| ✅ P0-3 | `build-func-def` 透传 `:timeout` 供 filter 读取 | `chat_client.clj` | 修死选项 |
 | ✅ P1-1 | `timeout-filter` 按 `:function :timeout` > `timeout-ms` 解析 | `advisor.clj` | 移植 beamai 优先级链 |
 | ✅ P1-2 | `timeout-filter` 改用 `Thread/startVirtualThread`，弃 `clojure.core/future`；下游异常原样重抛（不再包 ExecutionException） | `advisor.clj` | 修 §4 的 bug |
 | ✅ P1-3 | docstring 如实写明「放弃等待 ≠ 终止执行」+ 副作用窗口 + `:retry` 幂等前提（deftool 元数据说明、`timeout-spec`、`timeout-filter` 三处） | `advisor.clj`、`tool.clj` | **§2.3，不可省** |
@@ -532,7 +532,7 @@ JVM 不需要、（kill）JVM 给不了。两个体系各自收敛到同一形�
 
 ### 超时包裹点：从「包整条 filter 链」改为「只包 terminal（工具本体）」
 
-§3.5 修订块曾写「强制力落在 `kernel/invoke-tool`（`run-chain`）」——包裹的是
+§3.5 修订块曾写「强制力落在 `chat-client/invoke-tool`（`run-chain`）」——包裹的是
 **整条 tool filter 链**。这是错的层：approval-filter 的人工审批等待被算进工具的
 超时预算（操作员敲 y 慢一点，工具从未执行就报超时；`:retry` 还会对人重复弹框）；
 且超时结果在链外合成，任何日志/指标 filter 永远观察不到超时。
@@ -541,15 +541,15 @@ JVM 不需要、（kill）JVM 给不了。两个体系各自收敛到同一形�
 审批等待不吃预算；超时结果在链内产生，外层 filter 照常可见。beamai 也只计时
 handler，本该一步到位。
 
-### 引擎缺省的读取：从「kernel 字段回读」改为「动态 var 随执行传递」
+### 引擎缺省的读取：从「chat-client 字段回读」改为「动态 var 随执行传递」
 
-`effective-tool-timeout` 曾读 `(:tool-manager kernel)`——**反向指针**。后果：
+`effective-tool-timeout` 曾读 `(:tool-manager chat-client)`——**反向指针**。后果：
 instrumented wrapper（reify 委派）的内层引擎 `:timeout` 静默失效；独立 manager
 直接跑批次时自己的 `:timeout` 被忽略。
 
 **现状**：三个内置引擎在 `execute-tool-calls` 入口 `binding`
 `tcm/*active-manager-timeout*` 为自身值（经 `bound-fn*` 传导到 executor 路径，
-在 delegate 边界自然断开——与设计原则 §3 两个方向都吻合）；kernel 字段仅作
+在 delegate 边界自然断开——与设计原则 §3 两个方向都吻合）；chat-client 字段仅作
 直调 invoke-tool 时的回落。**是的，这是一个动态变量机器**——与被 §1 毙掉的
 `*active-pools*` 同类，但这次立得住：它服务的是验证过的真实 bug，不是假想需求。
 
@@ -575,7 +575,7 @@ executor 路径 `.get` 拆 `ExecutionException` 取 cause，OOM 恢复原样逃�
 但当时只补上了漏掉的那一支，没动**为什么会漏**——四个查询函数各自手抄同一段
 
 ```clojure
-(if-let [v (get (:tool-vars kernel) fn-key)]
+(if-let [v (get (:tool-vars chat-client) fn-key)]
   (读 var 的 :tool/* 元数据)
   (查 inline-meta))
 ```
@@ -592,7 +592,7 @@ executor 路径 `.get` 拆 `ExecutionException` 取 cause，OOM 恢复原样逃�
 执行内联的 handler」。这是本文 §1.2 那个 bug 的同族：不是某一支写错了，是同一件
 事有两个独立的真相源。
 
-处置**不是选一个赢家，而是不许重名**：`build-kernel` 装配期直接拒绝同名工具
+处置**不是选一个赢家，而是不许重名**：`build-chat-client` 装配期直接拒绝同名工具
 （var 之间、内联之间、两者之间都算，抛 `{:duplicates [...]}`）。理由与本文
 §3.1 的取舍同源——同名工具没有合理用例，只有坏结果：`:tools` schema 列表里两份
 定义都会发给 LLM（模型看见两个同名工具），而 `tool-meta` / `inline-handlers`

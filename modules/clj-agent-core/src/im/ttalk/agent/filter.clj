@@ -52,7 +52,7 @@
     设计见 docs/token-stream-filter-design.md。
 
     Filter 定义（`Filter` record，五个钩子字段固定；写普通 map 也行，
-    `build-kernel` 会经 `as-filter` 归一化）:
+    `build-chat-client` 会经 `as-filter` 归一化）:
       {:name :my-filter
        :chat (fn [req chain] ...)     ;; 可选，挂到 chat 链
        :tool (fn [req chain] ...)     ;; 可选，挂到 tool 链
@@ -63,7 +63,7 @@
     五个钩子之外的键（如 memory filter 的 `:store`）照常可读——record 的
     ext-map 收着，`(:store f)` 不变。
 
-    **装配期预编译**：`compile-hooks` 在 `build-kernel` 时把五条链各折一次，
+    **装配期预编译**：`compile-hooks` 在 `build-chat-client` 时把五条链各折一次，
     产出 `CompiledHooks`；运行期只做 `(chain-builder terminal)`。此前每次
     `invoke-tool` / `invoke-chat` 都要 `keep` 全量 filters + `reverse` + `reduce`
     重建一遍链——工具循环里每轮每个 tool call 一次。
@@ -80,14 +80,113 @@
                        resp)))}))
 
     使用示例:
-    (build-kernel {:service svc
-                   :tools [#'t1 #'t2]
-                   :filters [memory-filter retry-filter logging-filter]})"
+    (build-chat-client {:chat-model cm
+                        :tools [#'t1 #'t2]
+                        :filters [memory-filter retry-filter logging-filter]})"
   (:require [clojure.string]
             [im.ttalk.agent.model.message :as msg]
+            [im.ttalk.agent.model.request :as req]
             [im.ttalk.agent.model.response :as resp]))
 
 (set! *warn-on-reflection* true)
+
+;;; ============================================================
+;;; :chat 链的请求 / 响应类型
+;;; ============================================================
+
+;; 对标 Spring AI 的 ChatClientRequest / ChatClientResponse：**链上流动的东西**
+;; 与**发给模型的东西**是两个类型，中间隔着 `:context`。
+;;
+;;     ChatClientRequest{:request ChatRequest, :context Context, :on-token f}
+;;                        └────────┬────────┘
+;;                        只有这一段下发给 provider
+;;
+;; 为什么不合成一个：`:context` 是请求级共享状态（只读快照，工具写意图经
+;; :writes 折叠），`:on-token` 是流式 sink——两者都**不能**出现在 wire 上。
+;; 合成一个类型就等于把「不该发出去的」和「要发出去的」放进同一个 map，
+;; 再靠一张白名单去筛——那张白名单正是 provider-variant-design.md §1.2
+;; 「递不到底」那个 bug 的成因。分成两层，筛子就不需要了。
+(defrecord ChatClientRequest [request context on-token])
+
+(defrecord ChatClientResponse [response context])
+
+(defn chat-client-request?
+  "是否已是 `ChatClientRequest` record。"
+  [x]
+  (instance? ChatClientRequest x))
+
+(defn as-chat-client-request
+  "归一化成 `ChatClientRequest`（已是 record 则原样返回）。
+
+   map 写法里 `:context` / `:on-token` 之外的键**全部**归到内层 ChatRequest
+   （`req/as-chat-request` 的扁平写法），故历史的扁平形状
+   `{:messages … :tools … :tool-choice … :system-prompt … :context …}`
+   照旧能构造出正确的两层结构。
+
+   ⚠️ 归一化只管**构造**：filter 内部读字段仍须走下面的存取器
+   （`(:messages req)` 在两层结构上会拿到 nil，不会静默给你旧语义）。"
+  [x]
+  (cond
+    (chat-client-request? x) x
+    (map? x) (->ChatClientRequest (req/as-chat-request (dissoc x :context :on-token :request))
+                                  (:context x)
+                                  (:on-token x))
+    :else (throw (ex-info "无法归一化为 ChatClientRequest（需 record 或 map）"
+                          {:value x :type (type x)}))))
+
+(defn as-chat-client-response
+  "归一化成 `ChatClientResponse`（已是 record 则原样返回）。"
+  [x]
+  (cond
+    (instance? ChatClientResponse x) x
+    (map? x) (->ChatClientResponse (:response x) (:context x))
+    :else (throw (ex-info "无法归一化为 ChatClientResponse（需 record 或 map）"
+                          {:value x :type (type x)}))))
+
+;;; 存取器 —— filter 改写请求走这里，不必满屏 assoc-in
+;;;
+;;; 每个都是「读一层 / 写一层」的薄封装，存在的理由只有一个：两层结构下
+;;; `(update req :messages …)` 会静默在**外层**建出一个不存在的 `:messages` 键，
+;;; 而不是报错。给出存取器，改写点就不会写成那个样子。
+
+(defn req-messages   "读本次请求的消息列表。" [r] (:messages (:request r)))
+(defn req-context    "读请求级共享状态（只读快照）。" [r] (:context r))
+(defn req-on-token   "读流式 sink（非流式为 nil）。" [r] (:on-token r))
+
+(defn req-option
+  "读一个调用选项（:tools / :tool-choice / :system-prompt / provider 私有键…）。"
+  ([r k] (req/option (:request r) k))
+  ([r k not-found] (req/option (:request r) k not-found)))
+
+(defn with-messages
+  "换掉消息列表，返回新 ChatClientRequest。"
+  [r messages]
+  (update r :request req/with-messages messages))
+
+(defn update-messages
+  "以函数更新消息列表，返回新 ChatClientRequest。"
+  [r f & args]
+  (assoc r :request (apply req/update-messages (:request r) f args)))
+
+(defn with-option
+  "写一个调用选项，返回新 ChatClientRequest。"
+  [r k v]
+  (update r :request req/with-option k v))
+
+(defn with-options
+  "合并一组调用选项，返回新 ChatClientRequest。"
+  [r m]
+  (update r :request req/with-options m))
+
+(defn with-context
+  "换掉请求级共享状态，返回新 ChatClientRequest。"
+  [r ctx]
+  (assoc r :context ctx))
+
+(defn with-on-token
+  "换掉流式 sink，返回新 ChatClientRequest。"
+  [r f]
+  (assoc r :on-token f))
 
 ;;; ============================================================
 ;;; Filter 创建
@@ -106,7 +205,7 @@
    五个钩子键落到 record 字段（读取走字段而非 hash 查找），其余键进 ext-map
    照常可读——memory filter 暴露的 `:store` 正是靠这条活着。
 
-   `build-kernel` 对 `:filters` 逐个调用本函数，所以用户侧写 map 字面量、
+   `build-chat-client` 对 `:filters` 逐个调用本函数，所以用户侧写 map 字面量、
    写 `create-filter`、写 record 三种形态等价。"
   [f]
   (cond
@@ -189,7 +288,7 @@
   "把 filter 向量编成五条预折叠的链构造器（四条 around + 一条 token xform）。
 
    - `:source`      归一化后的 filter 向量；持有者据此判断 hooks 是否仍与
-                    自己的 `:filters` 同源（见 `kernel/filter-hooks`）
+                    自己的 `:filters` 同源（见 `chat-client/filter-hooks`）
    - `:chat` / `:tool` / `:turn` / `:iteration`  `(fn [terminal] -> chain)`
    - `:token-xform` `(fn [sink] -> rf)` 或 nil"
   [filters]
@@ -210,10 +309,10 @@
   (create-filter :logging
    :tool (fn [req chain]
            (let [name (get-in req [:function :name])]
-             (println (str "[Kernel] 调用工具: " name " 参数: " (pr-str (:args req))))
+             (println (str "[ChatClient] 调用工具: " name " 参数: " (pr-str (:args req))))
              (let [resp (chain req)
                    r (:result resp)]
-               (println (str "[Kernel] 工具结果: " name " => "
+               (println (str "[ChatClient] 工具结果: " name " => "
                              (if (and (string? r) (> (count r) 100))
                                (str (subs r 0 100) "...")
                                (pr-str r))))
@@ -221,6 +320,36 @@
 
 ;;; ============================================================
 ;;; 内置 filter: LLM 调用日志（:chat）
+;;; ============================================================
+
+(defn filter-hooks
+  "取一个 ChatClient 的预编译 filter 链（`CompiledHooks`）。
+
+   正常路径下就是 `build-chat-client` 装配期算好的那份，直接返回。若有人绕过
+   `with-filters` 直接 `(assoc chat-client :filters ...)`，hooks 就与 `:filters`
+   脱钩了——此时**现场重编译**兜底：语义永远跟着 `:filters` 走，宁可慢也
+   不能静默用旧链（filter 悄悄失效是这套机制最难查的一类 bug）。
+
+   **住在 filter ns 而不是 chat-client**：它认识的是链（`CompiledHooks`、
+   `compile-hooks`），对 ChatClient 只用两个关键字取值——依赖方向因此是
+   chat-client → filter 单向，不构成循环。"
+  [chat-client]
+  (let [hooks (:hooks chat-client)
+        fs    (:filters chat-client)]
+    (if (identical? (:source hooks) fs)
+      hooks
+      (compile-hooks fs))))
+
+(defn with-filters
+  "换掉 ChatClient 的 filter 链，同时重编译 hooks。**改 `:filters` 走这里**——
+   直接 assoc 虽有 `filter-hooks` 兜底，但那是每次 invoke 都重编一遍，白扔
+   装配期成果。"
+  [chat-client fs]
+  (let [hooks (compile-hooks fs)]
+    (assoc chat-client :filters (:source hooks) :hooks hooks)))
+
+;;; ============================================================
+;;; 内置 filter: 日志（:chat）
 ;;; ============================================================
 
 (defn logging-chat-filter
@@ -240,9 +369,9 @@
                    s)))]
     (create-filter :logging-chat
      :chat (fn [req chain]
-             (emit (str "[Chat] → messages=" (count (:messages req))
-                        " tools=" (count (:tools req))
-                        " tool-choice=" (:tool-choice req)))
+             (emit (str "[Chat] → messages=" (count (req-messages req))
+                        " tools=" (count (req-option req :tools))
+                        " tool-choice=" (req-option req :tool-choice)))
              (let [resp (chain req)
                    r (:response resp)
                    calls (resp/response-tool-calls r)]
@@ -348,7 +477,7 @@
 ;;;
 ;;; 注：这里曾有 timeout-filter（超时控制），2026-07-16 删除——超时已是内建机制：
 ;;; 工具声明 `deftool {:timeout ms}` > 引擎缺省 `(…-tool-calling-manager
-;;; {:timeout ms})` > 不超时，由 kernel/invoke-tool 强制、开箱即生效，filter
+;;; {:timeout ms})` > 不超时，由 chat-client/invoke-tool 强制、开箱即生效，filter
 ;;; 无事可做。机制本体是 tool/call-with-timeout。删除记录见 CHANGELOG 0.3.0。
 ;;; ============================================================
 

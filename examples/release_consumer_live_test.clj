@@ -99,7 +99,7 @@
 ;;; 子进程：断言全在这里
 ;;; ============================================================
 
-(require '[im.ttalk.agent.client :as agent]
+(require '[im.ttalk.agent.simple-agent :as agent]
          '[im.ttalk.agent.tool :refer [deftool]]
          '[im.ttalk.agent.provider.minimax :as minimax])
 
@@ -119,13 +119,13 @@
 
 (check "im.ttalk.agent.model/call-llm 可 resolve（core 的协议）"
        (some? (requiring-resolve 'im.ttalk.agent.model/call-llm)))
-(check "im.ttalk.agent.kernel/invoke-tool 可 resolve（core 的 kernel 原语）"
-       (some? (requiring-resolve 'im.ttalk.agent.kernel/invoke-tool)))
+(check "im.ttalk.agent.chat-client/invoke-tool 可 resolve（core 的 chat-client 原语）"
+       (some? (requiring-resolve 'im.ttalk.agent.chat-client/invoke-tool)))
 
-(println "     core 来源：" (resource-of "im/ttalk/agent/kernel.clj"))
+(println "     core 来源：" (resource-of "im/ttalk/agent/chat_client.clj"))
 (check "core 来自 jar 而非源码目录（排除「其实走了 :local/root」）"
-       (from-jar? "im/ttalk/agent/kernel.clj" "clj-agent-core"))
-(check "client 来自 jar" (from-jar? "im/ttalk/agent/client.clj" "clj-agent-client"))
+       (from-jar? "im/ttalk/agent/chat_client.clj" "clj-agent-core"))
+(check "client 来自 jar" (from-jar? "im/ttalk/agent/simple_agent.clj" "clj-agent-client"))
 (check "provider 来自 jar" (from-jar? "im/ttalk/agent/provider/minimax.clj" "clj-agent-provider"))
 (check "第三方依赖也经 pom 传递（cheshire / timbre）"
        (and (some? (requiring-resolve 'cheshire.core/generate-string))

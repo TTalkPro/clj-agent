@@ -1,6 +1,6 @@
 # clj-agent
 
-Clojure AI Agent Framework - Kernel Central Orchestrator
+Clojure AI Agent Framework - ChatClient Central Orchestrator
 
 English | [中文](README.md)
 
@@ -8,25 +8,25 @@ English | [中文](README.md)
 
 `clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to tool-calling agents:
 
-- **Kernel + Tool Orchestration**: `deftool` macro for tool definitions, `build-kernel` declaratively registers and schedules them
+- **ChatClient + Tool Orchestration**: `deftool` macro for tool definitions, `build-chat-client` declaratively registers and schedules them
 - **Multi-level Invoke API**: `invoke-tool` (function call), `invoke-chat` (pure LLM); the tool-calling loop is provided by SimpleAgent
 - **Filter Middleware**: onion-style around chain (mirrors Spring AI 2.0 Advisor), five hooks — :chat / :tool / :iteration / :turn / :token-xform — can short-circuit/retry/time/recurse
 - **Spring AI 2.0 Advisor Alignment**: ToolSearch progressive tool disclosure (78% prompt-token savings measured), return-direct, pluggable loop-continuation predicate, SafeGuard, RAG injection, self-correcting structured output, RE2 — retrieval and vector stores are injected via protocols, so the framework adds zero deps (see `docs/advisor-alignment-design.md`)
-- **Service Abstraction**: LLM services via `{:chat-fn :stream-fn}` map, zero coupling
+- **ChatModel Abstraction**: LLM services via `{:chat-fn :stream-fn}` map, zero coupling
 - **Multi-Provider Support**: Anthropic, OpenAI, DeepSeek, Zhipu, Ollama, Gemini, Mistral, MiniMax, DashScope (Alibaba), and OpenAI-compatible protocols
 - **SimpleAgent Wrapper**: synchronous stateful conversation with optional pause/resume sensitive-tool approval; LLM/tool errors normalized to `{:status :error}` (configurable `:on-error`)
 - **ChatMemory**: per-conversation-id history persistence (in-memory / windowed / SQLite; the SQLite store is `Closeable`)
 
 ## Architecture Overview
 
-Dependency Inversion: **Core defines the protocol (port) + kernel primitives; Client is the Agent runtime; Provider implements the protocol — Client and Provider each depend on Core, not on each other.** Any jar implementing `im.ttalk.agent.model/ILLMProvider` can be injected as a provider.
+Dependency Inversion: **Core defines the protocol (port) + chat-client primitives; Client is the Agent runtime; Provider implements the protocol — Client and Provider each depend on Core, not on each other.** Any jar implementing `im.ttalk.agent.model/ILLMProvider` can be injected as a provider.
 
 ```mermaid
 graph TB
-    subgraph "clj-agent-core (protocol + kernel primitives)"
+    subgraph "clj-agent-core (protocol + chat-client primitives)"
         PROTO[ILLMProvider protocol<br/>im.ttalk.agent.model<br/>neutral-message boundary]
-        SV[Generic Service<br/>wraps any provider via protocol only]
-        K[Kernel<br/>Central Orchestrator]
+        SV[Generic ChatModel<br/>wraps any provider via protocol only]
+        K[ChatClient<br/>Central Orchestrator]
         AD[Advisor<br/>Middleware Onion Chain]
         T[deftool]
     end
@@ -62,7 +62,7 @@ graph TB
 graph LR
     provider[clj-agent-provider<br/>vendor adapters]
     client[clj-agent-client<br/>Agent runtime]
-    core[clj-agent-core<br/>protocol + kernel primitives]
+    core[clj-agent-core<br/>protocol + chat-client primitives]
 
     provider --> core
     client --> core
@@ -73,7 +73,7 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + kernel primitives; zero deps
+│   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + chat-client primitives; zero deps
 │   ├── clj-agent-client/    # Agent runtime (client/react/memory/subagent), depends on core
 │   └── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
 ├── examples/              # Usage Examples
@@ -98,7 +98,7 @@ clj-agent/
 The simplest way to use the framework with automatic state management:
 
 ```clojure
-(require '[im.ttalk.agent.client :as ka])
+(require '[im.ttalk.agent.simple-agent :as sa])
 (require '[im.ttalk.agent.tool :refer [deftool]])
 (require '[im.ttalk.agent.provider.factory.builder :as factory])
 
@@ -115,18 +115,18 @@ The simplest way to use the framework with automatic state management:
 (def provider (factory/create-provider-from-env :openai))
 
 ;; 4. Create Agent
-(def agent (ka/create-agent
+(def agent (sa/create-agent
              {:provider provider
               :model "gpt-4"
               :system-prompt "You are a weather assistant"
               :tools my-tools}))
 
 ;; 5. Chat (auto-accumulates context)
-(println (:text (ka/chat agent "What's the weather in Beijing?")))
-(println (:text (ka/chat agent "How about Shanghai?")))  ;; remembers context
+(println (:text (sa/chat agent "What's the weather in Beijing?")))
+(println (:text (sa/chat agent "How about Shanghai?")))  ;; remembers context
 
 ;; Reset conversation
-(ka/reset! agent)
+(sa/reset! agent)
 ```
 
 ### Option 2: SimpleAgent + Sensitive Tool Approval
@@ -134,7 +134,7 @@ The simplest way to use the framework with automatic state management:
 Configuring `:on-pause` enables pause/resume: the agent automatically pauses when encountering tools marked as `:sensitive`, awaiting human approval:
 
 ```clojure
-(require '[im.ttalk.agent.client :as ka])
+(require '[im.ttalk.agent.simple-agent :as sa])
 
 (deftool delete-file
   "Delete a file"
@@ -144,57 +144,59 @@ Configuring `:on-pause` enables pause/resume: the agent automatically pauses whe
 
 (def file-tools [#'delete-file])
 
-(def agent (ka/create-agent
+(def agent (sa/create-agent
              {:provider provider
               :model "gpt-4"
               :tools file-tools
               :on-pause (fn [{:keys [reason]}]
                           (println "Approval needed:" reason))}))   ;; enables pause/resume
 
-(let [result (ka/chat agent "Delete /tmp/test.txt")]
+(let [result (sa/chat agent "Delete /tmp/test.txt")]
   (when (= :paused (:status result))
     (println "Pending tool:" (get-in result [:pending-tool :name]))
     ;; Approve
-    (ka/resume agent "approved")
-    ;; Or reject: (ka/resume agent "rejected")
+    (sa/resume agent "approved")
+    ;; Or reject: (sa/resume agent "rejected")
     ))
 ```
 
-### Option 3: Kernel API (Full Control)
+### Option 3: ChatClient API (Full Control)
 
-Use the Kernel directly for maximum flexibility:
+Use the ChatClient directly for maximum flexibility:
 
 ```clojure
-(require '[im.ttalk.agent.kernel :as kernel])
+(require '[im.ttalk.agent.chat-client :as chat-client])
+(require '[im.ttalk.agent.tool-registry :as registry])
 (require '[im.ttalk.agent.filter :as filters])
-(require '[im.ttalk.agent.model.service :as service])
+(require '[im.ttalk.agent.filter :as flt])
+(require '[im.ttalk.agent.chat-model :as chat-model])
 
-;; Create LLM Service (generic: wraps any provider via protocol only)
-(def service (service/create-service
-               provider
-               {:model "gpt-4"
-                :max-tokens 4096}))
+;; Create the ChatModel (generic: wraps any provider via protocol only)
+(def cm (chat-model/create-chat-model
+          provider
+          {:model "gpt-4"
+           :max-tokens 4096}))
 
-;; Build Kernel (declarative; kernel provides only the primitives: invoke-chat / invoke-tool)
-(def app-kernel
-  (kernel/build-kernel
-    {:service service
-     :tools   my-tools                    ;; vector of tool vars
-     :filters [filters/logging-filter]}))
+;; Build the ChatClient (declarative; chat-client provides only the primitives: invoke-chat / invoke-tool)
+(def cc
+  (chat-client/build-chat-client
+    {:chat-model cm
+     :tools      my-tools                 ;; vector of tool vars
+     :filters    [filters/logging-filter]}))
 
 ;; Pure LLM call (:chat filter chain, no tool invocation)
-(let [{:keys [response]} (kernel/invoke-chat app-kernel
+(let [{:keys [response]} (chat-client/invoke-chat cc
                            [{:role "user" :content "Hello"}]
                            {})]
   (println (:text response)))
 
 ;; Direct tool invocation (:tool filter chain)
-(let [{:keys [value]} (kernel/invoke-tool app-kernel :get-weather
+(let [{:keys [value]} (chat-client/invoke-tool cc :get-weather
                         {:city "Beijing"} nil)]
   (println value))
 
-;; The full tool-calling loop is SimpleAgent's job (see Option 1 above), not the kernel:
-;; (require '[im.ttalk.agent.client :as agent])
+;; The full tool-calling loop is SimpleAgent's job (see Option 1 above), not the chat-client:
+;; (require '[im.ttalk.agent.simple-agent :as agent])
 ;; (agent/chat (agent/create-agent {:provider provider :tools my-tools}) "What's the weather in Beijing?")
 ```
 
@@ -217,40 +219,99 @@ Simultaneously defines a Clojure function and generates an LLM tool schema:
 ;; Supported parameter types: :string :int :float :boolean :array :object
 ```
 
-### Kernel API
+### ChatClient API
 
-Kernel provides three categories of APIs:
+ChatClient provides three categories of APIs:
 
 ```clojure
-;; Build API - declarative Kernel construction
-(kernel/build-kernel
-  {:service  service                    ;; LLM service
-   :tools    my-tools                   ;; vector of tool vars
-   :filters  [filter-def]               ;; filter list
-   :settings {:max-tool-iterations 10}})
+;; Build API - declarative ChatClient construction
+(chat-client/build-chat-client
+  {:chat-model cm                       ;; the ChatModel
+   :tools      my-tools                 ;; vector of tool vars
+   :filters    [filter-def]             ;; filter list
+   :settings   {:max-tool-iterations 10}})
 
 ;; Invoke API - two primitives (both through the filter onion chain)
-(kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; Function call (:tool chain)
-(kernel/invoke-chat kernel messages opts)                   ;; Pure LLM (:chat chain, no tool loop)
-;; The tool-calling loop is NOT in the kernel — see im.ttalk.agent.client (create-agent + chat)
+(chat-client/invoke-tool cc :fn-name {:arg "val"} context)  ;; Function call (:tool chain)
+(chat-client/invoke-chat cc messages opts)                  ;; Pure LLM (:chat chain, no tool loop)
+;; The tool-calling loop is NOT in the chat-client — see im.ttalk.agent.simple-agent (create-agent + chat)
 
-;; Query API - Query
-(:tools kernel)                       ;; All tool schemas
-(:service kernel)                     ;; Get service
-(kernel/find-function kernel :name)   ;; Find function
-(kernel/list-functions kernel)        ;; List all function names
+;; Tool declaration queries — they live in tool-registry
+(registry/tool-schemas cc)        ;; All tool schemas (was (:tools cc))
+(:tool-registry cc)               ;; The ToolRegistry record itself
+(:chat-model cc)                  ;; Get the ChatModel
+(registry/find-function cc :name) ;; Find function
+(registry/list-functions cc)      ;; List all function names
+(registry/tool-meta cc :name)     ;; ToolMeta record, or nil when unregistered
+
+;; Filter chain access — lives in the filter ns
+(flt/filter-hooks cc)             ;; The four pre-compiled chains
+(flt/with-filters cc fs)          ;; Swap the chain and recompile hooks
 ```
 
-### Service Interface
-
-Service is a map defining the LLM call protocol:
+Or go through the Facade (`im.ttalk.agent`, mirroring beamai's `beamai.erl`) — the
+common API in one place, every function a one-line forward:
 
 ```clojure
-{:chat-fn   (fn [messages opts] -> normalized-response)              ;; sync
- :stream-fn (fn [messages opts on-token] -> normalized-response)}
+(require '[im.ttalk.agent :as ai])
+
+(ai/deftool get-weather "Get weather" [[city :string "City"]] (str city ": sunny 25C"))
+
+(def cc (ai/chat-client {:chat-model (ai/chat-model provider {:model "gpt-4"})
+                         :tools      [#'get-weather]}))
+(ai/chat cc [{:role :user :content "Weather in Beijing?"}])
+(ai/invoke-tool cc :get-weather {:city "Beijing"})
 ```
 
-Core's generic `im.ttalk.agent.model.service/create-service` (protocol-only) builds this from any provider. You can also implement this map yourself to integrate any LLM.
+### ChatModel Interface
+
+The abstraction for **one LLM call** (mirroring Spring AI's `ChatModel`). The split
+rule is "would you rewrite it for another provider?": wire format yes, backoff policy
+no — so the Provider only handles "how to send this one request", while option
+merging, **retry**, and response normalization belong to the ChatModel.
+
+```clojure
+(defprotocol IChatModel
+  (call        [this request])           ;; ChatRequest -> ChatResponse, retries built in
+  (stream-call [this request on-token])  ;; -> ChatResponse, does NOT retry
+  (model-options [this]))
+
+(def cm (chat-model/create-chat-model provider
+          {:model "gpt-4" :max-tokens 4096
+           :retry {:max-retries 3}}))     ;; defaults to 2; :retry false disables
+```
+
+Two implementations: `DefaultChatModel` (wraps an `ILLMProvider`) and `FnChatModel`
+(wraps `{:chat-fn :stream-fn}` closures). **The historical bare-map form still works** —
+`build-chat-client` normalizes `:chat-model` through `as-chat-model`.
+
+#### Retry
+
+Retry sits **below the entire filter stack** (same trade-off as beamai's
+`beamai_chat_model`): a filter must see *one logical call*. If retry lived above the
+chain, a single network blip would make the memory filter write the same turn's delta
+twice — with no runtime symptom. Use the `:on-retry` callback to observe real attempts.
+
+- **Criterion**: the canonical error's `:retryable?` (401 never retries; 429/5xx/connect
+  failures do)
+- **`Retry-After`**: honored when the server sends it, but capped by `:max-delay`
+- **Three-level resolution**: per-call opts > provider config > framework default;
+  `:max-retries 0` disables
+- **Streaming does not retry**: tokens have already reached the sink; re-running would
+  show duplicates downstream. Retry a whole turn at the turn layer instead.
+
+### Request / Response Types (two layers)
+
+```clojure
+ChatClientRequest{:request ChatRequest, :context Context, :on-token f}   ;; what the filter chain sees
+                   └───────┬────────┘
+ChatRequest{:messages [...], :options {...}}                            ;; what the ChatModel sees
+```
+
+The extra layer holds `:context` (request-scoped shared state) and `:on-token` (the
+streaming sink) — neither is ever sent to the provider. Merging them into one type
+would mean filtering "what must not go out" from "what must" with a whitelist; two
+layers make the whitelist unnecessary, so provider-specific params pass through intact.
 
 ### Filter Middleware (onion-style around, mirrors Spring AI 2.0 Advisor)
 
@@ -262,7 +323,7 @@ order (no `:order`/`:phase`) — earlier = outer. The four around chains, outerm
 
 ```clojure
 ;; Custom filter — create-filter yields a Filter record; a plain map works too
-;; (build-kernel normalizes it via as-filter, so the two are equivalent)
+;; (build-chat-client normalizes it via as-filter, so the two are equivalent)
 (filters/create-filter :my-filter
   :chat (fn [req chain] (chain (update req :messages conj sys-msg)))
   :tool (fn [req chain]
@@ -309,16 +370,16 @@ Retrieval/vector stores are never bundled — they are injected through the
 Full alignment record: `docs/advisor-alignment-design.md`; mechanism contracts:
 `docs/filter-chain-design.md`.
 
-**Chains are compiled at assembly time.** `build-kernel` pre-folds all four around
-chains (stored in the kernel's `hooks` field) and pre-`comp`s the `:token-xform`
+**Chains are compiled at assembly time.** `build-chat-client` pre-folds all four around
+chains (stored in the chat-client's `hooks` field) and pre-`comp`s the `:token-xform`
 chain, so a call only has to hand the terminal to a ready-made chain builder. To
-swap the filters of an existing kernel use `kernel/with-filters` — a bare
-`(assoc kernel :filters …)` leaves `hooks` out of sync (`filter-hooks` detects this
+swap the filters of an existing chat-client use `chat-client/with-filters` — a bare
+`(assoc chat-client :filters …)` leaves `hooks` out of sync (`filter-hooks` detects this
 and recompiles on the spot, so semantics always follow `:filters`, but you pay for
 it on every invoke).
 
-**Tool names must be unique** within a kernel (across vars, across inline tools, and
-between the two); duplicates make `build-kernel` throw with `{:duplicates [...]}`.
+**Tool names must be unique** within a chat-client (across vars, across inline tools, and
+between the two); duplicates make `build-chat-client` throw with `{:duplicates [...]}`.
 Both schemas would otherwise reach the LLM while only one handler survives — what the
 model sees and what actually runs drift apart with no runtime symptom. Illegal
 `:timeout` / `:retry` declarations are rejected at assembly time too.
@@ -334,9 +395,9 @@ whatever the model retrieves enters the tool list on the **next** round.
 ```clojure
 (require '[im.ttalk.agent.filter.tool-search :as ts])
 
-(kernel/build-kernel
+(chat-client/build-chat-client
   (ts/with-tool-search                       ;; wires tool + filter + state-slot in one shot
-    {:service svc
+    {:chat-model cm
      :tools   [#'t1 #'t2 ... #'t80]
      :filters [(ma/memory-filter store)]}
     {:index (ts/keyword-tool-index)          ;; or (ts/regex-tool-index)
@@ -367,8 +428,8 @@ Retrieves once per turn and folds the result into the user's question.
     (retrieve [_ query top-k]
       (map (fn [hit] {:text (:content hit)}) (my-vector-store/search query top-k)))))
 
-(kernel/build-kernel
-  {:service svc
+(chat-client/build-chat-client
+  {:chat-model cm
    :filters [(ma/memory-filter store)
              (rag/qa-turn-filter retriever :top-k 4)]})
 ```
@@ -444,7 +505,7 @@ Context manages shared state within a conversation:
 > [`clj-agent-provider` README](modules/clj-agent-provider/README.md). All providers
 > support both **sync** and **streaming (SSE)** — including DashScope's native SSE
 > (`X-DashScope-SSE` + `incremental_output`). If a provider doesn't support streaming,
-> the service auto-falls back to sync and emits the full text as a single token.
+> the chat-model auto-falls back to sync and emits the full text as a single token.
 
 ### Creating Providers
 
@@ -503,7 +564,7 @@ same pom-data, same `0.3.<git-count>` version scheme, switched per module via
 A sweep once found a pile of **ghost APIs** across the six READMEs — features long
 removed or renamed, sometimes with an "already removed" note sitting right there in
 the source, while the docs happily kept teaching them. Worst case: `:build-result-msgs`
-was documented in four READMEs' **headline feature bullet** while `model/service.clj`
+was documented in four READMEs' **headline feature bullet** while `chat_model.clj`
 explicitly said it was gone. Human review doesn't catch this, so it's mechanized:
 
 | Check | Catches |
@@ -535,7 +596,7 @@ are for (**88 assertions** total):
 | `examples/structured_output_live_test.clj` | 12 | hand "missing required field birth_year" back to a real model and **it actually adds the field** (self-correction isn't just a claim) |
 | `examples/safeguard_live_test.clj` | 18 | a blocked turn makes **zero LLM calls**; the cost of not persisting is visible across real turns; boundary — a sensitive word in a *tool result* passes (**entry guard ≠ output guard**) |
 | `examples/return_direct_live_test.clj` | 19 | **control group**: the same compliance text goes through verbatim with return-direct, but gets rewritten by the model via a normal tool; the persistence fix verified with a real second turn |
-| `examples/minimax_agent_live_test.clj` | — | 9 callbacks / custom memory & kernel / `:filters` not exposed |
+| `examples/minimax_agent_live_test.clj` | — | 9 callbacks / custom memory & chat-client / `:filters` not exposed |
 | `examples/release_consumer_live_test.clj` | 10 | **consumer's view**: deps declare only client + provider, so core *must* arrive transitively via the pom; asserts the classpath holds jars rather than source dirs, then makes a real tool-calling round-trip. The unit suite runs on a source classpath and knows **nothing** about jars/poms — a pom missing its core dependency only shows up in someone else's project (run `bb release` first) |
 
 ```bash

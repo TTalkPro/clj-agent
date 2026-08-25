@@ -5,9 +5,9 @@
    持久化；进程重启后用同一 conversation-id + 同一 store 重建 agent，
    resume 透明恢复（client/paused?、client/resume 自动回落到 store）。
 
-   快照是纯 EDN 数据（loop-state/pending-tool 本就不含函数；kernel/gate/
+   快照是纯 EDN 数据（loop-state/pending-tool 本就不含函数；chat-client/gate/
    callbacks 由代码侧在 resume 时重新提供）。tool-context 存档前剥离
-   不可 EDN 序列化的 value（如 :kernel），恢复时由调用方按需注回。
+   不可 EDN 序列化的 value（如 :chat-client），恢复时由调用方按需注回。
 
    **loop-state 与 pending-tool 不走剥离，必须自身可 EDN 往返**——尤其
    **不能放 record**：record 打印成 `#ns.Foo{...}`，`edn/read-string` 没有对应
@@ -53,7 +53,7 @@
        (catch Throwable _ false)))
 
 (defn strip-unserializable
-  "剥掉 map 中不可 EDN 序列化的 entry（如 context 里的 :kernel），
+  "剥掉 map 中不可 EDN 序列化的 entry（如 context 里的 :chat-client），
    返回 [clean-map stripped-keys]。"
   [m]
   (reduce-kv (fn [[clean stripped] k v]
@@ -67,7 +67,7 @@
   "由 react 层的 :paused 结果构造可持久化快照（纯 EDN 数据）。
    tool-context 中不可序列化的 key 被剥离并 warn（恢复时由代码侧注回）。
 
-   **只有 tool-context 走剥离**：它装的是调用方的任意状态，混进 `:kernel` 这类
+   **只有 tool-context 走剥离**：它装的是调用方的任意状态，混进 `:chat-client` 这类
    活对象是正常的。`loop-state` / `pending-tool` 则完全由 react 构造，形状是框架
    自己的责任——剥离它们只会得到一个字段残缺、resume 到一半失败的快照，比读取
    时当场抛更难查。所以这里不检查、不剥离，由 ns docstring 的约束 +

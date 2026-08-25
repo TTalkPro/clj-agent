@@ -5,7 +5,7 @@
    暂停时 around 只进不出 + resume 不重复进链 / 与 :turn 叠加。"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.context :as context]
-            [im.ttalk.agent.kernel :as core]
+            [im.ttalk.agent.chat-client :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
@@ -18,13 +18,13 @@
   []
   "ok")
 
-(defn- build-kernel [svc filters & [opts]]
-  (core/build-kernel (merge {:service svc
-                             :tools [#'noop-tool]
-                             :filters (vec filters)}
-                            opts)))
+(defn- build-chat-client [cm filters & [opts]]
+  (core/build-chat-client (merge {:chat-model cm
+                                  :tools [#'noop-tool]
+                                  :filters (vec filters)}
+                                 opts)))
 
-(defn- n-tool-rounds-svc
+(defn- n-tool-rounds-cm
   "前 n 次调用返回 tool-call，第 n+1 次返回文本答案。"
   [n calls]
   {:chat-fn (fn [_ _]
@@ -33,8 +33,8 @@
                   :tool-calls [{:id (str "t" @calls) :name "noop-tool" :args {}}])
                 (response/make-response :text "done" :tool-calls nil)))})
 
-(defn- run [kernel store cid messages & [opts]]
-  (agent-loop/invoke kernel store messages
+(defn- run [chat-client store cid messages & [opts]]
+  (agent-loop/invoke chat-client store messages
     (merge {:context (context/with-conversation-id (context/create) cid)} opts)))
 
 ;;; ============================================================
@@ -49,9 +49,9 @@
                    :iteration (fn [req chain] (swap! iter-hits inc) (chain req))
                    :turn      (fn [req chain] (swap! turn-hits inc) (chain req))
                    :chat      (fn [req chain] (swap! chat-hits inc) (chain req))}
-          kernel (build-kernel (n-tool-rounds-svc 3 (atom 0))
-                               [(ma/memory-filter store) counter])
-          r (run kernel store "it-1" [(msg/user "干活")])]
+          chat-client (build-chat-client (n-tool-rounds-cm 3 (atom 0))
+                                         [(ma/memory-filter store) counter])
+          r (run chat-client store "it-1" [(msg/user "干活")])]
       (is (= :completed (:status r)))
       (is (= 1 @turn-hits))
       (is (= 4 @iter-hits) "每轮一次，收尾那轮也进链")
@@ -64,9 +64,9 @@
                  :iteration (fn [req chain]
                               (swap! seen conj [(:index req) (:remaining req)])
                               (chain req))}
-          kernel (build-kernel (n-tool-rounds-svc 2 (atom 0))
-                               [(ma/memory-filter store) probe])]
-      (run kernel store "it-2" [(msg/user "干活")] {:max-iterations 10})
+          chat-client (build-chat-client (n-tool-rounds-cm 2 (atom 0))
+                                         [(ma/memory-filter store) probe])]
+      (run chat-client store "it-2" [(msg/user "干活")] {:max-iterations 10})
       (is (= [[0 10] [1 9] [2 8]] @seen)))))
 
 ;;; ============================================================
@@ -77,7 +77,7 @@
   (testing "filter 改写 :continue 结果的 :messages → 下一轮 LLM 收到改写后的 delta"
     (let [seen (atom [])
           store (memory/in-memory-store)
-          svc {:chat-fn (fn [msgs _]
+          cm {:chat-fn (fn [msgs _]
                           (swap! seen conj msgs)
                           (if (= 1 (count @seen))
                             (response/make-response :text nil
@@ -89,8 +89,8 @@
                                    (if (= :continue (:status r))
                                      (update r :messages conj (msg/system "本轮工具已复核"))
                                      r)))}
-          kernel (build-kernel svc [(ma/memory-filter store) annotate])
-          r (run kernel store "it-3" [(msg/user "干活")])]
+          chat-client (build-chat-client cm [(ma/memory-filter store) annotate])
+          r (run chat-client store "it-3" [(msg/user "干活")])]
       (is (= :completed (:status r)))
       ;; 第二次 LLM 调用的 messages 是 memory 展开的完整历史，末尾应含注入的那条
       (is (= "本轮工具已复核" (:content (last (second @seen))))
@@ -104,7 +104,7 @@
   (testing "不调 chain 直接返回 :completed → 该轮 LLM 压根不发生"
     (let [calls (atom 0)
           store (memory/in-memory-store)
-          svc {:chat-fn (fn [_ _] (swap! calls inc)
+          cm {:chat-fn (fn [_ _] (swap! calls inc)
                           (response/make-response :text "不该被调到" :tool-calls nil))}
           guard {:name :guard
                  :iteration (fn [_req _chain]
@@ -112,8 +112,8 @@
                                :response (response/make-response :text "拦下了" :tool-calls nil)
                                :tool-context (context/create)
                                :tool-calls-made []})}
-          kernel (build-kernel svc [(ma/memory-filter store) guard])
-          r (run kernel store "it-4" [(msg/user "干活")])]
+          chat-client (build-chat-client cm [(ma/memory-filter store) guard])
+          r (run chat-client store "it-4" [(msg/user "干活")])]
       (is (= :completed (:status r)))
       (is (= "拦下了" (response/response-text (:response r))))
       (is (= 0 @calls) "短路的那一轮不发 LLM"))))
@@ -128,7 +128,7 @@
           retried (atom false)
           store (memory/in-memory-store)
           ;; 第 1 次要工具，第 2 次（重入后）也要工具，之后收尾
-          svc {:chat-fn (fn [_ _]
+          cm {:chat-fn (fn [_ _]
                           (let [n (swap! llm-calls inc)]
                             (if (<= n 2)
                               (response/make-response :text nil
@@ -141,8 +141,8 @@
                                  (do (reset! retried true)
                                      (chain req))          ;; 重跑这一轮
                                  r)))}
-          kernel (build-kernel svc [(ma/memory-filter store) once])
-          r (run kernel store "it-5" [(msg/user "干活")] {:max-iterations 10})]
+          chat-client (build-chat-client cm [(ma/memory-filter store) once])
+          r (run chat-client store "it-5" [(msg/user "干活")] {:max-iterations 10})]
       (is (= :completed (:status r)))
       (is (= 3 @llm-calls) "第 0 轮跑了两次（原始 + 重入），加收尾轮")
       (is (= 2 (count (:tool-calls-made r)))
@@ -151,16 +151,16 @@
   (testing "max-iterations 对 filter 重入仍是硬上限"
     (let [store (memory/in-memory-store)
           ;; LLM 永远要工具；filter 每轮都重入一次 → 预算消耗翻倍
-          svc {:chat-fn (fn [_ _]
+          cm {:chat-fn (fn [_ _]
                           (response/make-response :text nil
                             :tool-calls [{:id "t" :name "noop-tool" :args {}}]))}
           always {:name :always-retry
                   :iteration (fn [req chain]
                                (let [r (chain req)]
                                  (if (= :continue (:status r)) (chain req) r)))}
-          kernel (build-kernel svc [(ma/memory-filter store) always])]
+          chat-client (build-chat-client cm [(ma/memory-filter store) always])]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"max-iterations"
-            (run kernel store "it-6" [(msg/user "干活")] {:max-iterations 4}))
+            (run chat-client store "it-6" [(msg/user "干活")] {:max-iterations 4}))
           "重入吃掉的预算照样计入，否则无限重入能绕过上限"))))
 
 ;;; ============================================================
@@ -172,22 +172,22 @@
     (let [entered (atom 0) seen (atom [])
           store (memory/in-memory-store)
           calls (atom 0)
-          svc (n-tool-rounds-svc 1 calls)
+          cm (n-tool-rounds-cm 1 calls)
           probe {:name :probe
                  :iteration (fn [req chain]
                               (swap! entered inc)
                               (let [r (chain req)]
                                 (swap! seen conj (:status r))
                                 r))}
-          kernel (build-kernel svc [(ma/memory-filter store) probe])
+          chat-client (build-chat-client cm [(ma/memory-filter store) probe])
           opts {:context (context/with-conversation-id (context/create) "it-7")
                 :tool-gate (fn [_] :pause)}
-          paused (agent-loop/invoke kernel store [(msg/user "干活")] opts)]
+          paused (agent-loop/invoke chat-client store [(msg/user "干活")] opts)]
       (is (= :paused (:status paused)))
       (is (= 1 @entered))
       (is (= [:paused] @seen)
           "结果沿链回流，所以单轮计时/记账在 HITL 暂停时也能正常收尾")
-      (let [r (agent-loop/resume kernel (:loop-state paused) :approved opts)]
+      (let [r (agent-loop/resume chat-client (:loop-state paused) :approved opts)]
         (is (= :completed (:status r)))
         ;; resume 执行的是「暂停那一轮的下半截」（无新 LLM 调用），不进链；
         ;; 续跑的收尾轮是完整一轮，进链一次。
@@ -202,7 +202,7 @@
   (testing "turn 重入 → 全新循环、全新预算，iteration 链在新循环里重新计数"
     (let [turn-hits (atom 0) iter-hits (atom 0) indices (atom [])
           store (memory/in-memory-store)
-          svc {:chat-fn (fn [_ _] (response/make-response :text "答" :tool-calls nil))}
+          cm {:chat-fn (fn [_ _] (response/make-response :text "答" :tool-calls nil))}
           retry-turn {:name :retry-turn
                       :turn (fn [req chain]
                               (let [r (chain req)]
@@ -214,8 +214,8 @@
                               (swap! iter-hits inc)
                               (swap! indices conj (:index req))
                               (chain req))}
-          kernel (build-kernel svc [(ma/memory-filter store) retry-turn probe])
-          r (run kernel store "it-8" [(msg/user "干活")])]
+          chat-client (build-chat-client cm [(ma/memory-filter store) retry-turn probe])
+          r (run chat-client store "it-8" [(msg/user "干活")])]
       (is (= :completed (:status r)))
       (is (= 2 @iter-hits) "两次 turn 各跑一轮")
       (is (= [0 0] @indices) ":index 是「本次 run-tool-loop 内的轮序」，turn 重入即归零"))))
@@ -227,9 +227,9 @@
 (deftest no-iteration-filter-unchanged-test
   (testing "没挂 :iteration filter → 链是 identity，循环行为与加这层之前一致"
     (let [store (memory/in-memory-store)
-          kernel (build-kernel (n-tool-rounds-svc 2 (atom 0))
-                               [(ma/memory-filter store)])
-          r (run kernel store "it-9" [(msg/user "干活")])]
+          chat-client (build-chat-client (n-tool-rounds-cm 2 (atom 0))
+                                         [(ma/memory-filter store)])
+          r (run chat-client store "it-9" [(msg/user "干活")])]
       (is (= :completed (:status r)))
       (is (= "done" (response/response-text (:response r))))
       (is (= 2 (count (:tool-calls-made r)))))))

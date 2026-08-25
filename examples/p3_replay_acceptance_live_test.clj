@@ -3,7 +3,7 @@
 
    为什么需要这个脚本——前两个实验都是**绕开框架**直叩 provider 的（那是为了
    控制回传内容），它们证明的是「回传策略造成差异」。而 P3 要证明的是另一件事：
-   **修完之后，框架自己走出来的行为等于 A 臂**。中间隔着 service 归一化、
+   **修完之后，框架自己走出来的行为等于 A 臂**。中间隔着 chat-model 归一化、
    memory filter 落库、下一轮取历史、wire 还原四道关，任何一道漏掉载荷，
    这里的数字就会掉回 B 臂。
 
@@ -25,7 +25,7 @@
      MINIMAX_API_KEY - 必需     MINIMAX_MODEL - 缺省 MiniMax-M3
      EXPERIMENT_N    - 次数，缺省 20"
   (:require [clojure.string :as str]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.provider.minimax :as minimax]))
 
@@ -114,7 +114,7 @@
   (println "\n==================================================")
   (println (format "正确 %d/%d = %.1f%%（基线：A 100%% / B 82.5%%）" ok n (* 100 rate)))
   (if (>= rate 0.95)
-    (do (println "✓ 验收通过：框架行为已等同 A 臂——载荷穿过了 service→memory→wire 全链")
+    (do (println "✓ 验收通过：框架行为已等同 A 臂——载荷穿过了 chat-model→memory→wire 全链")
         (shutdown-agents)
         (System/exit 0))
     (do (println "✗ 验收失败：正确率没回到 A 臂水平。")

@@ -5,7 +5,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.context :as context]
-            [im.ttalk.agent.kernel :as core]
+            [im.ttalk.agent.chat-client :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
@@ -18,10 +18,10 @@
   []
   "ok")
 
-(defn- build-kernel [svc filters & [tools]]
-  (core/build-kernel {:service svc
-                      :tools (or tools [#'noop-tool])
-                      :filters (vec filters)}))
+(defn- build-chat-client [cm filters & [tools]]
+  (core/build-chat-client {:chat-model cm
+                           :tools (or tools [#'noop-tool])
+                           :filters (vec filters)}))
 
 ;;; ============================================================
 ;;; turn 一次 vs chat 每轮
@@ -32,7 +32,7 @@
     (let [turn-hits (atom 0)
           chat-hits (atom 0)
           calls (atom 0)
-          svc {:chat-fn (fn [_ _]
+          cm {:chat-fn (fn [_ _]
                           (if (<= (swap! calls inc) 3)
                             (response/make-response :text nil
                               :tool-calls [{:id (str "t" @calls) :name "noop-tool" :args {}}])
@@ -41,8 +41,8 @@
           counter {:name :counter
                    :turn (fn [req chain] (swap! turn-hits inc) (chain req))
                    :chat (fn [req chain] (swap! chat-hits inc) (chain req))}
-          kernel (build-kernel svc [(ma/memory-filter store) counter])
-          r (agent-loop/invoke kernel store [(msg/user "干活")]
+          chat-client (build-chat-client cm [(ma/memory-filter store) counter])
+          r (agent-loop/invoke chat-client store [(msg/user "干活")]
               {:context (context/with-conversation-id (context/create) "tf-1")})]
       (is (= :completed (:status r)))
       (is (= 1 @turn-hits) "turn 链每 turn 恰好一次")
@@ -55,7 +55,7 @@
 (deftest turn-rewrites-messages-test
   (testing "turn filter 改写入口消息（RAG 注入形态），只发生一次"
     (let [received (atom nil)
-          svc {:chat-fn (fn [msgs _]
+          cm {:chat-fn (fn [msgs _]
                           (reset! received msgs)
                           (response/make-response :text "答" :tool-calls nil))}
           rag {:name :rag
@@ -63,8 +63,8 @@
                        (chain (update req :messages
                                       #(into [(msg/system "背景资料：X 是 42")] %))))}
           store (memory/in-memory-store)
-          kernel (build-kernel svc [(ma/memory-filter store) rag])
-          r (agent-loop/invoke kernel store [(msg/user "X 是多少？")]
+          chat-client (build-chat-client cm [(ma/memory-filter store) rag])
+          r (agent-loop/invoke chat-client store [(msg/user "X 是多少？")]
               {:context (context/with-conversation-id (context/create) "tf-2")})]
       (is (= :completed (:status r)))
       (is (= :system (:role (first @received))))
@@ -77,7 +77,7 @@
 (deftest validation-retry-test
   (testing "首答不合格 → 反馈重入 → 二答通过"
     (let [calls (atom 0)
-          svc {:chat-fn (fn [msgs _]
+          cm {:chat-fn (fn [msgs _]
                           (swap! calls inc)
                           (if (some #(clojure.string/includes? (str (:content %)) "未通过校验")
                                     msgs)
@@ -88,10 +88,10 @@
                                  (get-in result [:response :text]) "{")
                        "必须输出 JSON"))
           store (memory/in-memory-store)
-          kernel (build-kernel svc [(ma/memory-filter store)
-                                    (flt/validation-turn-filter validate
-                                                                :max-retries 2)])
-          r (agent-loop/invoke kernel store [(msg/user "给我 JSON")]
+          chat-client (build-chat-client cm [(ma/memory-filter store)
+                                             (flt/validation-turn-filter validate
+                                                                         :max-retries 2)])
+          r (agent-loop/invoke chat-client store [(msg/user "给我 JSON")]
               {:context (context/with-conversation-id (context/create) "tf-3")})]
       (is (= :completed (:status r)))
       (is (= "{\"ok\":true}" (get-in r [:response :text])))
@@ -104,14 +104,14 @@
 (deftest validation-retry-exhaustion-test
   (testing "重试耗尽：原样返回最后一次结果"
     (let [calls (atom 0)
-          svc {:chat-fn (fn [_ _]
+          cm {:chat-fn (fn [_ _]
                           (swap! calls inc)
                           (response/make-response :text "永远不合格" :tool-calls nil))}
           store (memory/in-memory-store)
-          kernel (build-kernel svc [(ma/memory-filter store)
-                                    (flt/validation-turn-filter
-                                      (constantly "不行") :max-retries 2)])
-          r (agent-loop/invoke kernel store [(msg/user "试试")]
+          chat-client (build-chat-client cm [(ma/memory-filter store)
+                                             (flt/validation-turn-filter
+                                               (constantly "不行") :max-retries 2)])
+          r (agent-loop/invoke chat-client store [(msg/user "试试")]
               {:context (context/with-conversation-id (context/create) "tf-4")})]
       (is (= :completed (:status r)))
       (is (= "永远不合格" (get-in r [:response :text])))
@@ -124,14 +124,14 @@
 (deftest paused-passthrough-test
   (testing "校验 filter 遇 :paused 透传，不重入"
     (let [calls (atom 0)
-          svc {:chat-fn (fn [_ _]
+          cm {:chat-fn (fn [_ _]
                           (swap! calls inc)
                           (response/make-response :text nil
                             :tool-calls [{:id "d1" :name "noop-tool" :args {}}]))}
           store (memory/in-memory-store)
-          kernel (build-kernel svc [(ma/memory-filter store)
-                                    (flt/validation-turn-filter (constantly "不行"))])
-          r (agent-loop/invoke kernel store [(msg/user "干活")]
+          chat-client (build-chat-client cm [(ma/memory-filter store)
+                                             (flt/validation-turn-filter (constantly "不行"))])
+          r (agent-loop/invoke chat-client store [(msg/user "干活")]
               {:context (context/with-conversation-id (context/create) "tf-5")
                :tool-gate (fn [_] :pause)})]
       (is (= :paused (:status r)) "暂停结果原样穿过 turn 链")
@@ -144,7 +144,7 @@
 (deftest resume-through-turn-chain-test
   (testing "暂停 → resume 完成的最终答案经过校验 filter，不合格触发反馈重入"
     (let [calls (atom 0)
-          svc {:chat-fn (fn [msgs _]
+          cm {:chat-fn (fn [msgs _]
                           (swap! calls inc)
                           (cond
                             ;; 第 1 次：要调工具（gate 将暂停）
@@ -164,14 +164,14 @@
                                  (get-in result [:response :text]) "{")
                        "必须 JSON"))
           store (memory/in-memory-store)
-          kernel (build-kernel svc [(ma/memory-filter store)
-                                    (flt/validation-turn-filter validate)])
+          chat-client (build-chat-client cm [(ma/memory-filter store)
+                                             (flt/validation-turn-filter validate)])
           opts {:context (context/with-conversation-id (context/create) "tf-6")
                 :tool-gate (fn [_] :pause)}
-          paused (agent-loop/invoke kernel store [(msg/user "干活")] opts)
+          paused (agent-loop/invoke chat-client store [(msg/user "干活")] opts)
           _ (is (= :paused (:status paused)))
           ;; resume：批准 → 工具执行 → "随口一答"（不合格）→ 校验反馈重入 → JSON
-          r (agent-loop/resume kernel (:loop-state paused) :approved
+          r (agent-loop/resume chat-client (:loop-state paused) :approved
               {:context (context/with-conversation-id (context/create) "tf-6")})]
       (is (= :completed (:status r)))
       (is (= "{\"ok\":1}" (get-in r [:response :text]))
@@ -186,17 +186,17 @@
                          (swap! seen conj (select-keys req [:resume? :messages]))
                          (chain req))}
           calls (atom 0)
-          svc {:chat-fn (fn [_ _]
+          cm {:chat-fn (fn [_ _]
                           (if (= 1 (swap! calls inc))
                             (response/make-response :text nil
                               :tool-calls [{:id "t1" :name "noop-tool" :args {}}])
                             (response/make-response :text "done" :tool-calls nil)))}
           store (memory/in-memory-store)
-          kernel (build-kernel svc [(ma/memory-filter store) probe])
+          chat-client (build-chat-client cm [(ma/memory-filter store) probe])
           opts {:context (context/with-conversation-id (context/create) "tf-7")
                 :tool-gate (fn [_] :pause)}
-          paused (agent-loop/invoke kernel store [(msg/user "go")] opts)
-          _ (agent-loop/resume kernel (:loop-state paused) :approved
+          paused (agent-loop/invoke chat-client store [(msg/user "go")] opts)
+          _ (agent-loop/resume chat-client (:loop-state paused) :approved
               {:context (context/with-conversation-id (context/create) "tf-7")})]
       (is (= 2 (count @seen)) "invoke 一次 + resume 一次")
       (is (nil? (:resume? (first @seen))) "invoke 的 TurnRequest 无标记")

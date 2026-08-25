@@ -27,8 +27,8 @@
                    :films {:type \"array\" :items {:type \"string\"}}}
       :required [\"actor\" \"films\"]})
 
-   (kernel/build-kernel
-     {:service svc
+   (chat-client/build-chat-client
+     {:chat-model cm
       :filters [(ma/memory-filter store)                      ;; 递归重入依赖 memory 在位
                 (flt/validation-turn-filter
                   (so/validate-fn schema :parse-fn #(json/parse-string % true))

@@ -3,10 +3,10 @@
 
    运行：clojure -M -e load-file，文件参数为 examples/tool_calling_manager_live_test.clj。"
   (:require [clojure.string :as str]
-             [im.ttalk.agent.client :as agent]
-            [im.ttalk.agent.kernel :as kernel]
+             [im.ttalk.agent.simple-agent :as agent]
+            [im.ttalk.agent.chat-client :as chat-client]
              [im.ttalk.agent.model.response :as response]
-             [im.ttalk.agent.model.service :as service]
+             [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.provider.factory.builder :as factory]
             [im.ttalk.agent.provider.minimax :as minimax]
             [im.ttalk.agent.react :as react]
@@ -32,19 +32,24 @@
   (println "ToolCallingManager x MiniMax live test")
   (try
     (let [provider (factory/create-provider-from-env :minimax)
-          svc (service/create-service provider {:model minimax/default-model
-                                                :max-tokens 512
-                                                :temperature 0})
+          cm (chat-model/create-chat-model provider {:model minimax/default-model
+                                                     :max-tokens 512
+                                                     :temperature 0})
           llm-calls (atom 0)
           observed-llm-tool-calls (atom [])
-          instrumented-svc
-          (assoc svc :chat-fn
-                 (fn [messages opts]
-                   (let [response ((:chat-fn svc) messages opts)]
-                     (swap! llm-calls inc)
-                     (swap! observed-llm-tool-calls into
-                            (or (:tool-calls response) []))
-                     response)))
+          ;; 包一层 IChatModel 转调内层——chat-model 是 record，
+          ;; (assoc cm :chat-fn ...) 的旧写法会被协议分派无视（装配期即抛）。
+          instrumented-cm
+          (reify chat-model/IChatModel
+            (call [_ request]
+              (let [response (chat-model/call cm request)]
+                (swap! llm-calls inc)
+                (swap! observed-llm-tool-calls into
+                       (or (response/response-tool-calls response) []))
+                response))
+            (stream-call [_ request on-token]
+              (chat-model/stream-call cm request on-token))
+            (model-options [_] (chat-model/model-options cm)))
           manager-calls (atom [])
           delegate (react/virtual-thread-tool-calling-manager)
           instrumented-manager
@@ -53,10 +58,10 @@
               (let [tool-calls (response/response-tool-calls resp)]
                 (swap! manager-calls conj tool-calls)
                 (manager/execute-tool-calls delegate k resp opts))))
-          k (kernel/build-kernel {:service instrumented-svc
-                                  :tools [#'get-weather]
-                                  :tool-manager instrumented-manager})
-          a (agent/create-agent {:kernel k})
+          k (chat-client/build-chat-client {:chat-model instrumented-cm
+                                            :tools [#'get-weather]
+                                            :tool-manager instrumented-manager})
+          a (agent/create-agent {:chat-client k})
           result (agent/chat a
                    "Use get-weather exactly once with city 'Beijing', then briefly report the result."
                    {:max-iterations 2})

@@ -1,20 +1,22 @@
 (ns im.ttalk.agent.react
-  "工具调用循环（从 kernel 下沉而来）
+  "工具调用循环（从 chat-client 下沉而来）
 
-   kernel 只提供原语 invoke-chat / invoke-tool；'驱动 LLM↔工具直到文本或暂停'
+   chat-client 只提供原语 invoke-chat / invoke-tool；'驱动 LLM↔工具直到文本或暂停'
    这套策略(含 max-iterations / gate 暂停 / resume / 悬空 tool_use 自愈)属编排层，
-   放在 simpleagent。每轮只向 invoke-chat 传 delta，由 kernel 的 memory filter
+   放在 simpleagent。每轮只向 invoke-chat 传 delta，由 chat-client 的 memory filter
    按 conversation-id 拼出完整历史。
 
-   store 显式传入(kernel 不再持有 memory)：用于 heal 与临时会话清理；
-   与 kernel 上挂载的 memory-filter 必须是同一个 store 实例。
+   store 显式传入(chat-client 不再持有 memory)：用于 heal 与临时会话清理；
+   与 chat-client 上挂载的 memory-filter 必须是同一个 store 实例。
 
-   callbacks 独立于 kernel filter：:on-llm-call/:on-llm-result/:on-tool-result
+   callbacks 独立于 chat-client filter：:on-llm-call/:on-llm-result/:on-tool-result
    在循环关键节点直接触发，不走 filter 链。gate 评估结果缓存，确保每个工具调用
    恰好触发一次观察回调（不重复）。"
   (:require [clojure.string]
             [im.ttalk.agent.callbacks :as cb]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.tool-registry :as registry]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.tool :as tool]
             [im.ttalk.agent.model.error :as err]
@@ -35,10 +37,11 @@
   10)
 
 (defn- filter-tools-by-tags
-  "根据 tags 过滤 kernel 的 tool schemas（OR 逻辑；均 nil 时返回全部）。"
-  [kernel {:keys [tags exclude-tags]}]
-  (let [all-tools (:tools kernel)
-        tool-vars-map (:tool-vars kernel)
+  "根据 tags 过滤 chat-client 的 tool schemas（OR 逻辑；均 nil 时返回全部）。"
+  [chat-client {:keys [tags exclude-tags]}]
+  (let [reg (registry/registry-of chat-client)
+        all-tools (:tools reg)
+        tool-vars-map (:tool-vars reg)
         tags-set (when tags (set tags))
         exclude-tags-set (when exclude-tags (set exclude-tags))]
     (if (and (nil? tags-set) (nil? exclude-tags-set))
@@ -54,11 +57,11 @@
 (defn- build-chat-opts
   "从 invoke/resume 的 opts 构建传给 invoke-chat 的 chat 选项
    （system-prompt 合并 + 工具 schema 过滤 + tool-choice）。"
-  [kernel opts]
+  [chat-client opts]
   (let [system-prompts (or (:system-prompts opts) [])
         sp-str (when (seq system-prompts)
                  (->> system-prompts (map :content) (clojure.string/join "\n")))
-        tool-schemas (filter-tools-by-tags kernel opts)
+        tool-schemas (filter-tools-by-tags chat-client opts)
         tool-choice (or (:tool-choice opts) :auto)]
     (cond-> {:tools tool-schemas :tool-choice tool-choice}
       sp-str (assoc :system-prompt sp-str)
@@ -68,24 +71,24 @@
 (def ^:private tool-executor
   "VirtualThreadToolCallingManager 用的共享虚拟线程 executor。
 
-   注意这是**进程全局**单例：同 JVM 所有选了 VT 引擎的 kernel 的工具批共享它。
+   注意这是**进程全局**单例：同 JVM 所有选了 VT 引擎的 chat-client 的工具批共享它。
    虚拟线程无界，故不会「耗尽」，但也没有舱壁/限流/可关停边界——需要这些的场景
    注入 ThreadPoolToolCallingManager（每实例一个有界池）。**缺省引擎（Sequential）
    不用此 executor**——全程内联在调用方线程上。"
   (delay (Executors/newVirtualThreadPerTaskExecutor)))
 
 (defn- invoke-with-retry
-  "调用 kernel/invoke-tool；仅当错误为 :transient 且工具声明 :retry 时
+  "调用 chat-client/invoke-tool；仅当错误为 :transient 且工具声明 :retry 时
    按策略指数退避重试（幂等前提；重试会重跑整条 tool filter 链）。
 
-   工具声明的 `:timeout` 由 `kernel/invoke-tool` **自己**强制（单次调用的时间上限
+   工具声明的 `:timeout` 由 `chat-client/invoke-tool` **自己**强制（单次调用的时间上限
    是它的职责，不是循环的）——超时归 :transient，故这里的重试对它天然生效。
    幂等前提在超时下更要紧：重试发起时上一次调用可能仍在跑（打不断的那种）。"
-  [kernel fn-key args tool-context]
-  (let [policy (kernel/retry-policy kernel fn-key)
+  [chat-client fn-key args tool-context]
+  (let [policy (registry/retry-policy chat-client fn-key)
         max-r  (long (or (:max-retries policy) 0))]
     (loop [attempt 0]
-      (let [resp (kernel/invoke-tool kernel fn-key args tool-context)]
+      (let [resp (chat-client/invoke-tool chat-client fn-key args tool-context)]
         (if (and policy
                  (= :transient (get-in resp [:error :class]))
                  (< attempt max-r))
@@ -100,7 +103,7 @@
          (:rejected? true)}——
    错误/拒绝的结果没有 :writes，reduce 时自动跳过（单工具事务性）；
    :error 携带故障类别，供屏障处策略路由（S2）。"
-  [kernel tc decision tool-context on-tool-result]
+  [chat-client tc decision tool-context on-tool-result]
   (cond
     (= :reject decision)
     {:tc tc :value "已拒绝执行" :rejected? true}
@@ -116,7 +119,7 @@
     :else
     (let [fn-key (keyword (:name tc))
           {:keys [value writes error]}
-           (try (invoke-with-retry kernel fn-key (:args tc) tool-context)
+           (try (invoke-with-retry chat-client fn-key (:args tc) tool-context)
                 (catch Throwable t
                   (let [{:keys [message class]} (err/contain-throwable t)]
                     {:value (str "错误: " message)
@@ -132,9 +135,9 @@
   "整批是否 return-direct。与 Spring AI 一致取**全体**语义（allMatch）：
    混批（部分声明）时继续正常回灌 LLM——「一半直接返回、一半交给模型」
    没有自洽解释。"
-  [kernel calls]
+  [chat-client calls]
   (and (seq calls)
-       (every? #(kernel/return-direct-tool? kernel (:name %)) calls)))
+       (every? #(registry/return-direct-tool? chat-client (:name %)) calls)))
 
 (defn- direct-response
   "把工具结果消息拼成最终响应（return-direct 时不再问 LLM，结果即答案）。"
@@ -150,8 +153,8 @@
 
 (defn- run-inline
   "map 阶段：按序内联执行，**不构造 Future**。"
-  [kernel tool-calls decisions tool-context on-tool-result]
-  (mapv (fn [tc d] (invoke-one kernel tc d tool-context on-tool-result))
+  [chat-client tool-calls decisions tool-context on-tool-result]
+  (mapv (fn [tc d] (invoke-one chat-client tc d tool-context on-tool-result))
         tool-calls decisions))
 
 (defn- run-on-executor
@@ -166,11 +169,11 @@
    包成 ExecutionException（普通 Exception）。invoke-one 忠实重抛的 OOM 若被包
    裹会逃逸类型随引擎而变（串行=裸 OOM，并发=EE），违反 §3「引擎不改变可观察语义」。
    此处拆 cause 原样重抛。"
-  [^ExecutorService executor kernel tool-calls decisions tool-context on-tool-result]
+  [^ExecutorService executor chat-client tool-calls decisions tool-context on-tool-result]
   (let [futs (mapv (fn [tc d]
                      (.submit executor
                               ^Callable
-                              (bound-fn* (fn [] (invoke-one kernel tc d tool-context
+                              (bound-fn* (fn [] (invoke-one chat-client tc d tool-context
                                                             on-tool-result)))))
                    tool-calls decisions)]
     (mapv (fn [^java.util.concurrent.Future f]
@@ -183,11 +186,11 @@
 (defn- collect-batch
   "reduce 阶段（屏障）：writes 按原始序折叠进 context；
    messages / records / errors 按原始序排回。三个引擎共用，保证返回形状一致。"
-  [kernel tool-context init-records results]
+  [chat-client tool-context init-records results]
   (let [{:keys [context conflicts]}
         (ctx/apply-writes tool-context
                           (keep :writes results)
-                          (get-in kernel [:settings :state-slots]))]
+                          (get-in chat-client [:settings :state-slots]))]
     (when (seq conflicts)
       (log/warn "同批多个工具写入未声明 reducer 的槽（last-writer 按调用序生效）:"
                 conflicts))
@@ -220,14 +223,14 @@
    executor 非 nil → 并行提交，但下列两种情形仍退化为内联：
    - 批内任一工具声明 :serial（整批退化按序，声明级契约，manager 不得违反）
    - 批内只有一个调用（并行无收益）"
-  [executor kernel tool-calls gate tool-context init-records on-tool-result]
+  [executor chat-client tool-calls gate tool-context init-records on-tool-result]
   (let [decisions (gate-decisions gate tool-calls)
-        serial?   (boolean (some #(kernel/serial-tool? kernel (:name %)) tool-calls))
+        serial?   (boolean (some #(registry/serial-tool? chat-client (:name %)) tool-calls))
         results   (if (or (nil? executor) serial? (<= (count tool-calls) 1))
-                    (run-inline kernel tool-calls decisions tool-context on-tool-result)
-                    (run-on-executor executor kernel tool-calls decisions
+                    (run-inline chat-client tool-calls decisions tool-context on-tool-result)
+                    (run-on-executor executor chat-client tool-calls decisions
                                      tool-context on-tool-result))]
-    (collect-batch kernel tool-context init-records results)))
+    (collect-batch chat-client tool-context init-records results)))
 
 (defn execute-batch
   "MapReduce 执行一批工具调用（设计见 docs/agent-loop-concurrency-design.md §9）。
@@ -240,7 +243,7 @@
    批内任一工具声明 :serial 时，即使选了并发引擎也整批退化为按序执行。
    **状态语义与引擎无关**：三个引擎都是快照 + 屏障折叠。
 
-   reduce：屏障收齐后，各工具的 :writes 按 tool-call 原始序经 kernel
+   reduce：屏障收齐后，各工具的 :writes 按 tool-call 原始序经 chat-client
    :state-slots 的槽级 reducer 折叠进 context（未声明槽默认 last-writer；
    同批多工具写同一未声明槽记 warn）。messages/records 按原始序排回。
 
@@ -258,12 +261,12 @@
           :errors [{:id :name :class :message :tc} ...]}
    :errors 为本批失败调用及其故障类别（重试耗尽后仍失败的才出现在此），
    供屏障处策略路由（环境类 → 暂停等人，见 run-tool-loop）。"
-  ([kernel tool-calls gate tool-context init-records]
-   (execute-batch kernel tool-calls gate tool-context init-records nil))
-  ([kernel tool-calls gate tool-context init-records on-tool-result]
+  ([chat-client tool-calls gate tool-context init-records]
+   (execute-batch chat-client tool-calls gate tool-context init-records nil))
+  ([chat-client tool-calls gate tool-context init-records on-tool-result]
    ;; executor = nil → 全程内联。**缺省串行**（v0.3 破坏性变更：此前缺省是
    ;; @tool-executor 的虚拟线程并行）。并发是显式选择，见 defn 文档。
-   (execute-batch-via nil kernel tool-calls gate tool-context
+   (execute-batch-via nil chat-client tool-calls gate tool-context
                       init-records on-tool-result)))
 
 ;;; ============================================================
@@ -281,10 +284,10 @@
 
 (defrecord VirtualThreadToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager
-  (execute-tool-calls [_ kernel response opts]
+  (execute-tool-calls [_ chat-client response opts]
     (binding [tool-calling-manager/*active-manager-timeout* timeout]
       (let [calls (response/response-tool-calls response)]
-        (execute-batch-via @tool-executor kernel calls
+        (execute-batch-via @tool-executor chat-client calls
                            (:gate opts)
                            (:tool-context opts)
                            (:records opts)
@@ -311,11 +314,11 @@
 
 (defrecord SequentialToolCallingManager [timeout]
   tool-calling-manager/ToolCallingManager
-  (execute-tool-calls [_ kernel response opts]
+  (execute-tool-calls [_ chat-client response opts]
     (binding [tool-calling-manager/*active-manager-timeout* timeout]
       (let [calls (response/response-tool-calls response)]
         ;; executor = nil：全程内联，从不构造 Future
-        (execute-batch-via nil kernel calls
+        (execute-batch-via nil chat-client calls
                            (:gate opts)
                            (:tool-context opts)
                            (:records opts)
@@ -357,13 +360,13 @@
 
 (defrecord ThreadPoolToolCallingManager [^ExecutorService pool timeout]
   tool-calling-manager/ToolCallingManager
-  (execute-tool-calls [_ kernel response opts]
+  (execute-tool-calls [_ chat-client response opts]
     (when (.isShutdown pool)
       (throw (ex-info "ThreadPoolToolCallingManager 的线程池已关闭，无法再执行工具批"
                       {:error-class :environment})))
     (binding [tool-calling-manager/*active-manager-timeout* timeout]
       (let [calls (response/response-tool-calls response)]
-        (execute-batch-via pool kernel calls
+        (execute-batch-via pool chat-client calls
                            (:gate opts)
                            (:tool-context opts)
                            (:records opts)
@@ -376,7 +379,7 @@
   "有界平台线程池引擎：工具批在**本实例自己的池**里跑，形成舱壁隔离。
 
    线程模型：固定大小的平台线程池（daemon 线程）。
-   隔离边界：每个实例一个池——工具执行的并发上限 = pool-size，不与其他 kernel
+   隔离边界：每个实例一个池——工具执行的并发上限 = pool-size，不与其他 chat-client
    相互挤占；池随实例关停（见下）。这是 VT 引擎给不了的：后者用进程全局无界池。
 
    opts:
@@ -392,14 +395,14 @@
    **生命周期由持有者负责**——池不会自己关。实现了 java.io.Closeable：
 
      (with-open [m (thread-pool-tool-calling-manager {:pool-size 4})]
-       (let [k (kernel/build-kernel {:service svc :tools [...] :tool-manager m})]
+       (let [cc (chat-client/build-chat-client {:chat-model cm :tools [...] :tool-manager m})]
          ...))
 
    关停后再执行工具批抛 ex-info（:error-class :environment）。
 
-   **不变量：一个引擎属于一个 kernel，不跨 delegate 边界。**
+   **不变量：一个引擎属于一个 chat-client，不跨 delegate 边界。**
    子 agent 是独立 agent，自有引擎——这本来就是默认：delegate 的 subagent-config
-   全部来自用户的 :subagent-fn，父 kernel 的 :tool-manager 没有渠道流进去。
+   全部来自用户的 :subagent-fn，父 chat-client 的 :tool-manager 没有渠道流进去。
 
    故**不要把同一个实例亲手塞进 subagent-config 复用**（那是绕过默认去踩）：
    delegate-tool 是 spawn→await→drop，父批的工具会占着池线程阻塞等子 agent 跑完，
@@ -436,8 +439,8 @@
    缺省**（经 invoke-tool → effective-tool-timeout 读 `:tool-manager`）。
    不对称是 v0.3 引入的：`:timeout` 在 invoke-tool 强制，而调度在 react——两者
    分属不同层，run-tools 只走前者。要完整引擎行为（含调度）请用 invoke/resume。"
-  [kernel tool-calls tool-context]
-  (execute-batch kernel tool-calls nil tool-context []))
+  [chat-client tool-calls tool-context]
+  (execute-batch chat-client tool-calls nil tool-context []))
 
 (defn- dangling-tool-call-ids
   "history 中出现在 assistant :tool-calls 里、但没有对应 tool 结果消息的 {:id :name}。"
@@ -450,7 +453,7 @@
 
 (defn heal-dangling-tool-calls!
   "开新一轮前的自愈：为 conv-id 历史里的悬空 tool_use 补「已取消」中立结果，使会话重新配平。
-   无悬空则 no-op。store 即挂载于 kernel 的同一 memory store。
+   无悬空则 no-op。store 即挂载于 chat-client 的同一 memory store。
    store 为 nil 时（如 :memory false 的子 Agent）直接跳过，无需自愈。"
   [store conv-id]
   (when (and store conv-id)
@@ -510,7 +513,7 @@
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}
    （暂停两种 phase：审批（工具未执行）与 :env-retry（批已执行、环境类失败））"
-  [kernel delta remaining records tctx gate chat-opts callbacks policy]
+  [chat-client delta remaining records tctx gate chat-opts callbacks policy]
   (let [token (:cancel-token chat-opts)
         meta (or (:metadata callbacks) {})
         on-tool-result (:on-tool-result callbacks)
@@ -528,8 +531,8 @@
                 (let [{:keys [response context]}
                       (if (:on-token chat-opts)
                         (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
-                          (kernel/invoke-chat-stream kernel delta (assoc chat-opts :context tctx)))
-                        (kernel/invoke-chat kernel delta (assoc chat-opts :context tctx)))
+                          (chat-client/invoke-chat-stream chat-client delta (assoc chat-opts :context tctx)))
+                        (chat-client/invoke-chat chat-client delta (assoc chat-opts :context tctx)))
                       tctx context
                       calls (response/response-tool-calls response)]
                   ;; 每次 LLM 返回后触发（观察用，不影响流程）
@@ -545,7 +548,7 @@
 
                     ;; 续跑判据（对标 Spring AI ToolExecutionEligibilityChecker）：
                     ;; 判据说停 → 带 tool-call 的响应也按最终答案收尾（工具不执行）
-                    (not ((or (get-in kernel [:settings :eligibility-fn]) (constantly true))
+                    (not ((or (get-in chat-client [:settings :eligibility-fn]) (constantly true))
                           response tctx))
                     {:status :completed :response response
                      :tool-context tctx :tool-calls-made @records*}
@@ -588,9 +591,9 @@
                                           :records @records*
                                           :on-tool-result on-tool-result}
                               {:keys [messages records context errors]}
-                              (if-let [tm (:tool-manager kernel)]
-                                (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
-                                (execute-batch kernel calls cached-gate tctx @records* on-tool-result))
+                              (if-let [tm (:tool-manager chat-client)]
+                                (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
+                                (execute-batch chat-client calls cached-gate tctx @records* on-tool-result))
                               ;; 批次真跑了 → 当场记账。filter 重入会再跑一次，也再记一次。
                               _ (vreset! records* records)
                               _ (vswap! remaining* dec)
@@ -605,7 +608,7 @@
                             ;; :direct-messages 交给调用方落库——正常路径下工具结果是靠
                             ;; **下一次 invoke-chat** 经 memory filter 落库的，这里没有
                             ;; 下一次，不补落库就会在历史里留下悬空 tool_use。
-                            (return-direct-batch? kernel calls)
+                            (return-direct-batch? chat-client calls)
                             {:status :completed
                              :response (direct-response messages)
                              :tool-context context
@@ -615,7 +618,7 @@
 
                             :else
                             {:status :continue :messages messages :context context}))))))))))
-        iteration-chain ((:iteration (kernel/filter-hooks kernel)) iteration-terminal)]
+        iteration-chain ((:iteration (flt/filter-hooks chat-client)) iteration-terminal)]
     (loop [delta delta, tctx tctx, index 0]
       (let [result (iteration-chain {:messages delta :context tctx
                                      :index index :remaining @remaining*})]
@@ -623,11 +626,11 @@
           (recur (:messages result) (:context result) (inc index))
           result)))))
 
-(defn- kernel-memory-store
-  "取 kernel 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
+(defn- chat-client-memory-store
+  "取 chat-client 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
    没挂 memory filter → nil（此时工具结果本就不落库，直接返回也无需补）。"
-  [kernel]
-  (some #(when (= :memory (:name %)) (:store %)) (:filters kernel)))
+  [chat-client]
+  (some #(when (= :memory (:name %)) (:store %)) (:filters chat-client)))
 
 (defn- persist-direct-messages!
   "return-direct 收尾时补落库工具结果消息。
@@ -643,9 +646,9 @@
 
    幂等：只在结果带 :direct-messages 时落一次，随后摘掉该键——turn filter
    递归重入时不会重复落库。无 memory filter / 无 conv-id 时跳过。"
-  [result kernel conv-id]
+  [result chat-client conv-id]
   (if-let [ms (:direct-messages result)]
-    (let [store (kernel-memory-store kernel)]
+    (let [store (chat-client-memory-store chat-client)]
       (when (and store conv-id)
         (memory/mem-add store conv-id (mapv msg/normalize ms)))
       (dissoc result :direct-messages))
@@ -655,8 +658,8 @@
   "工具调用循环主入口（统一循环）。
 
    参数:
-   - kernel:   Kernel 实例（需注册 LLM 服务）
-   - store:    ChatMemory store（与 kernel 上 memory-filter 同一实例；用于 heal/临时清理）
+   - chat-client:   ChatClient 实例（需配置 ChatModel）
+   - store:    ChatMemory store（与 chat-client 上 memory-filter 同一实例；用于 heal/临时清理）
    - messages: 本轮新消息（中立消息）
    - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags
                :on-env-error :pause|:proceed（缺省 :proceed——环境类工具失败照常交给模型；
@@ -666,17 +669,17 @@
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}"
-  [kernel store messages opts]
-  (when-not (:service kernel)
-    (throw (ex-info "Kernel 未配置 LLM 服务（请在 build-kernel 中提供 :service）"
-                    {:kernel-keys (keys kernel)})))
+  [chat-client store messages opts]
+  (when-not (:chat-model chat-client)
+    (throw (ex-info "ChatClient 未配置 ChatModel（请在 build-chat-client 中提供 :chat-model）"
+                    {:chat-client-keys (keys chat-client)})))
   (let [base-ctx (or (:context opts) (ctx/create))
         ephemeral? (nil? (ctx/conversation-id base-ctx))
         conv-id (or (ctx/conversation-id base-ctx)
                     (str "conv-" (java.util.UUID/randomUUID)))
         init-ctx (ctx/with-conversation-id base-ctx conv-id)
         max-iter (or (:max-iterations opts)
-                     (get-in kernel [:settings :max-tool-iterations])
+                     (get-in chat-client [:settings :max-tool-iterations])
                      default-max-iterations)
         callbacks (or (:callbacks opts) {})
         _ (heal-dangling-tool-calls! store conv-id)]
@@ -684,15 +687,15 @@
       ;; turn 链：包整个工具循环（每 turn 一次；filter 可改写 :messages/:context、
       ;; 递归重入——每次重入获得全新 max-iterations 预算）。设计见 §14。
       (let [turn-terminal (fn [treq]
-                            (-> (run-tool-loop kernel
+                            (-> (run-tool-loop chat-client
                                                (mapv msg/normalize (:messages treq))
                                                max-iter [] (or (:context treq) init-ctx)
                                                (:tool-gate opts)
-                                               (build-chat-opts kernel opts)
+                                               (build-chat-opts chat-client opts)
                                                callbacks
                                                {:on-env-error (or (:on-env-error opts) :proceed)})
-                                (persist-direct-messages! kernel conv-id)))
-            turn-chain ((:turn (kernel/filter-hooks kernel)) turn-terminal)
+                                (persist-direct-messages! chat-client conv-id)))
+            turn-chain ((:turn (flt/filter-hooks chat-client)) turn-terminal)
             result (turn-chain {:messages messages :context init-ctx})]
         (when (and ephemeral? store (= :completed (:status result)))
           (memory/mem-clear store conv-id))
@@ -712,12 +715,12 @@
    decision :retry   → 环境已修复：重跑失败调用，结果按 id 替换进原批次消息；
                        若仍有环境类失败则再次暂停（同 phase）。
    decision 其他     → :proceed：原错误结果照常交给模型。"
-  [kernel {:keys [batch-messages failed-calls remaining records]} decision opts]
+  [chat-client {:keys [batch-messages failed-calls remaining records]} decision opts]
   (let [tctx (or (:context opts) (ctx/create))
         gate (:tool-gate opts)
         callbacks (or (:callbacks opts) {})
         policy {:on-env-error (or (:on-env-error opts) :pause)}
-        chat-opts (build-chat-opts kernel opts)]
+        chat-opts (build-chat-opts chat-client opts)]
     (if (= :retry decision)
       (let [response (response/make-response :tool-calls failed-calls)
             batch-opts {:gate nil
@@ -725,18 +728,18 @@
                          :records records
                          :on-tool-result (:on-tool-result callbacks)}
              {:keys [messages records context errors]}
-             (if-let [tm (:tool-manager kernel)]
-               (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
-              (execute-batch kernel failed-calls nil tctx records
+             (if-let [tm (:tool-manager chat-client)]
+               (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
+              (execute-batch chat-client failed-calls nil tctx records
                              (:on-tool-result callbacks)))
             merged (replace-tool-results batch-messages messages)
             env-errors (when (= :pause (:on-env-error policy))
                          (filterv #(= :environment (:class %)) errors))]
         (if (seq env-errors)
           (env-pause env-errors merged records remaining context)
-          (run-tool-loop kernel merged remaining records context
+          (run-tool-loop chat-client merged remaining records context
                          gate chat-opts callbacks policy)))
-      (run-tool-loop kernel batch-messages remaining records tctx
+      (run-tool-loop chat-client batch-messages remaining records tctx
                      gate chat-opts callbacks policy))))
 
 (declare ^:private resume-approval)
@@ -757,7 +760,7 @@
    - :reply    + {:message 答复}  → 答复即 pending 工具的结果（必填）
 
    参数:
-   - kernel:     Kernel 实例
+   - chat-client:     ChatClient 实例
    - loop-state: invoke 返回的 :loop-state
    - decision:   见上
    - opts:       同 invoke（须含带 conversation-id 的 :context 以接续历史；
@@ -769,37 +772,37 @@
    标记，请求侧改写类 filter（RAG 注入等）应据此跳过首次改写。
 
    返回: 同 invoke（:completed 或再次 :paused）"
-  [kernel loop-state decision opts]
+  [chat-client loop-state decision opts]
   (let [continuation
         (fn []
           (if (= :env-retry (:phase loop-state))
-            (resume-env kernel loop-state decision opts)
-            (resume-approval kernel loop-state decision opts)))
+            (resume-env chat-client loop-state decision opts)
+            (resume-approval chat-client loop-state decision opts)))
         tctx (or (:context opts) (ctx/create))
         max-iter (or (:max-iterations opts)
-                     (get-in kernel [:settings :max-tool-iterations])
+                     (get-in chat-client [:settings :max-tool-iterations])
                      default-max-iterations)
         consumed? (atom false)
         ;; 终端一次性分派：首调 = 暂停延续；重入 = 常规循环（新 delta）
         terminal (fn [treq]
                    (-> (if (compare-and-set! consumed? false true)
                          (continuation)
-                         (run-tool-loop kernel
+                         (run-tool-loop chat-client
                                         (mapv msg/normalize (:messages treq))
                                         max-iter [] (or (:context treq) tctx)
                                         (:tool-gate opts)
-                                        (build-chat-opts kernel opts)
+                                        (build-chat-opts chat-client opts)
                                         (or (:callbacks opts) {})
                                         {:on-env-error (or (:on-env-error opts) :proceed)}))
                        ;; 延续与重入都可能撞上 return-direct 收尾
-                       (persist-direct-messages! kernel (ctx/conversation-id tctx))))
-        turn-chain ((:turn (kernel/filter-hooks kernel)) terminal)]
+                       (persist-direct-messages! chat-client (ctx/conversation-id tctx))))
+        turn-chain ((:turn (flt/filter-hooks chat-client)) terminal)]
     (turn-chain {:resume? true :messages nil :context tctx})))
 
 (defn- resume-approval
   "审批暂停的延续（工具未执行）：按 decision/payload 组 resume-gate，
    执行批次后继续循环。"
-  [kernel loop-state decision opts]
+  [chat-client loop-state decision opts]
   (let [{:keys [tool-calls remaining records pending-id]} loop-state
         payload (:payload opts)
         _ (when (and (= :reply decision) (not (string? (:message payload))))
@@ -833,11 +836,11 @@
                     :records records
                     :on-tool-result on-tool-result}
         {:keys [messages records context]}
-        (if-let [tm (:tool-manager kernel)]
-          (tool-calling-manager/execute-tool-calls tm kernel response batch-opts)
-          (execute-batch kernel tool-calls resume-gate tctx records on-tool-result))]
-    (run-tool-loop kernel messages remaining records context
+        (if-let [tm (:tool-manager chat-client)]
+          (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
+          (execute-batch chat-client tool-calls resume-gate tctx records on-tool-result))]
+    (run-tool-loop chat-client messages remaining records context
                    gate
-                   (build-chat-opts kernel opts)
+                   (build-chat-opts chat-client opts)
                    callbacks
                    {:on-env-error (or (:on-env-error opts) :proceed)})))

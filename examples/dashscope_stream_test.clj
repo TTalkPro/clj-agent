@@ -10,7 +10,7 @@
 
    运行（需 DASHSCOPE_API_KEY）：
      clojure -M examples/dashscope_stream_test.clj"
-  (:require [im.ttalk.agent.client :as agent]
+  (:require [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as st]
             [im.ttalk.agent.model :as model]
             [im.ttalk.agent.provider.dashscope :as dashscope]))

@@ -23,8 +23,8 @@
    ## 用法
 
    ```clojure
-   (kernel/build-kernel
-     {:service svc
+   (chat-client/build-chat-client
+     {:chat-model cm
       :filters [(ma/memory-filter store)
                 (rag/qa-turn-filter my-retriever :top-k 4)]})
    ```

@@ -91,7 +91,7 @@
    参数：
    - tools: 工具定义列表
 
-   转换结果按 tools 列表有界缓存：kernel 常驻的工具列表在 ReAct 循环
+   转换结果按 tools 列表有界缓存：chat-client 常驻的工具列表在 ReAct 循环
    每轮 LLM 调用时重复转换，缓存后同一列表只转一次。
 
    返回：

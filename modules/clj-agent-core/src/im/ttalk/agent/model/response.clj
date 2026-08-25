@@ -6,7 +6,7 @@
 
    核心概念：
    - ILLMResponse: 响应协议，定义 Core 所需的方法
-   - LLMResponse: 默认实现，使用 record
+   - ChatResponse: 默认实现，使用 record
    - make-response: 工厂函数，创建规范化的响应
 
    使用示例：
@@ -248,10 +248,10 @@
      返回：关键字 :openai | :anthropic | ..."))
 
 ;;; ============================================================
-;;; LLMResponse Record
+;;; ChatResponse Record
 ;;; ============================================================
 
-(defrecord LLMResponse
+(defrecord ChatResponse
   [text reasoning tool-calls usage finish-reason
    id model provider raw-response replay-blocks]
 
@@ -269,7 +269,7 @@
 (defn response-replay-blocks
   "获取「必须原样带回下一轮」的不透明载荷 {:format kw :data ...}，无则 nil。
 
-   由 service 归一化时经可选协议 im.ttalk.agent.model/IReplayableResponse 抽取；
+   由 chat-model 归一化时经可选协议 im.ttalk.agent.model/IReplayableResponse 抽取；
    provider 不实现该协议即恒为 nil（原路径不变）。
    下游：filter/memory 的 response->neutral 把它挂到中立消息的 :blocks。"
   [resp]
@@ -305,7 +305,7 @@
                      im.ttalk.agent.model/IReplayableResponse）
 
    返回：
-   LLMResponse record
+   ChatResponse record
 
    示例：
    (make-response
@@ -315,7 +315,7 @@
      :finish-reason \"stop\")"
   [& {:keys [text reasoning tool-calls usage finish-reason
              id model provider raw-response replay-blocks]}]
-  (->LLMResponse
+  (->ChatResponse
     text
     reasoning
     tool-calls

@@ -11,14 +11,15 @@
      (start! 3000)  ;; 然后浏览器连 ws://localhost:3000/ws 或 EventSource('/sse?q=...')"
   (:require [org.httpkit.server :as hk]
             [cheshire.core :as json]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as st]
             [im.ttalk.agent.provider.minimax :as minimax]))
 
 ;; ── agent（provider 可换；这里用 MiniMax 示例）──────────────────
 (defn make-agent []
   (agent/create-agent
-    {:provider (minimax/create-provider {:api-key (System/getenv "MINIMAX_AUTH_TOKEN")})
+    {:provider (minimax/create-provider {:api-key (or (System/getenv "MINIMAX_API_KEY")
+                                                  (System/getenv "MINIMAX_AUTH_TOKEN"))})
      :model "MiniMax-M2.7" :max-tokens 1024}))
 
 (defn- sse-frame [m] (str "data: " (json/encode m) "\n\n"))

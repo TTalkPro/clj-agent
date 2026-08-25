@@ -1,18 +1,18 @@
 (ns im.ttalk.agent.filter.memory
   "Memory Filter - 按 conversation-id 读写历史
 
-    以 around-chat filter 形态挂进 kernel 的 filter 链：
+    以 around-chat filter 形态挂进 chat-client 的 filter 链：
 
     - req 段：把本次入参(delta)存入 store，再用完整历史替换发给 LLM 的 messages
     - resp 段：把 LLM 的 assistant 回复(可能含 tool-calls)存入 store
 
     conversation-id 从 ChatRequest 的 :context(扁平 map)读取；为空时整体 no-op
-    (保留一次性/无记忆调用)。store 是 filter 的私有闭包，kernel 对其无感知。
+    (保留一次性/无记忆调用)。store 是 filter 的私有闭包，chat-client 对其无感知。
 
     用法：
-    (build-kernel {:service svc
-                   :tools tools
-                   :filters [(memory-filter store)]})"
+    (build-chat-client {:chat-model cm
+                        :tools tools
+                        :filters [(memory-filter store)]})"
   (:require [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.memory :as mem]
             [im.ttalk.agent.model.message :as msg]
@@ -46,15 +46,15 @@
   [store]
   (flt/map->Filter
    {:name :memory
-   ;; 暴露绑定的 store，便于 create-agent 在传入预构建 kernel 时复用同一实例
-   ;; （react heal/clear 与 kernel 落库必须用同一 store，见 client/create-agent）。
+   ;; 暴露绑定的 store，便于 create-agent 在传入预构建 chat-client 时复用同一实例
+   ;; （react heal/clear 与 chat-client 落库必须用同一 store，见 client/create-agent）。
    ;; 四个钩子之外的键 → Filter record 的 ext-map，`(:store f)` 照常可读。
    :store store
    :chat (fn [req chain]
-           (if-let [cid (get-in req [:context :conversation-id])]
+           (if-let [cid (get-in (flt/req-context req) [:conversation-id])]
              (do
-               (mem/mem-add store cid (mapv msg/normalize (:messages req)))   ;; 存 delta
-               (let [resp (chain (assoc req :messages (mem/mem-get store cid)))] ;; 展开历史 → 下游
-                 (mem/mem-add store cid [(response->neutral (:response resp))]) ;; 存回复
+               (mem/mem-add store cid (mapv msg/normalize (flt/req-messages req)))  ;; 存 delta
+               (let [resp (chain (flt/with-messages req (mem/mem-get store cid)))]  ;; 展开历史 → 下游
+                 (mem/mem-add store cid [(response->neutral (:response resp))])     ;; 存回复
                  resp))
              (chain req)))}))

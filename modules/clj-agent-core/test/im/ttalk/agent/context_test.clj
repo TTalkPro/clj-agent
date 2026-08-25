@@ -5,7 +5,7 @@
             [im.ttalk.agent.tool :as tool :refer [deftool]]
             [im.ttalk.agent.filter :as filters]
             [im.ttalk.agent.model.response :as response]
-            [im.ttalk.agent.kernel :as core]))
+            [im.ttalk.agent.chat-client :as core]))
 
 ;; ============================================================
 ;; Phase 1: ToolContext（扁平 map）
@@ -152,30 +152,30 @@
 ;; ============================================================
 
 (deftest invoke-tool-test
-  (let [kernel (core/build-kernel
+  (let [chat-client (core/build-chat-client
                  {:tools [#'simple-echo #'append-item #'inc-counter]})]
     (testing "普通 tool 返回 {:value}，无 :writes"
-      (let [result (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))]
+      (let [result (core/invoke-tool chat-client :simple-echo {:text "hi"} (context/create))]
         (is (= "echo: hi" (:value result)))
         (is (nil? (:writes result)))))
 
     (testing "写状态的 tool：context 只读，写意图经 :writes 透出"
       (let [in-ctx (context/create {:items ["x"]})
-            result (core/invoke-tool kernel :append-item {:item "y"} in-ctx)]
+            result (core/invoke-tool chat-client :append-item {:item "y"} in-ctx)]
         (is (= "已添加: y（此前 1 项）" (:value result)) "工具读到只读快照")
         (is (= {:items "y"} (:writes result)))))
 
     (testing "多次调用：调用方折叠 writes 后传入下一次快照"
-      (let [r1 (core/invoke-tool kernel :inc-counter {} (context/create {:counter 0}))
+      (let [r1 (core/invoke-tool chat-client :inc-counter {} (context/create {:counter 0}))
             c1 (:context (context/apply-writes {:counter 0} [(:writes r1)] nil))
-            r2 (core/invoke-tool kernel :inc-counter {} c1)
+            r2 (core/invoke-tool chat-client :inc-counter {} c1)
             c2 (:context (context/apply-writes c1 [(:writes r2)] nil))
-            r3 (core/invoke-tool kernel :inc-counter {} c2)]
+            r3 (core/invoke-tool chat-client :inc-counter {} c2)]
         (is (= {:counter 3} (:writes r3)))))
 
     (testing "函数未找到抛异常"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"函数未找到"
-            (core/invoke-tool kernel :nonexistent {} (context/create)))))))
+            (core/invoke-tool chat-client :nonexistent {} (context/create)))))))
 
 (deftest invoke-tool-with-filters-test
   (let [modify {:name :modify
@@ -185,53 +185,53 @@
               :tool (fn [req chain]
                       (let [resp (chain req)]
                         (update resp :result str " [marked]")))}
-        kernel (core/build-kernel
+        chat-client (core/build-chat-client
                  {:tools [#'simple-echo]
                   :filters [modify mark]})]
     (testing "around 改参数"
       (is (= "echo: modified [marked]"
-             (:value (core/invoke-tool kernel :simple-echo {:text "original"} (context/create))))))
+             (:value (core/invoke-tool chat-client :simple-echo {:text "original"} (context/create))))))
     (testing "around 加工响应结果"
-      (let [result (core/invoke-tool kernel :simple-echo {:text "x"} (context/create))]
+      (let [result (core/invoke-tool chat-client :simple-echo {:text "x"} (context/create))]
         (is (clojure.string/ends-with? (:value result) " [marked]"))))))
 
 (deftest invoke-tool-skip-filter-test
   (let [blocker {:name :blocker
                  :tool (fn [_req _chain] {:result "blocked by filter"})}
-        kernel (core/build-kernel
+        chat-client (core/build-chat-client
                  {:tools [#'simple-echo]
                   :filters [blocker]})]
     (testing "filter 不调 chain 直接短路返回（无需回传 context）"
-      (is (= "blocked by filter" (:value (core/invoke-tool kernel :simple-echo {:text "hi"} (context/create))))))))
+      (is (= "blocked by filter" (:value (core/invoke-tool chat-client :simple-echo {:text "hi"} (context/create))))))))
 
 ;; ============================================================
 ;; invoke-chat
 ;; ============================================================
 
 (deftest invoke-chat-test
-  (let [svc {:chat-fn (fn [_ _] (response/make-response :text "hello response" :tool-calls nil))}
-        kernel (core/build-kernel {:service svc})]
+  (let [cm {:chat-fn (fn [_ _] (response/make-response :text "hello response" :tool-calls nil))}
+        chat-client (core/build-chat-client {:chat-model cm})]
     (testing "invoke-chat 返回 {:response :context}"
-      (let [result (core/invoke-chat kernel [{:role :user :content "hi"}] {})]
+      (let [result (core/invoke-chat chat-client [{:role :user :content "hi"}] {})]
         (is (= "hello response" (get-in result [:response :text])))
         (is (context/context? (:context result)))))
-    (testing "无 service 抛异常"
-      (let [no-svc (core/build-kernel {})]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"未配置 LLM 服务"
-              (core/invoke-chat no-svc [{:role :user :content "hi"}] {})))))))
+    (testing "无 chat-model 抛异常"
+      (let [no-cm (core/build-chat-client {})]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"未配置 ChatModel"
+              (core/invoke-chat no-cm [{:role :user :content "hi"}] {})))))))
 
 (deftest invoke-chat-with-chat-filter-test
   (let [inject {:name :inject
                 :chat (fn [req chain]
-                        (chain (update req :messages #(into [{:role :system :content "injected"}] %))))}
+                        (chain (filters/update-messages req #(into [{:role :system :content "injected"}] %))))}
         received (atom nil)
-        svc {:chat-fn (fn [msgs _] (reset! received msgs)
+        cm {:chat-fn (fn [msgs _] (reset! received msgs)
                         (response/make-response :text "response" :tool-calls nil))}
-        kernel (core/build-kernel
-                 {:service svc
+        chat-client (core/build-chat-client
+                 {:chat-model cm
                   :filters [inject]})]
     (testing "chat filter 修改传给 LLM 的消息"
       (reset! received nil)
-      (core/invoke-chat kernel [{:role :user :content "hi"}] {})
+      (core/invoke-chat chat-client [{:role :user :content "hi"}] {})
       (is (= :system (:role (first @received))))
       (is (= "injected" (:content (first @received)))))))

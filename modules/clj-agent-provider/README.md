@@ -1,6 +1,6 @@
 # clj-agent-provider
 
-LLM Provider 和 Service 工厂模块
+LLM Provider 和 ChatModel 工厂模块
 
 [English](#english) | 中文
 
@@ -24,7 +24,7 @@ LLM Provider 和 Service 工厂模块
 │   实现 core 的协议 ────────────────┘                                         │
 │   ┌─────────────────────────────────────────────────────────────────┐       │
 │   │   provider/*.clj 实现 im.ttalk.agent.model/ILLMProvider           │       │
-│   │   （call-llm 收中立消息，内部转各厂商 wire；通用 Service 在 core）│       │
+│   │   （call-llm 收中立消息，内部转各厂商 wire；通用 ChatModel 在 core）│       │
 │   └─────────────────────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -33,7 +33,7 @@ LLM Provider 和 Service 工厂模块
 
 1. **可插拔** - Provider 注册表机制支持动态添加
 2. **配置灵活** - 环境变量、代码配置、默认值三级合并
-3. **Kernel 兼容** - 输出标准 `{:chat-fn :stream-fn}` Service map（同步 + 流式）
+3. **ChatClient 兼容** - 输出标准 `{:chat-fn :stream-fn}` ChatModel map（同步 + 流式）
 4. **延迟加载** - Provider 首次使用时才注册，避免循环依赖
 5. **声明式** - OpenAI 兼容 provider 一律用 `base/defprovider` 一处声明（base-url/env-key/default-model + 可选 `:api-key`/`:require-api-key?`/`:require-model?`），自动生成 config、调用函数与 `create-provider`，消除样板
 
@@ -116,20 +116,20 @@ LLM Provider 和 Service 工厂模块
 
 ```clojure
 (require '[im.ttalk.agent.provider.factory.builder :as factory])
-(require '[im.ttalk.agent.model.service :as service])
+(require '[im.ttalk.agent.chat-model :as chat-model])
 
 ;; 1. 创建 Provider
 (def provider (factory/create-provider-from-env :openai))
 
-;; 2. 创建 Kernel 兼容的 Service
-(def service (service/create-service
-               provider
-               {:model "gpt-4"
-                :max-tokens 4096
-                :temperature 0.7}))
+;; 2. 创建 ChatClient 兼容的 ChatModel
+(def cm (chat-model/create-chat-model
+          provider
+          {:model "gpt-4"
+           :max-tokens 4096
+           :temperature 0.7}))
 
-;; 3. 注册到 Kernel（声明式）
-(kernel/build-kernel {:service service :tools [...] :filters [...]})
+;; 3. 注册到 ChatClient（声明式）
+(chat-client/build-chat-client {:chat-model cm :tools [...] :filters [...]})
 ```
 
 ## API 参考
@@ -155,18 +155,18 @@ LLM Provider 和 Service 工厂模块
 (factory/create-provider-auto :openai {:api-key "sk-..."} false)  ;; 不读环境变量
 ```
 
-### Service 创建
+### ChatModel 创建
 
 ```clojure
-(require '[im.ttalk.agent.model.service :as service])
+(require '[im.ttalk.agent.chat-model :as chat-model])
 
-(def service (service/create-service
-               provider                   ;; Provider 实例（必需）
-               {:model "gpt-4"            ;; 模型名称（必需）
-                :max-tokens 4096          ;; 最大 token（默认 4096）
-                :temperature 0.7}))       ;; 温度（可选）
+(def cm (chat-model/create-chat-model
+          provider                   ;; Provider 实例（必需）
+          {:model "gpt-4"            ;; 模型名称（必需）
+           :max-tokens 4096          ;; 最大 token（默认 4096）
+           :temperature 0.7}))       ;; 温度（可选）
 
-;; Service 是一个 map:
+;; ChatModel 是一个 map:
 ;; {:chat-fn           (fn [messages opts] -> 归一化响应)   ;; 同步
 ;;  :stream-fn         (fn [messages opts on-token] -> normalized-response)}
 ;; provider 不支持流式时 :stream-fn 自动回退同步，并把全文作为单个 token emit
@@ -210,7 +210,7 @@ LLM Provider 和 Service 工厂模块
 
 ### 提示词控制（采样参数）
 
-调用 config（即传给 Service / `call-llm` 的 map）按「存在才设」透传，不再强塞默认值：
+调用 config（即传给 ChatModel / `call-llm` 的 map）按「存在才设」透传，不再强塞默认值：
 
 ```clojure
 ;; Anthropic
@@ -506,7 +506,7 @@ export OLLAMA_BASE_URL="http://localhost:11434"
 
 ;; 3. 使用
 (def provider (factory/create-provider :my-provider {:api-key "..."}))
-(def service (service/create-service provider {:model "my-model"}))
+(def cm (chat-model/create-chat-model provider {:model "my-model"}))
 ```
 
 ---
@@ -521,7 +521,7 @@ export OLLAMA_BASE_URL="http://localhost:11434"
 
 - **Provider Registry**: Lazy-loaded provider registration
 - **Factory Builder**: Multiple creation methods (manual, env vars, auto-merge)
-- **Service Creation**: Wraps providers into Kernel-compatible `{:chat-fn :stream-fn}` maps
+- **ChatModel Creation**: Wraps providers into ChatClient-compatible `{:chat-fn :stream-fn}` maps
 - **Schema Translation**: Request/response format translation for each provider
 
 ### Supported Providers
@@ -532,14 +532,14 @@ OpenAI, Anthropic, Zhipu, DeepSeek, MiniMax, DashScope (Alibaba), Gemini, Mistra
 
 ```clojure
 (require '[im.ttalk.agent.provider.factory.builder :as factory])
-(require '[im.ttalk.agent.model.service :as service])
+(require '[im.ttalk.agent.chat-model :as chat-model])
 
 (def provider (factory/create-provider-from-env :openai))
-(def service (service/create-service provider {:model "gpt-4"}))
+(def cm (chat-model/create-chat-model provider {:model "gpt-4"}))
 ```
 
 - `factory/create-provider` - Create by type with opts
 - `factory/create-provider-from-env` - Create from environment variables
 - `factory/create-provider-auto` - Smart config resolution
-- `service/create-service` - Create Kernel-compatible Service
+- `chat-model/create-chat-model` - Create ChatClient-compatible ChatModel
 - `registry/register-provider!` - Register custom providers

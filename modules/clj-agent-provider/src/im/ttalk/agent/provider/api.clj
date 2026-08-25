@@ -214,7 +214,7 @@
    - :raw-response 原始响应
 
    返回：
-   LLMResponse record（实现 ILLMResponse 协议）"
+   ChatResponse record（实现 ILLMResponse 协议）"
   response/make-response)
 
 ;;; ============================================================

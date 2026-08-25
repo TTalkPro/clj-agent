@@ -7,12 +7,14 @@
    3. 归一化输出：on-complete 时 normalize-response 得到 text/reasoning/usage/finish-reason。
    4. MiniMax-M 推理模型：reasoning（thinking）与正文（text）分离。
 
-   运行（需 MINIMAX_AUTH_TOKEN）：
+   运行（需 MINIMAX_API_KEY，兼容旧的 MINIMAX_AUTH_TOKEN）：
      clojure -M examples/minimax_stream_test.clj"
   (:require [im.ttalk.agent.provider.http.stream-client :as sc]
             [im.ttalk.agent.provider.stream.anthropic :as as]))
 
-(def token (System/getenv "MINIMAX_AUTH_TOKEN"))
+;; provider 默认读 MINIMAX_API_KEY；MINIMAX_AUTH_TOKEN 为旧变量名的兼容回退
+(def token (or (System/getenv "MINIMAX_API_KEY")
+               (System/getenv "MINIMAX_AUTH_TOKEN")))
 (def url "https://api.minimaxi.com/anthropic/v1/messages")
 
 (def t0 (System/currentTimeMillis))
@@ -20,7 +22,7 @@
 
 (defn run []
   (when-not token
-    (println "需要 MINIMAX_AUTH_TOKEN") (System/exit 1))
+    (println "需要 MINIMAX_API_KEY（或旧变量 MINIMAX_AUTH_TOKEN）") (System/exit 1))
   (let [reasoning-chunks (atom 0)
         text-chunks      (atom 0)
         text-sb          (StringBuilder.)

@@ -4,9 +4,9 @@
    context 累积恢复（缺口修复回归）/ 清理时机。"
   (:require [clojure.edn :as edn]
             [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.context :as context]
-            [im.ttalk.agent.kernel :as core]
+            [im.ttalk.agent.chat-client :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.filter.memory :as ma]
@@ -59,11 +59,11 @@
       (is (nil? (pause/pause-load store "c1"))))))
 
 (deftest snapshot-strip-test
-  (testing "不可序列化的 context key（如 :kernel）存档时剥离"
+  (testing "不可序列化的 context key（如 :chat-client）存档时剥离"
     (let [snap (pause/snapshot "c1" {:pause-reason "r"
                                      :loop-state {:remaining 1}
                                      :tool-context {:conversation-id "c1"
-                                                    :kernel (fn [] :not-edn)}})]
+                                                    :chat-client (fn [] :not-edn)}})]
       (is (= {:conversation-id "c1"} (:tool-context snap)))
       (is (= snap (edn/read-string (pr-str snap))) "快照整体可 EDN 往返"))))
 
@@ -77,26 +77,26 @@
 ;;; 下面的 pr-str → read-string → resume 把那条路提前跑在单测里。
 ;;; 若为了「顺手补全」把 loop-state 里的东西改成 record，先看这里为什么红。
 
-(defn- mock-svc [responses-fn] {:chat-fn (fn [_ _] (responses-fn))})
+(defn- mock-cm [responses-fn] {:chat-fn (fn [_ _] (responses-fn))})
 
 (deftest loop-state-edn-roundtrip-test
   (testing "审批 phase：loop-state 经 pr-str/read-string 往返后 resume 成功"
     (let [calls (atom 0)
-          svc (mock-svc (fn [] (if (= 1 (swap! calls inc))
+          cm (mock-cm (fn [] (if (= 1 (swap! calls inc))
                                  (response/make-response :text nil
                                    :tool-calls [{:id "d1" :name "mock-get-weather"
                                                  :args {:city "北京"}}])
                                  (response/make-response :text "查完了" :tool-calls nil))))
           store (memory/in-memory-store)
-          kernel (core/build-kernel {:service svc :tools [#'ts/mock-get-weather]
-                                     :filters [(ma/memory-filter store)]})
+          chat-client (core/build-chat-client {:chat-model cm :tools [#'ts/mock-get-weather]
+                                               :filters [(ma/memory-filter store)]})
           gate (fn [_] :pause)
-          r (agent-loop/invoke kernel store [{:role :user :content "查天气"}]
+          r (agent-loop/invoke chat-client store [{:role :user :content "查天气"}]
               {:context (context/with-conversation-id (context/create) "rt-1")
                :tool-gate gate})
           _ (is (= :paused (:status r)))
           ls' (edn/read-string (pr-str (:loop-state r)))
-          r2 (agent-loop/resume kernel ls' :approved
+          r2 (agent-loop/resume chat-client ls' :approved
                {:context (context/with-conversation-id (context/create) "rt-1")})]
       (is (= :completed (:status r2)))
       (is (= "查完了" (get-in r2 [:response :text])))))
@@ -104,21 +104,21 @@
   (testing ":env-retry phase：loop-state EDN 往返后 resume :retry 成功"
     (reset! env-ok false)
     (let [calls (atom 0)
-          svc (mock-svc (fn [] (if (= 1 (swap! calls inc))
+          cm (mock-cm (fn [] (if (= 1 (swap! calls inc))
                                  (response/make-response :text nil
                                    :tool-calls [{:id "f1" :name "env-fetch" :args {}}])
                                  (response/make-response :text "到手" :tool-calls nil))))
           store (memory/in-memory-store)
-          kernel (core/build-kernel {:service svc :tools [#'env-fetch]
-                                     :filters [(ma/memory-filter store)]})
-          r (agent-loop/invoke kernel store [{:role :user :content "取数"}]
+          chat-client (core/build-chat-client {:chat-model cm :tools [#'env-fetch]
+                                               :filters [(ma/memory-filter store)]})
+          r (agent-loop/invoke chat-client store [{:role :user :content "取数"}]
               {:context (context/with-conversation-id (context/create) "rt-2")
                :on-env-error :pause})
           _ (is (= :paused (:status r)))
           _ (is (= :env-retry (get-in r [:loop-state :phase])))
           ls' (edn/read-string (pr-str (:loop-state r)))
           _ (reset! env-ok true)
-          r2 (agent-loop/resume kernel ls' :retry
+          r2 (agent-loop/resume chat-client ls' :retry
                {:context (context/with-conversation-id (context/create) "rt-2")
                 :on-env-error :pause})]
       (is (= :completed (:status r2)))

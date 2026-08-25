@@ -1,6 +1,6 @@
 # clj-agent
 
-Clojure AI Agent Framework - Kernel 中央编排器
+Clojure AI Agent Framework - ChatClient 中央编排器
 
 [English](README_EN.md) | 中文
 
@@ -12,11 +12,11 @@ Clojure AI Agent Framework - Kernel 中央编排器
 - [快速开始](#快速开始)
   - [SimpleAgent（推荐入门）](#方式一simpleagent推荐入门)
   - [SimpleAgent + 敏感工具审批](#方式二simpleagent--敏感工具审批)
-  - [Kernel API（完全控制）](#方式三kernel-api完全控制)
+  - [ChatClient API（完全控制）](#方式三chatclient-api完全控制)
 - [核心概念](#核心概念)
   - [deftool 宏](#deftool-宏)
-  - [Kernel API](#kernel-api)
-  - [Service 接口](#service-接口)
+  - [ChatClient API](#chatclient-api)
+  - [ChatModel 接口](#chatmodel-接口)
   - [Filter 中间件](#filter-中间件洋葱式-around对标-spring-ai-advisor)
   - [ToolSearch（渐进式工具披露）](#toolsearch--渐进式工具披露对标-spring-ai-toolsearchtoolcallingadvisor)
   - [RAG 注入](#rag-注入对标-spring-ai-questionansweradvisor)
@@ -33,11 +33,11 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 `clj-agent` 是一个 Clojure AI Agent 框架，提供从简单对话到工具调用的完整解决方案：
 
-- **Kernel + Tool 编排**：`deftool` 宏定义工具，`build-kernel` 声明式注册并统一调度
+- **ChatClient + Tool 编排**：`deftool` 宏定义工具，`build-chat-client` 声明式注册并统一调度
 - **多级 Invoke API**：`invoke-tool`（函数调用）、`invoke-chat`（纯 LLM）；工具调用循环由 SimpleAgent 提供
 - **Filter 中间件**：洋葱式 around 链（对标 Spring AI 2.0 Advisor），:chat / :tool / :iteration / :turn / :token-xform 五类钩子，可短路/重试/计时/递归重入
 - **Spring AI 2.0 Advisor 对齐**：ToolSearch 渐进式工具披露（省 34–64% token）、return-direct、可插拔续跑判据、SafeGuard 敏感词、RAG 注入、结构化输出自我修正、RE2 重读——检索/向量库一律经协议注入，框架零新增依赖（见 `docs/advisor-alignment-design.md`）
-- **Service 抽象**：LLM 服务通过 `{:chat-fn :stream-fn}` map 接入，无耦合
+- **ChatModel 抽象**：LLM 服务通过 `{:chat-fn :stream-fn}` map 接入，无耦合
 - **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）、xAI、Moonshot、OpenRouter、SiliconFlow 及 OpenAI 兼容协议
 - **多模态输入**：中立内容部件（图片 / PDF / 音频）一份历史两家 wire 各自成型；不支持的组合当场报错而非静默丢内容
 - **文本向量化**：`IEmbeddingProvider` 独立可选协议 + 内置 8 家端点（OpenAI / 智谱 / SiliconFlow / DashScope 原生 / Ollama 等），自动批次切片
@@ -47,20 +47,32 @@ Clojure AI Agent Framework - Kernel 中央编排器
 
 ## 架构概览
 
-采用依赖倒置(DIP)：**Core 定义协议(端口)+ kernel 原语;Client 是 Agent 运行时;Provider 实现协议——Client 与 Provider 各自依赖 Core，互不依赖**。任何实现 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能注入 agent。
+采用依赖倒置(DIP)：**Core 定义协议(端口)+ chat-client 原语;Client 是 Agent 运行时;Provider 实现协议——Client 与 Provider 各自依赖 Core，互不依赖**。任何实现 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能注入 agent。
+
+四层，每层只做一件事——**判据是「换一家 provider 要不要重写」**：
+
+| 层 | 职责 | 对应 Spring AI |
+|---|---|---|
+| `provider.*` | 一次 HTTP 往返，认识厂商 wire 格式 | （各 SDK） |
+| `chat-model` | 一次**逻辑**调用：选项合并 → **重试** → 响应归一化 | `ChatModel` |
+| `chat-client` | filter 洋葱链 + 工具装配；两个 invoke 原语 | `ChatClient` |
+| `simple-agent` | 工具循环 + 记忆 + HITL | （`ToolCallingAdvisor` + 应用层） |
 
 ```mermaid
 graph TB
-    subgraph "clj-agent-core（协议 + kernel 原语）"
+    subgraph "clj-agent-core（协议 + 原语）"
         PROTO[ILLMProvider 协议<br/>im.ttalk.agent.model<br/>中立消息边界]
-        SV[通用 Service<br/>仅凭协议包装任意 provider]
-        K[Kernel<br/>中央编排器]
-        AD[Advisor<br/>中间件洋葱链]
+        CM[ChatModel<br/>选项 + 重试 + 归一化]
+        RT[retry<br/>判据取自 canonical error]
+        K[ChatClient<br/>filter 链 + 工具装配]
+        TR[ToolRegistry<br/>工具声明表]
+        AD[Filter<br/>中间件洋葱链]
         T[deftool]
+        FA[im.ttalk.agent<br/>Facade 入口]
     end
 
     subgraph "clj-agent-client（Agent 运行时，依赖 core）"
-        SA[client<br/>同步有状态 + pause/resume]
+        SA[simple-agent<br/>同步有状态 + pause/resume]
         RE[ReAct<br/>工具调用循环]
         ME[ChatMemory]
     end
@@ -77,15 +89,22 @@ graph TB
         BL[DashScope]
     end
 
+    FA -.转发.-> K
     SA --> K
     SA --> RE
     K --> T
     K --> AD
-    K --> SV
+    K --> TR
+    K --> CM
+    CM --> RT
     RE --> ME
-    SV --> PROTO
+    CM --> PROTO
     AN & OA & DS & ZP & OL & GM & MS & MM & BL -. 实现 .-> PROTO
 ```
+
+**工具循环不在 ChatModel**——Spring AI 当前主线也把它从 `ChatModel` 挪进了
+`ToolCallingAdvisor`（advisor 链里）。我们放在 `react.clj` + `:iteration` 链，
+位置等价。
 
 ## 模块依赖关系
 
@@ -93,7 +112,7 @@ graph TB
 graph LR
     provider[clj-agent-provider<br/>厂商适配器]
     client[clj-agent-client<br/>Agent 运行时]
-    core[clj-agent-core<br/>协议 + kernel 原语]
+    core[clj-agent-core<br/>协议 + chat-client 原语]
 
     provider --> core
     client --> core
@@ -104,7 +123,7 @@ graph LR
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + kernel 原语(kernel/tool/advisor)；零依赖
+│   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + chat-client 原语(chat_client/tool/filter)；零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent)，依赖 core
 │   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
 ├── examples/              # 使用示例
@@ -173,7 +192,7 @@ bb release core       # 或只装某一个
 最简单的使用方式，自动管理对话状态：
 
 ```clojure
-(require '[im.ttalk.agent.client :as ka])
+(require '[im.ttalk.agent.simple-agent :as sa])
 (require '[im.ttalk.agent.tool :refer [deftool]])
 (require '[im.ttalk.agent.provider.factory.builder :as factory])
 
@@ -190,7 +209,7 @@ bb release core       # 或只装某一个
 (def provider (factory/create-provider-from-env :openai))
 
 ;; 4. 创建 Agent
-(def agent (ka/create-agent
+(def agent (sa/create-agent
              {:provider provider
               :model "gpt-4"
               :system-prompt "你是一个天气助手"
@@ -201,11 +220,11 @@ bb release core       # 或只装某一个
 ;;   :completed -> {:text "..." :tool-calls-made [...]}
 ;;   :paused    -> 见方式二（敏感工具审批）
 ;;   :error     -> {:error {:type :network-error|:provider-error ... :retryable? bool}}（不抛裸异常）
-(println (:text (ka/chat agent "北京天气怎么样？")))
-(println (:text (ka/chat agent "上海呢？")))  ;; 自动记住上下文
+(println (:text (sa/chat agent "北京天气怎么样？")))
+(println (:text (sa/chat agent "上海呢？")))  ;; 自动记住上下文
 
 ;; 重置对话
-(ka/reset! agent)
+(sa/reset! agent)
 ```
 
 ### 方式二：SimpleAgent + 敏感工具审批
@@ -213,7 +232,7 @@ bb release core       # 或只装某一个
 SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensitive` 的工具时自动暂停，等待人工审批：
 
 ```clojure
-(require '[im.ttalk.agent.client :as ka])
+(require '[im.ttalk.agent.simple-agent :as sa])
 
 (deftool delete-file
   "删除文件"
@@ -223,26 +242,26 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 
 (def file-tools [#'delete-file])
 
-(def agent (ka/create-agent
+(def agent (sa/create-agent
              {:provider provider
               :model "gpt-4"
               :tools file-tools
               :on-pause (fn [{:keys [reason]}]
                           (println "需要审批:" reason))}))   ;; 配置即启用 pause/resume
 
-(let [result (ka/chat agent "删除 /tmp/test.txt")]
+(let [result (sa/chat agent "删除 /tmp/test.txt")]
   (when (= :paused (:status result))
     (println "待审批工具:" (get-in result [:pending-tool :name]))
-    (ka/resume agent "approved")                                ;; 批准
-    ;; (ka/resume agent "rejected")                             ;; 拒绝
-    ;; (ka/resume agent "rejected" {:message "先退款再删"})     ;; 拒绝带理由（模型直接拿到）
-    ;; (ka/resume agent "approved" {:args {:path "/tmp/b"}})    ;; 编辑参数后批准
-    ;; (ka/resume agent "reply" {:message "选 B 方案"})         ;; 答复即工具结果（ask-user）
+    (sa/resume agent "approved")                                ;; 批准
+    ;; (sa/resume agent "rejected")                             ;; 拒绝
+    ;; (sa/resume agent "rejected" {:message "先退款再删"})     ;; 拒绝带理由（模型直接拿到）
+    ;; (sa/resume agent "approved" {:args {:path "/tmp/b"}})    ;; 编辑参数后批准
+    ;; (sa/resume agent "reply" {:message "选 B 方案"})         ;; 答复即工具结果（ask-user）
     ))
 ```
 
 **ask-user 模式**：定义一个 body 永不执行的提问工具，`:on-tool-call` 拦截暂停，
-用户答案经 `(ka/resume agent "reply" {:message 答案})` 直接作为工具结果回模型
+用户答案经 `(sa/resume agent "reply" {:message 答案})` 直接作为工具结果回模型
 ——模型侧看到的就是一次普通的工具往返。
 
 **跨进程重启的 HITL**：配置 `:pause-store`（配合 SQLite ChatMemory），暂停快照自动持久化；
@@ -253,16 +272,16 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 (require '[im.ttalk.agent.pause :as pause]
          '[im.ttalk.agent.memory.sqlite :as sqlite])
 
-(def agent (ka/create-agent {:provider provider :tools file-tools
+(def agent (sa/create-agent {:provider provider :tools file-tools
                              :memory (sqlite/sqlite-store "agent.db")
                              :pause-store (pause/sqlite-pause-store "agent.db")
                              :conversation-id "order-42"
                              :callbacks {:on-tool-call ...}}))
-;; 暂停 → 进程退出 → 重启后同配置重建 → (ka/resume agent "approved")
+;; 暂停 → 进程退出 → 重启后同配置重建 → (sa/resume agent "approved")
 ```
 
 环境类工具失败（如凭证失效，`{:error-class :environment}`）的暂停同样支持：
-`(ka/resume agent "retry")` 表示环境已修复、重跑失败工具。
+`(sa/resume agent "retry")` 表示环境已修复、重跑失败工具。
 
 **Timeline 与多分支**：对话日志即时间线，分支 = 前缀复制到新 conversation-id：
 
@@ -282,41 +301,41 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 合法 fork/rollback 点是 **turn 边界或暂停点**。工具的 `:writes` 会作为元数据
 随 tool-result 消息进历史（审计 + event-sourcing 伏笔），不会发给 LLM。
 
-### 方式三：Kernel API（完全控制）
+### 方式三：ChatClient API（完全控制）
 
-直接使用 Kernel 获取最大灵活性：
+直接使用 ChatClient 获取最大灵活性：
 
 ```clojure
-(require '[im.ttalk.agent.kernel :as kernel])
+(require '[im.ttalk.agent.chat-client :as chat-client])
 (require '[im.ttalk.agent.filter :as filters])
-(require '[im.ttalk.agent.model.service :as service])
+(require '[im.ttalk.agent.chat-model :as chat-model])
 
-;; 创建 LLM Service（通用：仅凭协议包装任意 provider）
-(def service (service/create-service
-               provider
-               {:model "gpt-4"
-                :max-tokens 4096}))
+;; 创建 ChatModel（通用：仅凭协议包装任意 provider）
+(def cm (chat-model/create-chat-model
+          provider
+          {:model "gpt-4"
+           :max-tokens 4096}))
 
-;; 构建 Kernel（声明式；kernel 只提供原语：invoke-chat / invoke-tool）
-(def app-kernel
-  (kernel/build-kernel
-    {:service service
-     :tools   my-tools                    ;; tool var 向量
-     :filters [filters/logging-filter]}))
+;; 构建 ChatClient（声明式；chat-client 只提供原语：invoke-chat / invoke-tool）
+(def cc
+  (chat-client/build-chat-client
+    {:chat-model cm
+     :tools      my-tools                 ;; tool var 向量
+     :filters    [filters/logging-filter]}))
 
 ;; 纯 LLM 调用（经 :chat filter 链，不触发工具）
-(let [{:keys [response]} (kernel/invoke-chat app-kernel
+(let [{:keys [response]} (chat-client/invoke-chat cc
                            [{:role "user" :content "你好"}]
                            {})]
   (println (:text response)))
 
 ;; 单独调用工具（经 :tool filter 链）
-(let [{:keys [value]} (kernel/invoke-tool app-kernel :get-weather
+(let [{:keys [value]} (chat-client/invoke-tool cc :get-weather
                         {:city "北京"} nil)]
   (println value))
 
-;; 完整的「工具调用循环」是 SimpleAgent 的职责（见上文方式一），不在 kernel：
-;; (require '[im.ttalk.agent.client :as agent])
+;; 完整的「工具调用循环」是 SimpleAgent 的职责（见上文方式一），不在 chat-client：
+;; (require '[im.ttalk.agent.simple-agent :as agent])
 ;; (agent/chat (agent/create-agent {:provider provider :tools my-tools}) "北京天气怎么样？")
 ```
 
@@ -347,7 +366,7 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 
 ;; 写共享状态：任意工具返回 {:result r :writes {k v}} 声明写意图（ctx 本身只读）；
 ;; 同一轮的多个 tool-call 并行执行，屏障处按原始序经 :state-slots 的 reducer 折叠：
-(kernel/build-kernel {:tools [...] :state-slots {:notes {:init [] :reduce conj}}})
+(chat-client/build-chat-client {:tools [...] :state-slots {:notes {:init [] :reduce conj}}})
 ;; 未声明的槽默认 last-writer；失败/超时/被拒的调用 writes 不生效（单工具事务性）
 
 ;; 失败分层路由（缺省一切错误序列化为结果交给模型——errors are data）：
@@ -355,59 +374,136 @@ SimpleAgent 配置 `:on-pause` 即启用 pause/resume：遇到标记为 `:sensit
 (throw (ex-info "凭证失效" {:error-class :environment}))  ;; :on-env-error :pause 时屏障处暂停等人
 ;; 工具内调 provider 的 canonical error（:retryable?/:auth-error）自动获得正确分类
 
-;; 工具名在一个 kernel 内必须唯一（var 之间、与内联工具之间都算），重名 build-kernel
+;; 工具名在一个 chat-client 内必须唯一（var 之间、与内联工具之间都算），重名 build-chat-client
 ;; 当场抛 {:duplicates [...]}——同名的两份 schema 都会发给 LLM，而 handler 只留得下
 ;; 一个，「模型看到的」与「实际执行的」就此对不上且无运行期症状。要替换某个工具，
 ;; 请在传 :tools 之前处理自己的列表。:timeout/:retry 的非法值同样装配期即拒。
 ```
 
-### Kernel API
+### ChatClient API
 
-Kernel 提供三类 API：
+ChatClient 提供三类 API：
 
 ```clojure
-;; Build API - 声明式构建 Kernel
-(kernel/build-kernel
-  {:service  service                    ;; LLM 服务
-   :tools    my-tools                   ;; tool var 向量
-   :filters  [filter-def]               ;; Filter 列表
-   :settings {:max-tool-iterations 10}})
+(require '[im.ttalk.agent.chat-client :as chat-client]
+         '[im.ttalk.agent.tool-registry :as registry]
+         '[im.ttalk.agent.filter :as flt])
+
+;; Build API - 声明式构建 ChatClient
+(chat-client/build-chat-client
+  {:chat-model cm                       ;; ChatModel（IChatModel 实现）
+   :tools      my-tools                 ;; tool var 向量
+   :filters    [filter-def]             ;; Filter 列表
+   :settings   {:max-tool-iterations 10}})
 
 ;; Invoke API - 调用（两个原语，均经 filter 洋葱链）
-(kernel/invoke-tool kernel :fn-name {:arg "val"} context)  ;; 调用函数（:tool 链）
-(kernel/invoke-chat kernel messages opts)                   ;; 纯 LLM（:chat 链，不含工具循环）
-;; 工具调用循环不在 kernel —— 见 im.ttalk.agent.client（create-agent + chat）
+(chat-client/invoke-tool cc :fn-name {:arg "val"} context)  ;; 调用函数（:tool 链）
+(chat-client/invoke-chat cc messages opts)                  ;; 纯 LLM（:chat 链，不含工具循环）
+;; 工具调用循环不在 chat-client —— 见 im.ttalk.agent.simple-agent（create-agent + chat）
 
-;; Query API - 查询
-(:tools kernel)                       ;; 所有 tool schema
-(:service kernel)                     ;; 获取 service
-(kernel/find-function kernel :name)   ;; 查找函数
-(kernel/list-functions kernel)        ;; 列出所有函数名
-;; 工具声明查询 —— 都是 tool-meta 表的薄封装（var 与内联工具同表，装配期汇好）
-(kernel/tool-meta kernel :name)       ;; ToolMeta record（:func-def/:serial/:retry
-                                      ;;   /:timeout/:return-direct），未注册则 nil
-(kernel/serial-tool? kernel :name)    ;; / return-direct-tool? / retry-policy
-(kernel/effective-tool-timeout kernel :name) ;; 实际生效的超时（含引擎缺省）
-;; filter 链
-(kernel/filter-hooks kernel)          ;; 装配期预编译的四条链
-(kernel/with-filters kernel fs)       ;; 换链并重编 hooks —— 改 :filters 走这里
+;; 工具声明查询 —— 在 tool-registry（都是 tool-meta 表的薄封装，装配期汇好）
+(registry/tool-schemas cc)              ;; 所有 tool schema（原 (:tools cc)）
+(:tool-registry cc)                     ;; ToolRegistry record 本体
+(:chat-model cc)                        ;; 获取 ChatModel
+(registry/find-function cc :name)       ;; 查找函数
+(registry/list-functions cc)            ;; 列出所有函数名
+(registry/tool-meta cc :name)           ;; ToolMeta record（:func-def/:serial/:retry
+                                        ;;   /:timeout/:return-direct），未注册则 nil
+(registry/serial-tool? cc :name)        ;; / return-direct-tool? / retry-policy
+(registry/effective-tool-timeout cc :name) ;; 实际生效的超时（含引擎缺省）
+
+;; filter 链访问 —— 在 filter ns
+(flt/filter-hooks cc)                   ;; 装配期预编译的四条链
+(flt/with-filters cc fs)                ;; 换链并重编 hooks —— 改 :filters 走这里
 ```
 
-**装配期把能算的都算掉**：`build-kernel` 预折四条 filter 链（存 `hooks`）、
+**或者走 Facade**（`im.ttalk.agent`，对照 beamai `beamai.erl`）——常用的那些
+一个地方找得到，每个函数都是一行转发：
+
+```clojure
+(require '[im.ttalk.agent :as ai])
+
+(ai/deftool get-weather "查天气" [[city :string "城市"]] (str city ": 晴 25°C"))
+
+(def cc (ai/chat-client {:chat-model (ai/chat-model provider {:model "gpt-4"})
+                         :tools      [#'get-weather]}))
+(ai/chat cc [{:role :user :content "北京天气？"}])
+(ai/invoke-tool cc :get-weather {:city "北京"})
+(ai/tools cc)
+```
+
+**装配期把能算的都算掉**：`build-chat-client` 预折四条 filter 链（存 `hooks`）、
 预 `comp` `:token-xform`、把每个工具的全部声明汇成一张 `tool-meta` 表。运行期
 `invoke-tool` / `invoke-chat` 只做「给链塞 terminal」+「查一次表」。
 
-### Service 接口
+### ChatModel 接口
 
-Service 是一个 map，定义 LLM 调用协议：
+**一次 LLM 调用**的抽象（对标 Spring AI 的 `ChatModel`）。分工判据是「换一家
+provider 要不要重写」：wire 格式要，退避策略不要——所以 Provider 只管「怎么发
+这一个请求」，选项合并 / **重试** / 响应归一化都归 ChatModel。
 
 ```clojure
-{:chat-fn   (fn [messages opts] -> 归一化响应)              ;; 同步
- :stream-fn (fn [messages opts on-token] -> 归一化响应)}    ;; 流式；不支持的 provider 自动回退同步
-;; 归一化响应实现 ILLMResponse：(resp/response-text r) / (resp/response-tool-calls r) / (resp/response-usage r)
+(require '[im.ttalk.agent.chat-model :as chat-model]
+         '[im.ttalk.agent.model.request :as req])
+
+(defprotocol IChatModel
+  (call        [this request])           ;; ChatRequest -> ChatResponse，**内建重试**
+  (stream-call [this request on-token])  ;; -> ChatResponse，**不重试**
+  (model-options [this]))                ;; 该 model 的缺省选项
+
+(def cm (chat-model/create-chat-model provider
+          {:model "gpt-4" :max-tokens 4096
+           :retry {:max-retries 3}}))     ;; 缺省 2 次；:retry false 关闭
+
+(chat-model/call cm (req/chat-request messages {:tools [...]}))
 ```
 
-core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议）可从任意 provider 创建。也可自行实现此 map 接入任意 LLM。
+两个实现：`DefaultChatModel`（包一个 `ILLMProvider`）与 `FnChatModel`（包
+`{:chat-fn :stream-fn}` 两个闭包）。**历史的裸 map 写法照旧可用**——
+`build-chat-client` 对 `:chat-model` 调 `as-chat-model` 归一化，传 record、
+传 map、传自定义 `IChatModel` 实现三者等价。
+
+#### 重试
+
+重试**在整个 filter 栈之下**（与 beamai `beamai_chat_model` 同一取舍）：
+
+```
+:chat filter（memory / 计时 / 记账）
+  └ ChatModel.call ──┬ 尝试 1 ✗ → 退避 → 尝试 2 ✓    ← 重试在这里面
+                     └ 返回一个响应
+```
+
+filter 看到的必须是「一次逻辑调用」——重试若在链**之上**，一次网络抖动就会让
+memory-filter 把同一轮 delta 写两遍、计时 filter 记出两条记录，而且没有任何
+运行期症状。要观测每次**真实尝试**用 `:on-retry` 回调。
+
+- **判据**：canonical error 的 `:retryable?`（401 永不重试，429/5xx/连接失败重试）
+- **`Retry-After`**：服务端给了就听它的，但受 `:max-delay` 约束（否则 `Retry-After: 3600`
+  会让同步线程睡满一小时）
+- **参数三级取值**：单次 opts > provider config > 框架默认；`:max-retries 0` 关闭
+- **流式不重试**：token 已投递给 sink，重跑会让下游看到重复内容；流式要容错
+  请在 turn 层重跑整轮
+
+### 请求 / 响应类型（两层）
+
+```clojure
+ChatClientRequest{:request ChatRequest, :context Context, :on-token f}   ;; filter 链看到的
+                   └───────┬────────┘
+ChatRequest{:messages [...], :options {...}}                            ;; ChatModel 看到的
+```
+
+多出来的那一层是 `:context`（请求级共享状态）与 `:on-token`（流式 sink）——
+两者都**不下发给 provider**。合成一个类型就等于把「不该发出去的」和「要发出去
+的」放进同一个 map，再靠一张白名单去筛；分成两层，筛子就不需要了，provider
+私有参数（Anthropic 的 `:thinking` / `:service-tier`…）也能原样穿过去。
+
+filter 改写请求走存取器，别 `assoc-in`：
+
+```clojure
+(flt/req-messages req)  (flt/with-messages req msgs)  (flt/update-messages req f)
+(flt/req-option req :tools)  (flt/with-option req :tools ts)  (flt/with-options req m)
+(flt/req-context req)   (flt/req-on-token req)
+```
 
 ### Filter 中间件（洋葱式 around，对标 Spring AI Advisor）
 
@@ -450,7 +546,7 @@ core 的 `im.ttalk.agent.model.service/create-service`（通用，仅凭协议�
                    r))))                       ;; :paused/:cancelled 必须原样透传
 
 ;; 也可直接写 map：{:name :x :chat (fn [req chain] ...) :tool (fn [req chain] ...)}
-;; —— build-kernel 会经 as-filter 归一化成 record，两种写法等价
+;; —— build-chat-client 会经 as-filter 归一化成 record，两种写法等价
 
 ;; 内置 filter
 filters/logging-filter        ;; 调用前后日志（:tool）
@@ -465,14 +561,14 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 (filters/re-reading-filter)   ;; RE2 重读（:turn，对标 ReReadingAdvisor）
 
 ;; 注册：filters 向量顺序即洋葱层序（越靠前越外层）
-(kernel/build-kernel {:service svc :tools tools :filters [my-filter both]})
+(chat-client/build-chat-client {:chat-model cm :tools tools :filters [my-filter both]})
 ;; 链类型：:chat（invoke-chat，terminal 调 LLM）| :tool（invoke-tool，terminal 调函数）
 ;;       | :iteration（run-tool-loop 单轮）| :turn（run-tool-loop 整体）
 ;; tool 链契约：请求 {:function :args :context(只读)}，响应 {:result (:writes)}——
 ;; filter 可改写 :args、短路、around；无需（也不应）回传 :context。
 ;; 注意：同一轮的多个 tool-call 并行执行，交互式审批请放 agent 的 :tool-gate（批前串行），
 ;; 勿放 tool filter（会在并行任务中并发弹提示）。
-;; 改已建好的 kernel 的 :filters 走 kernel/with-filters（链在装配期预编译，
+;; 改已建好的 chat-client 的 :filters 走 chat-client/with-filters（链在装配期预编译，
 ;; 直接 assoc 会让 hooks 与之脱钩——有兜底重编译，但白扔装配期成果）。
 ```
 
@@ -488,9 +584,9 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 ```clojure
 (require '[im.ttalk.agent.filter.tool-search :as ts])
 
-(kernel/build-kernel
+(chat-client/build-chat-client
   (ts/with-tool-search                       ;; 工具 / filter / 状态槽三处一次装好
-    {:service svc
+    {:chat-model cm
      :tools   [#'t1 #'t2 ... #'t80]
      :filters [(ma/memory-filter store)]}
     {:index (ts/keyword-tool-index)          ;; 或 (ts/regex-tool-index)
@@ -515,8 +611,8 @@ filters/logging-filter        ;; 调用前后日志（:tool）
     (retrieve [_ query top-k]
       (map (fn [hit] {:text (:content hit)}) (my-vector-store/search query top-k)))))
 
-(kernel/build-kernel
-  {:service svc
+(chat-client/build-chat-client
+  {:chat-model cm
    :filters [(ma/memory-filter store)
              (rag/qa-turn-filter retriever :top-k 4)]})
 ```
@@ -590,7 +686,7 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 > 已接入主链路——`client/chat-stream` 在 ReAct 循环里逐 token 流出、`on-complete` 落库，
 > 与同步对话历史不分叉，并支持取消令牌（断连即停）。**所有内置 provider 均支持流式**
 > （含 DashScope 原生 SSE：`X-DashScope-SSE` + `incremental_output`）；个别 provider 若不支持，
-> service 会自动回退同步并把全文作为单个 token emit。
+> chat-model 会自动回退同步并把全文作为单个 token emit。
 > Web 框架（http-kit / Undertow / Jetty / Aleph）的 WebSocket/SSE 集成示例见 `examples/streaming/`。
 
 ### 创建 Provider
@@ -646,7 +742,7 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
 (proto/extract-tool-calls provider resp)   ;; => [{:id "..." :name "get-weather" :args {:city "北京"}}]
 ```
 
-> 归一化（统一成 `ILLMResponse`）发生在 `service/create-service` 里；直调
+> 归一化（统一成 `ILLMResponse`）发生在 `chat-model/create-chat-model` 里；直调
 > provider 拿到的是原始响应，故需经 `extract-*` 协议方法读取。
 
 ### 多模态输入（图片 / PDF / 音频）
@@ -659,7 +755,7 @@ Context 是扁平 map；对工具与 filter 而言是**只读环境**（conversa
          '[im.ttalk.agent.model.message :as msg])
 
 ;; SimpleAgent：message 位置直接给部件向量（内部照常包成 user 消息）
-(ka/chat agent [(content/text-part "这张图里有几只猫？")
+(sa/chat agent [(content/text-part "这张图里有几只猫？")
                 (content/image-part "https://example.com/cats.png")])
 
 ;; 本地文件自动 base64 + 猜 media type；内联 base64 须显式给 :media-type
@@ -700,13 +796,13 @@ embedding 模型与对话模型是两种模型，因此走**独立实例 + 独�
 
 ```clojure
 ;; 创建专业化 Agent
-(def researcher (ka/create-agent
+(def researcher (sa/create-agent
                   {:provider provider
                    :model "gpt-4"
                    :tools [web-search-plugin]
                    :system-prompt "你是研究员，负责查找和整理信息。"}))
 
-(def writer (ka/create-agent
+(def writer (sa/create-agent
               {:provider provider
                :model "gpt-4"
                :tools []
@@ -715,10 +811,10 @@ embedding 模型与对话模型是两种模型，因此走**独立实例 + 独�
 ;; 协作流程
 (defn research-and-write [topic]
   (let [;; 研究员收集信息
-        research-result (ka/chat researcher (str "研究主题: " topic))
+        research-result (sa/chat researcher (str "研究主题: " topic))
         facts (:text research-result)
         ;; 将研究结果传给写作者
-        article (ka/chat writer (str "基于以下信息写一篇文章:\n" facts))]
+        article (sa/chat writer (str "基于以下信息写一篇文章:\n" facts))]
     (:text article)))
 ```
 
@@ -759,7 +855,7 @@ bb repl simpleagent_examples  # 先加载某个 example 再进 REPL
 
 **动机**：一次排查在六个 README 里挖出一批**幽灵 API**——功能早被删/改，源码里
 甚至留了「已移除」的注释，文档却没跟。最离谱的是 `:build-result-msgs`：
-`model/service.clj` 明写它已移除，四个 README 却还在**头部特性 bullet** 里教人
+`chat_model.clj` 明写它已移除，四个 README 却还在**头部特性 bullet** 里教人
 用它。人肉复查挡不住这个，所以机器化。四项检查：
 
 | 检查 | 抓的是 |
@@ -787,8 +883,8 @@ bb repl simpleagent_examples  # 先加载某个 example 再进 REPL
 | `examples/structured_output_live_test.clj` | 12 | 把「缺少必填字段 birth_year」丢回真实模型，**它真的把字段补上了**（自我修正不是纸面主张） |
 | `examples/safeguard_live_test.clj` | 18 | 拦下时**零 LLM 调用**；不落库的代价在真实多轮里可见；边界——工具结果里的敏感词照样通过（**入口守卫 ≠ 输出守卫**） |
 | `examples/return_direct_live_test.clj` | 19 | **对照组**：同一句合规话术，return-direct 逐字送达 vs 普通工具被模型改写；补落库修复用真实第二轮验证 |
-| `examples/minimax_agent_live_test.clj` | — | 9 个 callback / 自定义 memory & kernel / `:filters` 不暴露 |
-| `examples/p3_replay_acceptance_live_test.clj` | 1 | **验收**：走真实 `create-agent` 全链，确认 thinking 载荷穿过 service→memory→wire 后正确率回到 100%（20/20，修复前基线 82.5%）。单测能钉链路，**但「模型拿到载荷后会不会真的答对」只有真模型能回答** |
+| `examples/minimax_agent_live_test.clj` | — | 9 个 callback / 自定义 memory & chat-client / `:filters` 不暴露 |
+| `examples/p3_replay_acceptance_live_test.clj` | 1 | **验收**：走真实 `create-agent` 全链，确认 thinking 载荷穿过 chat-model→memory→wire 后正确率回到 100%（20/20，修复前基线 82.5%）。单测能钉链路，**但「模型拿到载荷后会不会真的答对」只有真模型能回答** |
 | `examples/minimax_thinking_quality_experiment.clj` | — | **实验**（非门禁）：**预注册判据**的 A/B 质量对照（20 次/臂，7 步链，答案唯一可自动判定）。剥掉 thinking 回传（＝框架当前行为）→ **正确率 100%→82.5%、逐轮全对 100%→47.5%**，确证轮 n=40/臂 **p=0.0059 → 据此立项**（n=20 那轮 p=0.0530 未过线，判为功效不足并按规矩维持不立项）。含地板/天花板作废守卫与单侧 Fisher 检验 |
 | `examples/minimax_thinking_replay_experiment.clj` | — | **实验**（非门禁）：三臂对照量化「剥掉 thinking 块回传」（＝框架当前行为）的代价——M2.7 无差别，**M3 思考频率降 26% 但任务结果全同**。修正了一个基于代码推导的设计推论，见 `docs/provider-variant-design.md` §7 |
 | `examples/release_consumer_live_test.clj` | 10 | **消费方视角**：deps 只写 client + provider，core 必须由 pom 传递而来；断言 classpath 上是 jar 不是源码目录，再实叩一轮工具调用。单测跑在源码 classpath 上，对 jar/pom **一无所知**——pom 缺 core 依赖只在别人的项目里现形（需先 `bb release`） |

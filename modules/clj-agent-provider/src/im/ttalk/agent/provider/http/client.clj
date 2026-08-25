@@ -14,7 +14,8 @@
   (:require [cheshire.core :as json]
             [taoensso.timbre :as log]
             [clojure.string :as str]
-            [im.ttalk.agent.model.error :as errors])
+            [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.provider.http.retry :as retry])
   (:import [java.net URI URLEncoder]
            [java.net.http HttpClient HttpRequest HttpRequest$Builder HttpRequest$BodyPublishers
                           HttpResponse HttpResponse$BodyHandlers HttpHeaders]
@@ -140,7 +141,11 @@
   "把失败的 HTTP 响应（本模块 request/post 返回的 map）转为 canonical error
    （D5：ex-info data 即 canonical error map；保留 body/headers/request-id 于 :context 供排查）。
 
-   之前 openai_compat / anthropic / dashscope 各自维护同一逻辑，现统一于此。"
+   之前 openai_compat / anthropic / dashscope 各自维护同一逻辑，现统一于此。
+
+   顺带把 `Retry-After` 响应头解析成 `:retry-after-ms` 挂在错误 map 上：**解析
+   HTTP 头是 provider 边界的事**，而重试已上移到 ChatModel（core，不认识 HTTP）。
+   不这么传，重试上移就会静默丢掉服务端的退避建议——429 上尤其要紧。"
   [response provider]
   (let [status (or (:status response) 0)
         base (if (and (zero? status) (:error response))
@@ -149,8 +154,10 @@
                              (str "连接失败: " (:error response))
                              {:provider provider})
                ;; HTTP 4xx/5xx：按状态码分类（401/403→auth 不可重试；429→限流；5xx→provider 可重试）
-               (errors/http-response->error response provider))]
-    (assoc base :context (select-keys response [:body :headers :request-id :error]))))
+               (errors/http-response->error response provider))
+        retry-after (retry/parse-retry-after (:headers response))]
+    (cond-> (assoc base :context (select-keys response [:body :headers :request-id :error]))
+      retry-after (assoc :retry-after-ms retry-after))))
 
 ;; ============================================================
 ;; 请求构建

@@ -8,7 +8,7 @@
 > 与 HITL 的交互见 `hitl-timeline-design.md`。
 >
 > 实现：`core/filter.clj`（机制 + 内置 filter + `compile-hooks`）、
-> `core/kernel.clj`（:chat/:tool 组装点、`hooks` 字段、`filter-hooks` /
+> `core/chat_client.clj`（:chat/:tool 组装点、`hooks` 字段、`filter-hooks` /
 > `with-filters`）、`client/react.clj`（:turn 与 :iteration 组装点）、
 > `client/filter/memory.clj`（memory filter）。
 
@@ -47,7 +47,7 @@
 `:chat` 链，靠这条路做「每轮必然一次」的逻辑会在末轮静默漏掉。
 
 一个 filter 可同时携带四个钩子，各挂各的链。形态是 `Filter` record
-（`create-filter` 直接产出；写普通 map 也行，`build-kernel` 经 `as-filter`
+（`create-filter` 直接产出；写普通 map 也行，`build-chat-client` 经 `as-filter`
 归一化）——五个钩子是固定字段，其余键（memory filter 的 `:store`）进 ext-map
 照常可读。**执行顺序 = `:filters` 向量注册顺序**（无 order/phase），
 靠前者在最外层（最先见 req、最后见 resp）。
@@ -79,7 +79,7 @@ advisor 专门新造的 `chain.copy(this)`，在闭包模型里是构造性的�
 
 ### 1.1 装配期预编译（2026-08）
 
-链的**结构**在 `build-kernel` 时就完全确定了——哪些 filter、什么顺序、
+链的**结构**在 `build-chat-client` 时就完全确定了——哪些 filter、什么顺序、
 各挂哪条链，全是声明。只有 terminal 必须每次现做（它闭包住这一次要执行的
 具体工具/LLM 调用）。于是把两者拆开：
 
@@ -87,17 +87,17 @@ advisor 专门新造的 `chain.copy(this)`，在闭包模型里是构造性的�
 (compile-chain around-fns)   ;; 装配期 → (fn [terminal] -> chain)
 ```
 
-`build-kernel` 调 `compile-hooks` 把四条链各折一次，结果存进 Kernel 的
+`build-chat-client` 调 `compile-hooks` 把四条链各折一次，结果存进 ChatClient 的
 `hooks` 字段（`CompiledHooks` record）：`:chat` / `:tool` / `:turn` 三个
 chain-builder + 预 `comp` 好的 `:token-xform`。运行期只剩
-`((:tool (filter-hooks kernel)) terminal)`。
+`((:tool (filter-hooks chat-client)) terminal)`。
 
 省掉的是每次 invoke 的 `keep` 全量扫描 + `reverse` + `reduce`——工具循环里
 **每轮每个 tool call 一次**。额外收益：`compile-chain` 对空序列返回
-`identity`，没挂 tool filter 的 kernel 连一层包装都不加。
+`identity`，没挂 tool filter 的 chat-client 连一层包装都不加。
 
-> **改 `:filters` 必须走 `kernel/with-filters`**（它同步重编 hooks）。直接
-> `(assoc kernel :filters ...)` 会让 hooks 与 `:filters` 脱钩——`filter-hooks`
+> **改 `:filters` 必须走 `chat-client/with-filters`**（它同步重编 hooks）。直接
+> `(assoc chat-client :filters ...)` 会让 hooks 与 `:filters` 脱钩——`filter-hooks`
 > 检测到不同源会**现场重编译**兜底（语义永远跟着 `:filters` 走，filter 静默
 > 失效是这套机制最难查的一类 bug），但那是每次 invoke 都重编，白扔装配期成果。
 
@@ -105,13 +105,13 @@ chain-builder + 预 `comp` 好的 `:token-xform`。运行期只剩
 ChatRequest 与 TurnRequest（`validation-turn-filter` 就 `dissoc` 掉
 `:resume?`），而 record 一旦 `dissoc` 已声明字段就降级成普通 map——把可变形
 的请求包进 record 只会换来一个随调用链漂移的类型。record 用在**声明**上
-（Filter、CompiledHooks、Kernel），不用在**流动的数据**上。
+（Filter、CompiledHooks、ChatClient），不用在**流动的数据**上。
 
 ---
 
 ## 2. 四条链的契约
 
-### 2.1 `:tool` 链（kernel/invoke-tool 组装）
+### 2.1 `:tool` 链（chat-client/invoke-tool 组装）
 
 ```
 ToolRequest  {:function {:name :schema :sensitive} :args :context(只读)}
@@ -127,7 +127,7 @@ ToolResponse {:result (:writes) (:error {:class :message})}
 - **警示**：`:tool` 链运行在并行任务内——交互式审批放 agent 的
   `:tool-gate`（批前串行预判），勿放 tool filter（会并发弹提示）。
 
-### 2.2 `:chat` 链（kernel/invoke-chat(-stream) 组装）
+### 2.2 `:chat` 链（chat-client/invoke-chat(-stream) 组装）
 
 ```
 ChatRequest  {:messages :tools :tool-choice :system-prompt (:on-token) :context(只读)}
@@ -197,7 +197,7 @@ terminal (fn [treq]
            (if (compare-and-set! consumed? false true)
              (continuation)            ;; 首次进入：延续暂停的 turn（消费 loop-state，
                                        ;;   审批批次执行 / env 重跑——原 resume 逻辑）
-             (run-tool-loop kernel (:messages treq) ...)))  ;; 递归重入：全新循环
+             (run-tool-loop chat-client (:messages treq) ...)))  ;; 递归重入：全新循环
 ```
 
 两类进入的语义天然不同，且都正确：
@@ -231,7 +231,7 @@ terminal (fn [treq]
 | filter | 链 | 说明 |
 |---|---|---|
 | `logging-filter` | :tool | 调用前后日志 |
-| ~~`(timeout-filter ms)`~~ | — | **已删除（2026-07-16）**：超时是内建机制，不是 filter——`deftool {:timeout ms}` > 引擎 `(…-tool-calling-manager {:timeout ms})` > 不超时，由 `kernel/invoke-tool` 在 filter 链**之外**强制（机制本体 `tool/call-with-timeout`）。超时结果仍标 `:error {:class :transient}`（`:retry` 可自动重试）。见 `tool-timeout-design.md` |
+| ~~`(timeout-filter ms)`~~ | — | **已删除（2026-07-16）**：超时是内建机制，不是 filter——`deftool {:timeout ms}` > 引擎 `(…-tool-calling-manager {:timeout ms})` > 不超时，由 `chat-client/invoke-tool` 在 filter 链**之外**强制（机制本体 `tool/call-with-timeout`）。超时结果仍标 `:error {:class :transient}`（`:retry` 可自动重试）。见 `tool-timeout-design.md` |
 | `(approval-filter fn?)` | :tool | 敏感工具审批，拒绝短路（交互式场景请改用 gate） |
 | `(logging-chat-filter :log-fn f :preview n)` | :chat | LLM 请求/响应日志（对标 Spring `SimpleLoggerAdvisor`；`logging-filter` 的 LLM 侧对应物） |
 | `(validation-turn-filter validate-fn :max-retries n)` | :turn | 最终答案校验：不合格把原因作反馈消息重入循环；耗尽原样返回；非 :completed 透传。对标 Spring AI `StructuredOutputValidationAdvisor`，配 provider 原生 json_schema 使用；判据可用 `advisor/structured-output` 生成 |
@@ -243,9 +243,9 @@ terminal (fn [treq]
 | `(ts/with-tool-search opts {:index ...})` | :chat + 工具 + 槽 | 渐进式工具披露（对标 `ToolSearchToolCallingAdvisor`）：初始只暴露 `search_tools`，检索到的工具下一轮才进列表。详见 `advisor-alignment-design.md` §2 |
 | `(rag/qa-turn-filter retriever :top-k n)` | :turn | 检索增强注入（对标 `QuestionAnswerAdvisor`）：每 turn 检索一次并拼进用户问题。零依赖，向量库经 `IRetriever` 注入 |
 
-工具侧另有两个 deftool/kernel 选项对齐 ToolCallingAdvisor（非 filter）：
+工具侧另有两个 deftool/chat-client 选项对齐 ToolCallingAdvisor（非 filter）：
 `{:return-direct true}`（结果即最终答案，不回灌 LLM；整批全声明才生效）与
-`build-kernel` 的 `:eligibility-fn`（续跑判据，对标
+`build-chat-client` 的 `:eligibility-fn`（续跑判据，对标
 `ToolExecutionEligibilityChecker`）。
 
 ---
@@ -275,8 +275,8 @@ terminal (fn [treq]
 ## 5. 组合示例
 
 ```clojure
-(kernel/build-kernel
-  {:service svc
+(chat-client/build-chat-client
+  {:chat-model cm
    :tools   [#'search #'save-note]
    :filters [(ma/memory-filter store)                        ;; :chat，首位
              {:name :rag                                     ;; :turn，每 turn 注入一次

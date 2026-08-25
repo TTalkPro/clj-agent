@@ -1,8 +1,9 @@
 (ns im.ttalk.agent.model-test
-  "Tests for core llm provider protocol and service"
+  "Tests for core llm provider protocol and chat-model"
   (:require [clojure.test :refer [deftest testing is are]]
             [im.ttalk.agent.model :as provider]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
+            [im.ttalk.agent.model.request :as req]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]))
@@ -128,35 +129,63 @@
       (is (= "streamed text" (:token (first @tokens)))))))
 
 ;;; ============================================================
-;;; Service Tests
+;;; ChatModel Tests
 ;;; ============================================================
 
-(deftest test-create-service
-  (testing "create-service returns a map with :chat-fn"
+(deftest test-create-chat-model
+  (testing "create-chat-model 返回实现 IChatModel 的 DefaultChatModel"
     (let [p (make-test-provider {:text "hi" :tool-calls nil})
-          svc (service/create-service p {:model "test" :max-tokens 100})]
-      (is (map? svc))
-      (is (fn? (:chat-fn svc))))))
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})]
+      (is (chat-model/chat-model? cm))
+      (is (instance? im.ttalk.agent.chat_model.DefaultChatModel cm))
+      (is (= {:model "test" :max-tokens 100} (chat-model/model-options cm))))))
 
-(deftest test-service-chat-fn-text-response
+(deftest test-as-chat-model
+  (testing "{:chat-fn :stream-fn} 裸 map 归一化成 FnChatModel —— 历史写法照旧可用"
+    (let [seen (atom nil)
+          cm (chat-model/as-chat-model
+               {:chat-fn (fn [msgs opts] (reset! seen [msgs opts])
+                           (response/make-response :text "ok"))})]
+      (is (chat-model/chat-model? cm))
+      (is (= "ok" (response/response-text
+                    (chat-model/call cm (req/chat-request [{:role "user" :content "hi"}]
+                                                          {:tools [{:name "t"}]})))))
+      (is (= [{:role "user" :content "hi"}] (first @seen)))
+      (is (= {:tools [{:name "t"}]} (second @seen)))))
+
+  (testing "已实现 IChatModel 的原样返回（幂等）"
+    (let [cm (chat-model/create-chat-model (make-test-provider {:text "x"}) {:model "m"})]
+      (is (identical? cm (chat-model/as-chat-model cm)))))
+
+  (testing "IChatModel 上再 assoc :chat-fn → 装配期即抛（旧写法会被协议分派静默丢弃）"
+    (let [cm (chat-model/create-chat-model (make-test-provider {:text "x"}) {:model "m"})]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"静默丢弃"
+            (chat-model/as-chat-model (assoc cm :chat-fn (fn [_ _] nil)))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"静默丢弃"
+            (chat-model/as-chat-model (assoc cm :stream-fn (fn [_ _ _] nil)))))
+      (is (= [:chat-fn] (:stray-keys (ex-data (try (chat-model/as-chat-model
+                                                     (assoc cm :chat-fn (fn [_ _] nil)))
+                                                   (catch clojure.lang.ExceptionInfo e e)))))))))
+
+(deftest test-chat-model-chat-fn-text-response
   (testing "chat-fn correctly normalizes text-only response"
     (let [p (make-test-provider {:text "Hello world" :tool-calls nil})
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          result ((:chat-fn svc) [{:role "user" :content "hi"}] {})]
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          result (chat-model/call cm (req/chat-request [{:role "user" :content "hi"}] {}))]
       (is (= "Hello world" (:text result)))
       (is (nil? (:tool-calls result)))
       (is (some? (:raw-response result))))))
 
-(deftest test-service-chat-fn-tool-calls-response
+(deftest test-chat-model-chat-fn-tool-calls-response
   (testing "chat-fn correctly normalizes tool-calls response"
     (let [tool-calls [{:id "tc1" :name "calculator" :args {:expr "2+2"}}]
           p (make-test-provider {:text "" :tool-calls tool-calls})
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          result ((:chat-fn svc) [{:role "user" :content "calc 2+2"}] {})]
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          result (chat-model/call cm (req/chat-request [{:role "user" :content "calc 2+2"}] {}))]
       (is (nil? (:text result)))
       (is (= tool-calls (:tool-calls result))))))
 
-(deftest test-service-chat-fn-with-tools-opt
+(deftest test-chat-model-chat-fn-with-tools-opt
   (testing "chat-fn passes tools from opts to provider"
     (let [call-args (atom nil)
           p (reify provider/ILLMProvider
@@ -168,14 +197,14 @@
               (extract-text [_ response] (:text response))
               (build-tool-result [_ tool-id content]
                 {:role "tool" :tool_call_id tool-id :content content}))
-          svc (service/create-service p {:model "test" :max-tokens 100})
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
           tools [{:name "calc" :description "Calculator"}]]
-      ((:chat-fn svc) [] {:tools tools :tool-choice :auto})
+      (chat-model/call cm (req/chat-request [] {:tools tools :tool-choice :auto}))
       (is (= tools (get-in @call-args [:config :tools])))
       ;; core 只下发中立关键字，wire 转换由各 provider 边界负责（见 openai_compat/anthropic ->wire-tool-choice）
       (is (= :auto (get-in @call-args [:config :tool-choice]))))))
 
-(deftest test-service-chat-fn-tool-choice-without-tools
+(deftest test-chat-model-chat-fn-tool-choice-without-tools
   (testing "无 tools 时即便指定 tool-choice 也不下发（严格 OpenAI 端点会 400）"
     (let [call-args (atom nil)
           p (reify provider/ILLMProvider
@@ -187,12 +216,12 @@
               (extract-text [_ response] (:text response))
               (build-tool-result [_ tool-id content]
                 {:role "tool" :tool_call_id tool-id :content content}))
-          svc (service/create-service p {:model "test" :max-tokens 100})]
-      ((:chat-fn svc) [] {:tool-choice :auto})
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})]
+      (chat-model/call cm (req/chat-request [] {:tool-choice :auto}))
       (is (nil? (get-in @call-args [:config :tools])))
       (is (nil? (get-in @call-args [:config :tool-choice]))))))
 
-(deftest test-service-chat-fn-tool-choice-none
+(deftest test-chat-model-chat-fn-tool-choice-none
   (testing "chat-fn with :tool-choice :none does not pass tools"
     (let [call-args (atom nil)
           p (reify provider/ILLMProvider
@@ -204,8 +233,8 @@
               (extract-text [_ response] (:text response))
               (build-tool-result [_ tool-id content]
                 {:role "tool" :tool_call_id tool-id :content content}))
-          svc (service/create-service p {:model "test" :max-tokens 100})]
-      ((:chat-fn svc) [] {:tools [{:name "x"}] :tool-choice :none})
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})]
+      (chat-model/call cm (req/chat-request [] {:tools [{:name "x"}] :tool-choice :none}))
       (is (nil? (get-in @call-args [:config :tools])))
       (is (nil? (get-in @call-args [:config :tool-choice]))))))
 

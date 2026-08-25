@@ -32,11 +32,12 @@
 
    运行（需 MINIMAX_API_KEY，兼容旧的 MINIMAX_AUTH_TOKEN）：
      clojure -M -e \"(load-file \\\"examples/toolsearch_live_test.clj\\\")\""
-  (:require [im.ttalk.agent.kernel :as kernel]
+  (:require [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.tool :refer [deftool]]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.filter.tool-search :as ts]
@@ -105,7 +106,7 @@
    ["get_holiday" "查询法定节假日安排"] ["count_days" "计算两个日期之间的天数"]])
 
 (defn filler-tools
-  "取前 n 个填充工具（内联形态：带 :handler 的 map，build-kernel 直接收）。"
+  "取前 n 个填充工具（内联形态：带 :handler 的 map，build-chat-client 直接收）。"
   [n]
   (mapv (fn [[nm d]]
           {:name nm :description d
@@ -132,7 +133,7 @@
 (defn probe [log]
   {:name :probe
    :chat (fn [req chain]
-           (let [tools (mapv :name (:tools req))
+           (let [tools (mapv :name (flt/req-option req :tools))
                  r (chain req)
                  u (resp/response-usage (:response r))]
              (swap! log conj {:tools tools
@@ -146,11 +147,11 @@
 (defn run-case
   "跑一次对话，返回 {:log :result :prompt-total :cached-total}。
    probe 挂在 filters 末尾 = 洋葱最内层 → 看到的是 tool-search 改写**之后**的工具集。"
-  [label svc tools ts-opts]
+  [label cm tools ts-opts]
   (let [log (atom [])
         store (memory/in-memory-store)
-        base {:service svc :tools tools :filters [(ma/memory-filter store)]}
-        k (kernel/build-kernel
+        base {:chat-model cm :tools tools :filters [(ma/memory-filter store)]}
+        k (chat-client/build-chat-client
             (-> (if ts-opts (ts/with-tool-search base ts-opts) base)
                 (update :filters conj (probe log))))
         result (react/invoke k store [{:role :user :content question}]
@@ -173,11 +174,11 @@
 ;;; 场景 1：大目录（50 工具）—— 渐进式披露的主场
 ;;; ============================================================
 
-(defn test-large-catalog [svc]
+(defn test-large-catalog [cm]
   (println "\n══════════ 场景 1：50 工具目录 ══════════")
   (let [tools (catalog 50)
-        base (run-case "A. 基线：50 个工具全量进 prompt" svc tools nil)
-        srch (run-case "B. ToolSearch：渐进式披露" svc tools
+        base (run-case "A. 基线：50 个工具全量进 prompt" cm tools nil)
+        srch (run-case "B. ToolSearch：渐进式披露" cm tools
                        {:index (ts/keyword-tool-index) :limit 3})
         first-round (first (:log srch))
         discovered (ctx/get-var (:tool-context (:result srch)) ts/discovered-slot)]
@@ -210,11 +211,11 @@
 ;;; 场景 2：小目录（12 工具）—— 适用边界的反面
 ;;; ============================================================
 
-(defn test-small-catalog [svc]
+(defn test-small-catalog [cm]
   (println "\n══════════ 场景 2：12 工具目录（适用边界的反面）══════════")
   (let [tools (catalog 12)
-        base (run-case "A. 基线：12 个工具全量进 prompt" svc tools nil)
-        srch (run-case "B. ToolSearch：渐进式披露" svc tools
+        base (run-case "A. 基线：12 个工具全量进 prompt" cm tools nil)
+        srch (run-case "B. ToolSearch：渐进式披露" cm tools
                        {:index (ts/keyword-tool-index) :limit 3})]
     (println)
     (check "两种模式都能收敛（小目录下 ToolSearch 仍功能正确，只是不划算）"
@@ -265,10 +266,10 @@
 
 (defn run []
   (println "ToolSearch live 验证 | model =" MODEL "| provider = :minimax")
-  (let [svc (service/create-service p {:model MODEL :max-tokens 4096})]
+  (let [cm (chat-model/create-chat-model p {:model MODEL :max-tokens 4096})]
     (try
-      (let [large (test-large-catalog svc)
-            small (test-small-catalog svc)]
+      (let [large (test-large-catalog cm)
+            small (test-small-catalog cm)]
         (report large small))
       (catch Throwable t
         (swap! failures inc)

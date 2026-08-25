@@ -1,13 +1,13 @@
-(ns im.ttalk.agent.client-test
+(ns im.ttalk.agent.simple-agent-test
   "统一 Agent 单元测试（合并原 kernel-agent / process-agent 测试）
 
    覆盖：基础对话 / 多轮 / 工具 / reset / system-prompt / pause-resume /
    conversation-id 恢复 / SQLite 持久化 / 未-resume 保护。"
   (:require [clojure.test :refer :all]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.test-support :as ts]
-            [im.ttalk.agent.kernel :as kernel]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.memory.sqlite :as sqlite]
@@ -105,7 +105,7 @@
       (is (= 2 (count (agent/get-history a)))))))   ;; user + assistant
 
 (deftest chat-stream-fallback-test
-  (testing "provider 不支持流式 → service 回退同步，全文作为单个 token emit"
+  (testing "provider 不支持流式 → chat-model 回退同步，全文作为单个 token emit"
     (let [tokens (atom [])
           p (ts/create-mock-provider [{:text "回复内容" :tool-calls nil}])  ;; supports-stream? false
           a (agent/create-agent {:provider p :model "test"})
@@ -169,77 +169,77 @@
       ;; 历史：user, assistant(tool_calls), tool-result, assistant(text)
       (is (= 4 (count (agent/get-history a)))))))
 
-(deftest prebuilt-kernel-and-memory-test
-  (testing ":kernel 未传 :memory → 复用 kernel memory-filter 的 store，多轮历史不丢（回归 BUG5）"
+(deftest prebuilt-chat-client-and-memory-test
+  (testing ":chat-client 未传 :memory → 复用 chat-client memory-filter 的 store，多轮历史不丢（回归 BUG5）"
     (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
                                       {:text "回复2" :tool-calls nil}])
-          kernel-store (memory/in-memory-store)
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          k (kernel/build-kernel {:service svc
-                                  :filters [(ma/memory-filter kernel-store)]})
-          a (agent/create-agent {:kernel k})]
-      (is (identical? kernel-store (:memory a)))
-      ;; kernel 原样复用（store 未变不重建）
-      (is (identical? k (:kernel a)))
+          chat-client-store (memory/in-memory-store)
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          k (chat-client/build-chat-client {:chat-model cm
+                                            :filters [(ma/memory-filter chat-client-store)]})
+          a (agent/create-agent {:chat-client k})]
+      (is (identical? chat-client-store (:memory a)))
+      ;; chat-client 原样复用（store 未变不重建）
+      (is (identical? k (:chat-client a)))
       (agent/chat a "消息1")
       (is (= 2 (count (agent/get-history a))))
       (agent/chat a "消息2")
       (is (= 4 (count (agent/get-history a))))))
 
-  (testing ":kernel + :memory 同时指定 → 以 :memory 为准，memory-filter 重挂到用户 store"
+  (testing ":chat-client + :memory 同时指定 → 以 :memory 为准，memory-filter 重挂到用户 store"
     (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
                                       {:text "回复2" :tool-calls nil}])
-          kernel-store (memory/in-memory-store)
+          chat-client-store (memory/in-memory-store)
           my-store (memory/in-memory-store)
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          k (kernel/build-kernel {:service svc
-                                  :filters [(ma/memory-filter kernel-store)]})
-          a (agent/create-agent {:kernel k :memory my-store})]
-      ;; agent 与重挂后的 kernel filter 用同一个用户 store（不脱节）
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          k (chat-client/build-chat-client {:chat-model cm
+                                            :filters [(ma/memory-filter chat-client-store)]})
+          a (agent/create-agent {:chat-client k :memory my-store})]
+      ;; agent 与重挂后的 chat-client filter 用同一个用户 store（不脱节）
       (is (identical? my-store (:memory a)))
       (agent/chat a "消息1")
       (agent/chat a "消息2")
       (is (= 4 (count (memory/mem-get my-store (:conversation-id a)))))
-      ;; kernel 原 store 从未被写入
-      (is (empty? (memory/mem-get kernel-store (:conversation-id a))))))
+      ;; chat-client 原 store 从未被写入
+      (is (empty? (memory/mem-get chat-client-store (:conversation-id a))))))
 
-  (testing ":kernel 无 memory-filter 且未传 :memory → 自动挂默认 store，多轮可用"
+  (testing ":chat-client 无 memory-filter 且未传 :memory → 自动挂默认 store，多轮可用"
     (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}
                                       {:text "回复2" :tool-calls nil}])
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          k (kernel/build-kernel {:service svc})
-          a (agent/create-agent {:kernel k})]
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          k (chat-client/build-chat-client {:chat-model cm})
+          a (agent/create-agent {:chat-client k})]
       (is (some? (:memory a)))
-      (is (= [:memory] (mapv :name (:filters (:kernel a)))))
+      (is (= [:memory] (mapv :name (:filters (:chat-client a)))))
       (agent/chat a "消息1")
       (agent/chat a "消息2")
       (is (= 4 (count (agent/get-history a))))))
 
-  (testing ":kernel + :memory false → 移除 memory-filter，完全无记忆"
+  (testing ":chat-client + :memory false → 移除 memory-filter，完全无记忆"
     (let [p (ts/create-mock-provider [{:text "回复1" :tool-calls nil}])
-          kernel-store (memory/in-memory-store)
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          k (kernel/build-kernel {:service svc
-                                  :filters [(ma/memory-filter kernel-store)]})
-          a (agent/create-agent {:kernel k :memory false})]
+          chat-client-store (memory/in-memory-store)
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          k (chat-client/build-chat-client {:chat-model cm
+                                            :filters [(ma/memory-filter chat-client-store)]})
+          a (agent/create-agent {:chat-client k :memory false})]
       (is (nil? (:memory a)))
-      (is (empty? (filter #(= :memory (:name %)) (:filters (:kernel a)))))
+      (is (empty? (filter #(= :memory (:name %)) (:filters (:chat-client a)))))
       (is (= :completed (:status (agent/chat a "消息1"))))
       (is (empty? (agent/get-history a)))
-      ;; kernel 原 store 不被写入
-      (is (empty? (memory/mem-get kernel-store (:conversation-id a))))))
+      ;; chat-client 原 store 不被写入
+      (is (empty? (memory/mem-get chat-client-store (:conversation-id a))))))
 
-  (testing ":kernel + :memory 重挂时保留其他自定义 filter（顺序：memory 最前）"
+  (testing ":chat-client + :memory 重挂时保留其他自定义 filter（顺序：memory 最前）"
     (let [filter-ran (atom false)
           audit {:name :audit
                  :chat (fn [req chain] (reset! filter-ran true) (chain req))}
           p (ts/create-mock-provider [{:text "OK" :tool-calls nil}])
           my-store (memory/in-memory-store)
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          k (kernel/build-kernel {:service svc
-                                  :filters [(ma/memory-filter (memory/in-memory-store)) audit]})
-          a (agent/create-agent {:kernel k :memory my-store})]
-      (is (= [:memory :audit] (mapv :name (:filters (:kernel a)))))
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          k (chat-client/build-chat-client {:chat-model cm
+                                            :filters [(ma/memory-filter (memory/in-memory-store)) audit]})
+          a (agent/create-agent {:chat-client k :memory my-store})]
+      (is (= [:memory :audit] (mapv :name (:filters (:chat-client a)))))
       (agent/chat a "你好")
       (is (true? @filter-ran) "自定义 filter 重挂后仍生效")
       (is (= 2 (count (memory/mem-get my-store (:conversation-id a))))))))
@@ -316,39 +316,39 @@
       (agent/chat a "?" {:system-prompt "覆盖"})
       (is (= "覆盖" (:system-prompt (first @log)))))))
 
-(deftest pre-built-kernel-test
-  (testing ":kernel 选项直接复用"
+(deftest pre-built-chat-client-test
+  (testing ":chat-client 选项直接复用"
     (let [p (ts/create-mock-provider [{:text "来自预构建" :tool-calls nil}])
-          svc (service/create-service p {:model "test" :max-tokens 100})
-          k (kernel/build-kernel {:service svc})
-          a (agent/create-agent {:kernel k})]
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
+          k (chat-client/build-chat-client {:chat-model cm})
+          a (agent/create-agent {:chat-client k})]
       (is (= "来自预构建" (:text (agent/chat a "测试")))))))
 
 (deftest create-agent-ignores-filters-test
-  (testing "agent 层不暴露 kernel filter：create-agent 传 :filters 被忽略，只挂 memory-filter"
+  (testing "agent 层不暴露 chat-client filter：create-agent 传 :filters 被忽略，只挂 memory-filter"
     (let [filter-ran (atom false)
           user-filter {:name :user-spy
                        :chat (fn [req chain] (reset! filter-ran true) (chain req))}
           p (ts/create-mock-provider [{:text "OK" :tool-calls nil}])
           a (agent/create-agent {:provider p :model "test"
                                  :filters [user-filter]})]
-      ;; kernel 上只有 memory-filter，没有用户 filter
-      (is (= [:memory] (mapv :name (:filters (:kernel a)))))
+      ;; chat-client 上只有 memory-filter，没有用户 filter
+      (is (= [:memory] (mapv :name (:filters (:chat-client a)))))
       (let [r (agent/chat a "你好")]
         (is (= :completed (:status r)))
         (is (false? @filter-ran) "用户 filter 不应被执行"))))
-  (testing "需要 filter 时走自建 kernel（:kernel 路径仍完整支持 filter）"
+  (testing "需要 filter 时走自建 chat-client（:chat-client 路径仍完整支持 filter）"
     (let [filter-ran (atom false)
           user-filter {:name :user-spy
                        :chat (fn [req chain] (reset! filter-ran true) (chain req))}
           p (ts/create-mock-provider [{:text "OK" :tool-calls nil}])
-          svc (service/create-service p {:model "test" :max-tokens 100})
+          cm (chat-model/create-chat-model p {:model "test" :max-tokens 100})
           store (memory/in-memory-store)
-          k (kernel/build-kernel {:service svc
-                                  :filters [(ma/memory-filter store) user-filter]})
-          a (agent/create-agent {:kernel k})]
+          k (chat-client/build-chat-client {:chat-model cm
+                                            :filters [(ma/memory-filter store) user-filter]})
+          a (agent/create-agent {:chat-client k})]
       (agent/chat a "你好")
-      (is (true? @filter-ran) "自建 kernel 的 filter 正常生效"))))
+      (is (true? @filter-ran) "自建 chat-client 的 filter 正常生效"))))
 
 ;;; ============================================================
 ;;; pause / resume（通过 callbacks :on-tool-call 启用 gate）
@@ -380,6 +380,79 @@
       (is (string? (:pause-reason r)))
       (is (= "dangerous-tool" (:name (:pending-tool r))))
       (is (agent/paused? a)))))
+
+(deftest on-pause-gate-test
+  ;; 回归：`:on-pause` + `deftool {:sensitive true}` 这条声明式暂停路径，
+  ;; 在 callbacks 体系落地时被 `:on-tool-call` 版 gate **替换**掉了——
+  ;; README「方式二」、deftool 的 :sensitive 文档、docs/unified-invoke-agent.md
+  ;; （状态 ✅ 已实施）三处同时变成幽灵，而且**没有任何运行期症状**：
+  ;; 不暂停的 agent 照跑，只是敏感工具直接执行了。此前的单测全走
+  ;; :on-tool-call，一条都照不到这里。
+  (testing ":on-pause 单独配置 → 敏感工具自动暂停（不需要 :on-tool-call）"
+    (let [paused (atom nil)
+          p (ts/create-mock-provider
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "/tmp/x"}}]}])
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
+                                 :on-pause #(reset! paused %)})
+          r (agent/chat a "删除文件")]
+      (is (= :paused (:status r)))
+      (is (= "dangerous-tool" (:name (:pending-tool r))))
+      (is (agent/paused? a))
+      (is (some? @paused) ":on-pause 回调必须被触发")
+      (is (= "dangerous-tool" (:name (:pending-tool @paused))))))
+
+  (testing ":on-pause 下非敏感工具照常执行，不暂停"
+    (let [p (ts/create-mock-provider
+              [{:text nil :tool-calls [{:id "c1" :name "safe-tool" :args {:input "数据"}}]}
+               {:text "完成" :tool-calls nil}])
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
+                                 :on-pause (fn [_] nil)})
+          r (agent/chat a "安全操作")]
+      (is (= :completed (:status r)))
+      (is (= :safe-tool (:name (first (:tool-calls-made r)))))))
+
+  (testing "不配 :on-pause 也不配 :on-tool-call → gate 关闭，敏感工具直接执行"
+    (let [p (ts/create-mock-provider
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "x"}}]}
+               {:text "已执行" :tool-calls nil}])
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin})
+          r (agent/chat a "删除")]
+      (is (= :completed (:status r)) "无人值守调用方不该收到意外的暂停态")))
+
+  (testing "两条 gate 并存：:on-tool-call 放行，:sensitive 仍暂停"
+    ;; :sensitive 是工具作者立的下限，不该被一个泛泛的回调放行掉
+    (let [seen (atom [])
+          p (ts/create-mock-provider
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "x"}}]}])
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
+                                 :on-pause (fn [_] nil)
+                                 :callbacks {:on-tool-call (fn [n _] (swap! seen conj n) nil)}})
+          r (agent/chat a "删除")]
+      (is (= :paused (:status r)))
+      (is (= ["dangerous-tool"] @seen) ":on-tool-call 仍然被问过，只是它放行了")))
+
+  (testing ":on-pause 回调抛异常不影响暂停本身"
+    (let [p (ts/create-mock-provider
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "x"}}]}])
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
+                                 :on-pause (fn [_] (throw (ex-info "boom" {})))})
+          r (agent/chat a "删除")]
+      (is (= :paused (:status r)))
+      (is (agent/paused? a)))))
+
+(deftest on-pause-resume-test
+  (testing ":on-pause 路径的 resume 与 :on-tool-call 路径等价"
+    (let [p (ts/create-mock-provider
+              [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "目标"}}]}
+               {:text "操作已完成" :tool-calls nil}])
+          a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
+                                 :on-pause (fn [_] nil)})]
+      (agent/chat a "执行危险操作")
+      (is (agent/paused? a))
+      (let [r (agent/resume a "approved")]
+        (is (= :completed (:status r)))
+        (is (= "操作已完成" (:text r)))
+        (is (not (agent/paused? a)))))))
 
 (deftest resume-approved-test
   (let [p (ts/create-mock-provider
@@ -462,8 +535,8 @@
           ;; 存在「已取消」工具结果，且 assistant(tool-calls) 已被配对
           (is (some #(re-find #"已取消" (:content %)) tool-msgs)))))))
 
-(deftest kernel-heals-dangling-on-shared-store-test
-  (testing "暂停未 resume，另一 agent（共享 store/同 conv）开新对话：kernel 自愈悬空 tool_use"
+(deftest chat-client-heals-dangling-on-shared-store-test
+  (testing "暂停未 resume，另一 agent（共享 store/同 conv）开新对话：chat-client 自愈悬空 tool_use"
     (let [store (memory/in-memory-store)
           p1 (ts/create-mock-provider
                [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "/tmp/x"}}]}])
@@ -471,7 +544,7 @@
                                   :memory store :conversation-id "shared-heal"
                                   :callbacks (dangerous-gate)})]
       (is (= :paused (:status (agent/chat a1 "删除"))))
-      ;; 第二个 agent 自身不处于暂停态 → cancel-pending! 不触发，纯靠 kernel 入口自愈
+      ;; 第二个 agent 自身不处于暂停态 → cancel-pending! 不触发，纯靠 chat-client 入口自愈
       (let [p2 (ts/create-mock-provider [{:text "新回答" :tool-calls nil}])
             a2 (agent/create-agent {:provider p2 :model "test" :tools ts/test-plugin
                                     :memory store :conversation-id "shared-heal"})

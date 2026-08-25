@@ -5,7 +5,7 @@
 
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
-        ;; 内部依赖 - Core（protocol/契约 + kernel 原语）
+        ;; 内部依赖 - Core（protocol/契约 + chat-client 原语）
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
 
         ;; 日志

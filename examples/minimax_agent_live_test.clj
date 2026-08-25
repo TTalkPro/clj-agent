@@ -6,17 +6,17 @@
       （on-turn-start/end/error, on-llm-call/result, on-tool-call/result,
        on-interrupt/resume）
    2. create-agent 支持自定义 :memory（自带 store / windowed / false 无记忆）
-      与自定义 :kernel（预构建 kernel + 自定义 filter）
-   3. agent 层不暴露 kernel filter：create-agent 传 :filters 被忽略（warn），
-      自定义 filter 必须走自建 kernel
+      与自定义 :chat-client（预构建 chat-client + 自定义 filter）
+   3. agent 层不暴露 chat-client filter：create-agent 传 :filters 被忽略（warn），
+      自定义 filter 必须走自建 chat-client
 
    运行（需 MINIMAX_API_KEY，兼容旧的 MINIMAX_AUTH_TOKEN）：
      clojure -M -e \"(load-file \\\"examples/minimax_agent_live_test.clj\\\")\""
-  (:require [im.ttalk.agent.client :as agent]
+  (:require [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :refer [deftool]]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.memory :as memory]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.provider.minimax :as minimax]))
 
@@ -180,42 +180,42 @@
       (check ":memory false → get-history 为空" (empty? (agent/get-history a))))))
 
 ;;; ============================================================
-;;; 场景 5：自定义 kernel（预构建 + 自定义 filter）
+;;; 场景 5：自定义 chat-client（预构建 + 自定义 filter）
 ;;; ============================================================
 
-(defn test-custom-kernel []
-  (println "\n=== 场景 5: 自定义 kernel（预构建 kernel + 自定义 filter） ===")
+(defn test-custom-chat-client []
+  (println "\n=== 场景 5: 自定义 chat-client（预构建 chat-client + 自定义 filter） ===")
   (let [filter-hits (atom 0)
         audit-filter {:name :audit
                       :chat (fn [req chain] (swap! filter-hits inc) (chain req))}
-        kernel-store (memory/in-memory-store)
-        svc (service/create-service p {:model MODEL :max-tokens 2048})
-        k (kernel/build-kernel {:service svc
-                                :tools [#'get-weather]
-                                :filters [(ma/memory-filter kernel-store) audit-filter]})
-        a (agent/create-agent {:kernel k :conversation-id "live-conv-k"})]
+        chat-client-store (memory/in-memory-store)
+        cm (chat-model/create-chat-model p {:model MODEL :max-tokens 2048})
+        k (chat-client/build-chat-client {:chat-model cm
+                                          :tools [#'get-weather]
+                                          :filters [(ma/memory-filter chat-client-store) audit-filter]})
+        a (agent/create-agent {:chat-client k :conversation-id "live-conv-k"})]
     (let [r (agent/chat a "你好，用一句话回应。")]
-      (check "预构建 kernel 对话 :completed" (= :completed (:status r)))
-      (check "agent 复用 kernel memory-filter 的 store" (identical? kernel-store (:memory a)))
-      (check "自定义 filter 在 kernel 层生效" (pos? @filter-hits))
-      (check "历史落入 kernel store" (= 2 (count (memory/mem-get kernel-store "live-conv-k")))))
-    ;; 5b. :kernel + :memory 同时指定 → 以 :memory 为准（memory-filter 重挂），其他 filter 保留
+      (check "预构建 chat-client 对话 :completed" (= :completed (:status r)))
+      (check "agent 复用 chat-client memory-filter 的 store" (identical? chat-client-store (:memory a)))
+      (check "自定义 filter 在 chat-client 层生效" (pos? @filter-hits))
+      (check "历史落入 chat-client store" (= 2 (count (memory/mem-get chat-client-store "live-conv-k")))))
+    ;; 5b. :chat-client + :memory 同时指定 → 以 :memory 为准（memory-filter 重挂），其他 filter 保留
     (let [my-store (memory/in-memory-store)
           hits-before @filter-hits
-          a2 (agent/create-agent {:kernel k :memory my-store
+          a2 (agent/create-agent {:chat-client k :memory my-store
                                   :conversation-id "live-conv-k2"})]
-      (check ":kernel+:memory 以 :memory 为准" (identical? my-store (:memory a2)))
+      (check ":chat-client+:memory 以 :memory 为准" (identical? my-store (:memory a2)))
       (check "重挂后 filter 顺序 memory 最前"
-             (= [:memory :audit] (mapv :name (:filters (:kernel a2)))))
+             (= [:memory :audit] (mapv :name (:filters (:chat-client a2)))))
       (agent/chat a2 "我喜欢蓝色。用一句话回应。")
       (let [r2 (agent/chat a2 "我喜欢什么颜色？只回颜色。")]
         (check "自定义 store 多轮记忆生效（回复含'蓝'）" (.contains (str (:text r2)) "蓝"))
         (check "历史落入自定义 store" (= 4 (count (memory/mem-get my-store "live-conv-k2"))))
-        (check "kernel 原 store 未被该会话写入" (empty? (memory/mem-get kernel-store "live-conv-k2")))
+        (check "chat-client 原 store 未被该会话写入" (empty? (memory/mem-get chat-client-store "live-conv-k2")))
         (check "其他自定义 filter 重挂后仍生效" (> @filter-hits hits-before))))))
 
 ;;; ============================================================
-;;; 场景 6：agent 不暴露 kernel filter
+;;; 场景 6：agent 不暴露 chat-client filter
 ;;; ============================================================
 
 (defn test-filters-not-exposed []
@@ -225,7 +225,7 @@
                 :chat (fn [req chain] (reset! filter-ran true) (chain req))}
         a (agent/create-agent {:provider p :model MODEL :max-tokens 2048
                                :filters [sneaky]})]
-    (check "kernel 上只有 memory-filter" (= [:memory] (mapv :name (:filters (:kernel a)))))
+    (check "chat-client 上只有 memory-filter" (= [:memory] (mapv :name (:filters (:chat-client a)))))
     (let [r (agent/chat a "你好，用一句话回应。")]
       (check "对话正常 :completed" (= :completed (:status r)))
       (check "传入的 :filters 未被执行" (false? @filter-ran)))))
@@ -242,7 +242,7 @@
              test-interrupt-resume
              test-turn-error
              test-custom-memory
-             test-custom-kernel
+             test-custom-chat-client
              test-filters-not-exposed]]
     (try
       (f)

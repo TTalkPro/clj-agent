@@ -1,10 +1,10 @@
-(ns im.ttalk.agent.client
+(ns im.ttalk.agent.simple-agent
   "SimpleAgent - 统一 Agent（合并原 kernel-agent / process-agent）
 
-   对话历史由 Kernel 的 ChatMemory store 按 conversation-id 自管（Memory Filter）。
+   对话历史由 ChatClient 的 ChatMemory store 按 conversation-id 自管（Memory Filter）。
    Agent 只持 conversation-id + 轻量控制状态。
 
-   **Callback 体系**（独立于 kernel filter）：
+   **Callback 体系**（独立于 chat-client filter）：
    通过 :callbacks map 注册 9 个回调，用于监控和控制 agent 执行过程：
      :on-turn-start   (fn [metadata])                  新 turn 开始
      :on-turn-end     (fn [metadata])                  turn 正常完成
@@ -43,7 +43,9 @@
        (resume a \"approved\")))"
   (:refer-clojure :exclude [reset!])
   (:require [im.ttalk.agent.filter.memory :as memory-filter]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.tool-registry :as registry]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.message :as msg]
@@ -69,20 +71,20 @@
 ;;; 创建
 ;;; ============================================================
 
-(defn- kernel-memory-store
-  "从已构建 kernel 的 memory-filter 提取其绑定的 store（无 memory-filter 则 nil）。"
-  [kernel]
-  (some #(when (= :memory (:name %)) (:store %)) (:filters kernel)))
+(defn- chat-client-memory-store
+  "从已构建 chat-client 的 memory-filter 提取其绑定的 store（无 memory-filter 则 nil）。"
+  [chat-client]
+  (some #(when (= :memory (:name %)) (:store %)) (:filters chat-client)))
 
 (defn- with-memory-filter
-  "返回把 memory-filter(store) 挂到（或替换进）kernel 的副本。
-   store 为 nil 时只移除原有 memory-filter（无记忆 kernel）。
+  "返回把 memory-filter(store) 挂到（或替换进）chat-client 的副本。
+   store 为 nil 时只移除原有 memory-filter（无记忆 chat-client）。
    memory-filter 始终放最前，确保其他 filter 看到完整历史。"
   [k store]
   (let [others (vec (remove #(= :memory (:name %)) (:filters k)))]
-    ;; 必须走 with-filters：直接 assoc :filters 会让 kernel 预编译的 hooks 与之
+    ;; 必须走 with-filters：直接 assoc :filters 会让 chat-client 预编译的 hooks 与之
     ;; 脱钩（filter-hooks 每次重编兜底，但那是白扔装配期成果）
-    (kernel/with-filters k
+    (flt/with-filters k
       (if store
         (into [(memory-filter/memory-filter store)] others)
         others))))
@@ -91,7 +93,7 @@
   "创建 Agent
 
    参数 opts:
-   - :kernel        预构建 Kernel（提供则跳过构建）
+   - :chat-client        预构建 ChatClient（提供则跳过构建）
    - :provider      ILLMProvider 实例
    - :model         模型名（默认 \"glm-4\"）
    - :max-tokens    最大 token（默认 4096）
@@ -104,33 +106,43 @@
                     即可 resume（跨重启 HITL；对话历史请配 SQLite ChatMemory）
    - :conversation-id 会话 ID（可选）
    - :max-iterations 最大工具循环次数（默认 10）
+   - :on-pause      (fn [{:keys [pending-tool reason]}])（可选）：**配置即启用
+                    pause/resume**——声明 `deftool {:sensitive true}` 的工具在执行
+                    前自动暂停，等 `resume`。暂停发生时本回调被触发。
    - :callbacks     回调 map（:on-turn-start/:on-turn-end/:on-turn-error/:on-llm-call/
                               :on-llm-result/:on-tool-call/:on-tool-result/:on-interrupt/:on-resume）
 
-   :kernel 与 :memory 可独立同时指定，store 解析规则：
-   - :memory store   → 用它（预构建 kernel 上的 memory-filter 会被重挂到该 store）
-   - :memory false   → 无记忆（预构建 kernel 上的 memory-filter 会被移除）
-   - :memory 缺省    → 复用 kernel memory-filter 的 store；都没有则默认 in-memory
+   **两条 pause 启用路径，可并存**（缺省两条都不配 = 永不暂停，`chat` 只会返回
+   `:completed`/`:error`，无人值守调用方不会收到意外的暂停态）：
+   - `:on-pause` —— 声明式，`{:sensitive true}` 的工具一律暂停；
+   - `:callbacks :on-tool-call` —— 命令式，返回 `{:interrupt reason}` 即暂停。
+   两条都配时先问回调；回调放行的，若工具是敏感工具**仍暂停**——`:sensitive`
+   是工具作者立的下限，不该被一个泛泛的回调放行掉。
 
-   Agent 层不暴露 kernel filter（传入 :filters 会被忽略并警告）；
-   需要 filter 请用 kernel/build-kernel 自建后经 :kernel 传入。
+   :chat-client 与 :memory 可独立同时指定，store 解析规则：
+   - :memory store   → 用它（预构建 chat-client 上的 memory-filter 会被重挂到该 store）
+   - :memory false   → 无记忆（预构建 chat-client 上的 memory-filter 会被移除）
+   - :memory 缺省    → 复用 chat-client memory-filter 的 store；都没有则默认 in-memory
+
+   Agent 层不暴露 chat-client filter（传入 :filters 会被忽略并警告）；
+   需要 filter 请用 chat-client/build-chat-client 自建后经 :chat-client 传入。
 
    返回 Agent map"
   [opts]
   (when (contains? opts :filters)
     (log/warn "create-agent 不接受 :filters（agent 层只暴露 :callbacks）；"
-              "如需 kernel filter，请自建 kernel 后以 :kernel 传入"))
+              "如需 chat-client filter，请自建 chat-client 后以 :chat-client 传入"))
   (let [opts (dissoc opts :filters)
-        prebuilt (:kernel opts)
-        kstore (when prebuilt (kernel-memory-store prebuilt))
+        prebuilt (:chat-client opts)
+        kstore (when prebuilt (chat-client-memory-store prebuilt))
         store (cond
                 (false? (:memory opts)) nil   ;; 显式 false → 无记忆（子 agent 隔离用）
                 (:memory opts) (:memory opts) ;; 显式 store → 以用户指定为准
-                kstore kstore                 ;; 复用预构建 kernel 自带的 store
+                kstore kstore                 ;; 复用预构建 chat-client 自带的 store
                 :else  (memory/in-memory-store))
         k (cond
             (nil? prebuilt)
-            (common/build-kernel (assoc opts :memory store))
+            (common/build-chat-client (assoc opts :memory store))
 
             (identical? store kstore)
             prebuilt   ;; store 未变，原样复用
@@ -138,18 +150,18 @@
             :else
             (do
               (when (and kstore store)
-                (log/info "create-agent 同时收到 :kernel 与不同的 :memory；"
-                          "以 :memory 为准，kernel memory-filter 已重挂到该 store"))
+                (log/info "create-agent 同时收到 :chat-client 与不同的 :memory；"
+                          "以 :memory 为准，chat-client memory-filter 已重挂到该 store"))
               (with-memory-filter prebuilt store)))]
     {:id              (str "agent-" (java.util.UUID/randomUUID))
-     :kernel          k
+     :chat-client          k
      :memory          store
      :pause-store     (:pause-store opts)
      :conversation-id (or (:conversation-id opts)
                           (str "agent-" (java.util.UUID/randomUUID)))
      :callbacks       (or (:callbacks opts) {})
      :state-atom      (atom {:status :idle :paused-state nil :turn-count 0 :run-id nil})
-     :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error])}))
+     :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error :on-pause])}))
 
 ;;; ============================================================
 ;;; 内部辅助
@@ -199,18 +211,44 @@
       :run-id          (or run-id (:run-id state))
       :timestamp       (System/currentTimeMillis)})))
 
+(defn- sensitive-tool?
+  "工具是否声明 `deftool {:sensitive true}`。声明在装配期就汇进了 ToolMeta 的
+   `:func-def`（`tool-registry/build-func-def`），这里只是一次查表。"
+  [agent tool-call]
+  (boolean (get-in (registry/tool-meta (:chat-client agent) (:name tool-call))
+                   [:func-def :sensitive])))
+
 (defn- gate-of
-  "构建 gate fn。仅当 callbacks :on-tool-call 存在时启用暂停机制。
-   on-tool-call 返回 {:interrupt reason} 则暂停，否则放行。"
+  "构建 gate fn（nil = 不启用暂停机制，`chat` 永远不返回 `:paused`）。
+
+   **两条启用路径，可并存**：
+   1. `:callbacks :on-tool-call` —— 返回 `{:interrupt reason}` 即暂停（细粒度，
+      调用方按工具名/参数临场决定）；
+   2. `:on-pause` —— 声明 `deftool {:sensitive true}` 的工具自动暂停（声明式，
+      不必为每个工具写回调）。
+
+   两条都配时先问回调：回调说暂停就暂停；回调放行的，若工具是敏感工具仍暂停
+   ——`:sensitive` 是工具作者立的下限，不该被一个泛泛的回调放行掉。
+
+   **这两条曾经只剩第 1 条**：callbacks 体系（2026-06）落地时 `:on-tool-call`
+   版 gate **替换**而非补充了 `:on-pause` 版，`:on-pause` 一并从 `:settings` 的
+   select-keys 里掉了。于是 README「方式二」、`deftool {:sensitive true}` 的
+   文档、`docs/unified-invoke-agent.md`（状态 ✅ 已实施，明写「gate 仅靠
+   :on-pause」）三处同时变成幽灵——**而且没有任何运行期症状**：不暂停的 agent
+   照跑，只是敏感工具直接执行了。2026-08-25 修复并补测试钉住。"
   [agent]
-  (when-let [on-tool-call (get-in agent [:callbacks :on-tool-call])]
-    (fn [tc]
-      (let [tool-name (let [n (:name tc)] (if (keyword? n) (name n) (str n)))
-            cb-result (try (on-tool-call tool-name (:args tc))
-                           (catch Throwable _ nil))]
-        (if (and (map? cb-result) (:interrupt cb-result))
-          :pause
-          :proceed)))))
+  (let [on-tool-call (get-in agent [:callbacks :on-tool-call])
+        on-pause     (:on-pause (:settings agent))]
+    (when (or on-tool-call on-pause)
+      (fn [tc]
+        (let [tool-name (let [n (:name tc)] (if (keyword? n) (name n) (str n)))
+              cb-result (when on-tool-call
+                          (try (on-tool-call tool-name (:args tc))
+                               (catch Throwable _ nil)))]
+          (cond
+            (and (map? cb-result) (:interrupt cb-result)) :pause
+            (and on-pause (sensitive-tool? agent tc))     :pause
+            :else                                          :proceed))))))
 
 (defn- sys-prompts [agent opts]
   (when-let [sp (or (:system-prompt opts) (:system-prompt (:settings agent)))]
@@ -259,6 +297,13 @@
                    {:pending-tool (:pending-tool result)
                     :reason (:pause-reason result)}
                    meta)
+        ;; `:on-pause` 是 callbacks 体系之前的暂停通知入口，与 :on-interrupt 并存
+        ;; （README「方式二」教的就是它）。两者都配则都触发，顺序：先内层后外层。
+        (when-let [on-pause (:on-pause (:settings agent))]
+          (try (on-pause {:pending-tool (:pending-tool result)
+                          :reason (:pause-reason result)})
+               (catch Throwable t
+                 (log/warn "on-pause 回调抛异常（已吞，不影响暂停本身）:" (.getMessage t)))))
         {:status :paused
          :text nil
          :pause-reason (:pause-reason result)
@@ -334,7 +379,7 @@
      (swap! (:state-atom agent) assoc :run-id run-id)
      (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
      (run-loop agent
-       #(agent-loop/invoke (:kernel agent) (store agent) [(msg/user message)]
+       #(agent-loop/invoke (:chat-client agent) (store agent) [(msg/user message)]
           (build-invoke-opts agent run-id opts))))))
 
 (defn chat-stream
@@ -348,7 +393,7 @@
      (swap! (:state-atom agent) assoc :run-id run-id)
      (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
      (run-loop agent
-       #(agent-loop/invoke (:kernel agent) (store agent) [(msg/user message)]
+       #(agent-loop/invoke (:chat-client agent) (store agent) [(msg/user message)]
           (cond-> (build-invoke-opts agent run-id opts)
             true               (assoc :on-token on-token)
             (:cancel-token opts) (assoc :cancel-token (:cancel-token opts))))))))
@@ -400,7 +445,7 @@
                   payload (assoc :payload payload))
                 meta)
      (run-loop agent
-       #(agent-loop/resume (:kernel agent) ls loop-decision
+       #(agent-loop/resume (:chat-client agent) ls loop-decision
           (cond-> {:context (resume-context agent paused)
                    :tool-gate (gate-of agent)
                    :on-env-error (env-error-policy agent nil)

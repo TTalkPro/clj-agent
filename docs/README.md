@@ -7,7 +7,7 @@
 > 老路径 `design/xxx.md` 一律改到 `docs/xxx.md`，文件内容与 git 历史（rename）不变。
 
 **先读**：[`design-principles.md`](design-principles.md) —— 项目级硬约束的唯一出处
-（§1 无真实需求不建 / §2 框架无关 / §3 一个 Kernel 绑定一个 TCM，不跨边界）。
+（§1 无真实需求不建 / §2 框架无关 / §3 一个 ChatClient 绑定一个 TCM，不跨边界）。
 提新抽象、审 PR、写新设计文档时**援引它**，不要重新推导一遍。
 
 **约定**：每份文档头部有 `状态：` 行，是该文档**当下是否算数**的唯一判据——
@@ -33,7 +33,7 @@
 | [`provider-variant-design.md`](provider-variant-design.md) | 一个标准 provider 如何承载多套厂商方言（MiniMax thinking）：**三类差异三种机制**，不动 `ILLMProvider` 而用**可选协议 + `satisfies?` 探测**。修了 config 白名单（provider 专属键递不到底）与 thinking 回传丢失（实测正确率 100%→82.5%）。**也是「预注册判据双向作数」的范例**：判据先否掉一次、卡住一次，最后才放行同一个结论 |
 | [`tool-timeout-design.md`](tool-timeout-design.md) | 工具超时：借鉴 beamai 但**不照搬三层**（JVM 无 `exit(Pid,kill)`，超时=放弃等待≠终止执行）。修了 `:timeout` 死选项与 `timeout-filter` 平台线程两个真 bug；§5.7 记工具声明查询合成 `ToolMeta` 一张表 + 同名工具装配期拒绝 |
 | [`streaming-async-design.md`](streaming-async-design.md) | 真增量 SSE 传输选型 + 异步框架整合。**也是 §2《框架无关》的出处** |
-| [`onion-filter.md`](onion-filter.md) | 洋葱式 filter + kernel 瘦身（loop/memory 下沉 client 模块） |
+| [`onion-filter.md`](onion-filter.md) | 洋葱式 filter + chat-client 瘦身（loop/memory 下沉 client 模块） |
 | [`memory-filter-refactor.md`](memory-filter-refactor.md) | 消除显式 Context，转向 Memory Filter + 中立消息 |
 | [`unified-invoke-agent.md`](unified-invoke-agent.md) | 统一 invoke + 合并 Agent |
 | [`response-path-consolidation.md`](response-path-consolidation.md) | D6/D7：响应路径整理、core 收回厂商 wire 知识、双消息体系统一 |

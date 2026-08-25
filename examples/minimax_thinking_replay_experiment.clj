@@ -133,7 +133,7 @@
     "K3" "上海"
     (str "未知代号 " code)))
 
-;; 注意：`call-anthropic` 收的是**已编译的 tool schema**（kernel 平时递下来的就是
+;; 注意：`call-anthropic` 收的是**已编译的 tool schema**（chat-client 平时递下来的就是
 ;; `tool/get-schema` 的产物），不是 tool var。直接传 `[#'get-weather]` 会转出
 ;; {:name nil}，MiniMax 报 400「function name is empty (2013)」——绕过 agent 直叩
 ;; provider 时这一层是自己的活。

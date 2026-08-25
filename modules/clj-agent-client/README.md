@@ -5,12 +5,12 @@ Agent 运行时模块（2026-07 自 clj-agent-core 下沉，命名空间不变�
 - **client**：高层 Agent（`create-agent`/`chat`/`chat-stream`/`resume`），内置按 conversation-id 的记忆
 - **react**：ReAct 工具调用循环（invoke / resume / execute-batch / heal），工具批次 MapReduce 化（并行 + 屏障折叠）；`:turn` 与 `:iteration` 两条 filter 链在此组装
 - **Memory**：ChatMemory 协议 + in-memory / windowed / SQLite store
-- **filter.memory**：按 conversation-id 串历史的记忆 filter（挂进 kernel 洋葱链）
+- **filter.memory**：按 conversation-id 串历史的记忆 filter（挂进 chat-client 洋葱链）
 - **pause**：HITL 暂停态持久化（PauseStore 协议 + in-memory / SQLite）——进程重启后同 conversation-id 重建 agent 即可 resume
 - **timeline**：对话时间线与多分支（BranchStore 协议；fork-as-new-conversation + 血缘记录）
 - **callbacks**：Agent 生命周期回调（on-llm-call / on-tool-call / on-interrupt / …）
 - **subagent**：子 agent 委派（manager 注册表 + delegate 工具）
-- **common**：共享 Kernel 构建逻辑
+- **common**：共享 ChatClient 构建逻辑
 
 core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准：core 内零 ChatMemory）。
 
@@ -21,7 +21,7 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 {:deps {im.ttalk/clj-agent-client {:local/root "../clj-agent-client"}}}
 ```
 
-内部依赖：`im.ttalk/clj-agent-core`（协议/契约 + kernel 原语）
+内部依赖：`im.ttalk/clj-agent-core`（协议/契约 + chat-client 原语）
 
 外部依赖：
 - com.taoensso/timbre 6.3.0（日志）
@@ -32,7 +32,7 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 
 | 命名空间 | 职责 |
 |---------|------|
-| `im.ttalk.agent.client` | 高级 Agent API（create-agent / chat / chat-stream / resume） |
+| `im.ttalk.agent.simple-agent` | 高级 Agent API（create-agent / chat / chat-stream / resume） |
 | `im.ttalk.agent.react` | ReAct 工具调用循环；`:turn`（整个循环）与 `:iteration`（单轮 = LLM 调用 + 本轮工具批次）两条 filter 链的组装点 |
 | `im.ttalk.agent.memory` / `.memory.sqlite` | ChatMemory store（`ChatMemory` 协议） |
 | `im.ttalk.agent.filter.memory` | 记忆 filter（around-chat filter） |
@@ -40,7 +40,7 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 | `im.ttalk.agent.timeline` | 时间线与多分支（`BranchStore` 协议；`fork!` / `rollback!` / `lineage` / `ancestry` / `prune!`） |
 | `im.ttalk.agent.callbacks` | 生命周期回调 |
 | `im.ttalk.agent.subagent.manager` / `.delegate` | 子 agent 体系 |
-| `im.ttalk.agent.common` | 共享 Kernel 构建逻辑 |
+| `im.ttalk.agent.common` | 共享 ChatClient 构建逻辑 |
 
 设计文档：`docs/agent-loop-concurrency-design.md`（§9 工具批次 MapReduce、§11 暂停
 持久化、§12 timeline）、`docs/hitl-timeline-design.md`、`docs/filter-chain-design.md`、
@@ -48,7 +48,7 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 
 ## 工具执行引擎（ToolCallingManager）
 
-`build-kernel` 的可选 `:tool-manager` 决定**一批工具怎么跑完**——线程模型、
+`build-chat-client` 的可选 `:tool-manager` 决定**一批工具怎么跑完**——线程模型、
 隔离边界、调度策略。**不传 = 串行**。三个引擎都在 `react`：
 
 | 引擎 | 线程模型 | 隔离边界 | 资源 |
@@ -61,8 +61,8 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 的性质，框架不替它假定。要并发是显式决定：
 
 ```clojure
-(kernel/build-kernel {:service svc :tools [...]
-                      :tool-manager (react/virtual-thread-tool-calling-manager)})
+(chat-client/build-chat-client {:chat-model cm :tools [...]
+                                :tool-manager (react/virtual-thread-tool-calling-manager)})
 ```
 
 换引擎**不改变可观察结果**：轮初快照 + `:writes` 屏障折叠的状态语义、`:serial`
@@ -81,7 +81,7 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 ```clojure
 ;; 舱壁隔离 / 限流：池归持有者，record 实现 java.io.Closeable
 (with-open [m (react/thread-pool-tool-calling-manager {:pool-size 8})]
-  (let [k (kernel/build-kernel {:service svc :tools [...] :tool-manager m})]
+  (let [cc (chat-client/build-chat-client {:chat-model cm :tools [...] :tool-manager m})]
     ...))
 ```
 
@@ -89,10 +89,10 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
   `with-open` 或 `react/shutdown-tool-calling-manager!`（对无资源的引擎是 no-op）。
 - **关停后再执行工具批抛 `ex-info`**（`:error-class :environment`），不静默失败。
 
-**不变量：一个引擎属于一个 kernel，不跨 delegate 边界。**
+**不变量：一个引擎属于一个 chat-client，不跨 delegate 边界。**
 
 子 agent 是独立 agent，自有引擎——这本来就是默认，框架里没有共享路径：
-`delegate` 的 `subagent-config` 全部来自你自己的 `:subagent-fn`，父 kernel 的
+`delegate` 的 `subagent-config` 全部来自你自己的 `:subagent-fn`，父 chat-client 的
 `:tool-manager` 流不进去。子 agent 要限流就给它**自己的**实例；不需要就留缺省串行。
 
 ⚠️ 别绕过这个默认去踩：**亲手把同一个有界实例塞进 `subagent-config`** 会死锁——
@@ -106,8 +106,8 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 ## Agent 层契约（易踩）
 
 - **`create-agent` 不接受 `:filters`**——agent 层只暴露 `:callbacks`（传了会被
-  忽略并 warn）。要挂 kernel filter（含 `:turn` / `:iteration` 这两条本模块组装
-  的链），请自建 kernel 后以 `:kernel` 传入；此时 memory store 会复用该 kernel 上
+  忽略并 warn）。要挂 chat-client filter（含 `:turn` / `:iteration` 这两条本模块组装
+  的链），请自建 chat-client 后以 `:chat-client` 传入；此时 memory store 会复用该 chat-client 上
   memory-filter 绑定的实例。
 - **`callbacks` 与 filter 的分工**：`:on-llm-call` / `:on-tool-result` 之类是
   **观察者**——能看，不能改写、短路或重试。要在每轮做那三件事，用 `:iteration`

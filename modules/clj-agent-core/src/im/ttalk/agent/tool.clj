@@ -198,7 +198,7 @@
    - :tool/params    参数定义列表
    - :tool/sensitive 是否为敏感工具
    - :tool/serial    是否串行工具（批内并行时整批退化）
-   - :tool/timeout   超时毫秒（可选）。经 kernel 调用时**开箱即生效**（缺省不超时；
+   - :tool/timeout   超时毫秒（可选）。经 chat-client 调用时**开箱即生效**（缺省不超时；
                      优先级：本声明 > 引擎 {:timeout ms}）。语义为「放弃等待」而非
                      「终止执行」——超时后工具可能仍在后台跑完并产生外部副作用
                      （见 call-with-timeout 文档）
@@ -366,11 +366,11 @@
 (defn timeout-spec
   "读取 tool function 的 :timeout 声明（deftool 选项，毫秒）。
 
-   与 `:serial` / `:retry` / `:return-direct` 同款——经 kernel 调用时**开箱即生效**，
-   由 `kernel/invoke-tool` 强制。缺省不超时；引擎可给整体缺省
+   与 `:serial` / `:retry` / `:return-direct` 同款——经 chat-client 调用时**开箱即生效**，
+   由 `chat-client/invoke-tool` 强制。缺省不超时；引擎可给整体缺省
    `(…-tool-calling-manager {:timeout ms})`，本声明恒优先。
 
-   内联工具的同名声明经 `kernel/tool-timeout` 读取（本函数只管 var）。
+   内联工具的同名声明经 `chat-client/tool-timeout` 读取（本函数只管 var）。
    语义注意：JVM 上超时 = 放弃等待 ≠ 终止执行，详见 `call-with-timeout`。
 
    返回: nil（未声明）| 正整数毫秒"
@@ -382,14 +382,14 @@
 
    非正整数一律拒绝——`\"5s\"` 会在 deref 处抛 ClassCastException，`-1` 会让该
    工具每次调用都立刻超时（静默、无从排查），`2.7` 会被静默截断。由
-   `kernel/build-kernel` 在装配期校验（var 与内联工具汇合、尚未开始执行的最早时点）。"
+   `chat-client/build-chat-client` 在装配期校验（var 与内联工具汇合、尚未开始执行的最早时点）。"
   [t]
   (or (nil? t) (pos-int? t)))
 
 (defn check-timeout!
   "校验 timeout 值，非法则抛 ex-info。label 是出错时点名的对象（如 \"工具 :foo\"）。
 
-   **DRY**：此前 4 处（kernel.clj validate-tool-timeouts! var/inline + build-kernel
+   **DRY**：此前 4 处（chat_client.clj validate-tool-timeouts! var/inline + build-chat-client
    manager + react.clj check-timeout-opt!）各自手抄 `:timeout 必须为正整数毫秒`
    消息串——消息串被两个模块的测试用正则钉住，改一处漏一处即出问题。"
   [label t]
@@ -413,7 +413,7 @@
 
    返回 `[:ok v]` | `[:err throwable]` | `[:timeout]`——**不**替调用方决定结果
    形状，由调用点自行翻译。这是超时机制的**唯一实现**，消费者是
-   `kernel/invoke-tool`（强制「工具声明 > 引擎缺省」的生效超时）。
+   `chat-client/invoke-tool`（强制「工具声明 > 引擎缺省」的生效超时）。
 
    **语义如实声明：超时 = 放弃等待，不是终止执行。**JVM 没有强杀原语
    （`Thread.stop` 已移除），到点只能 interrupt：

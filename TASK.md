@@ -1288,3 +1288,226 @@ filter 能做：改写下一轮 delta、改写 context、`(chain req)` 重入重
 - [x] 既有 376 tests 无一依赖重名注册（`management-tools` 的 5 个工具互不重名，
       `delegate-tool` 的名字由调用方给）。
 - [x] `bb check` 全绿：**376 tests / 1630 assertions / 0 failures** + check-docs 绿。
+
+---
+
+## kernel→chat-client / service→chat-model 改名（2026-08-25，对齐 Spring AI）
+
+> 用户拍板：ns + 函数名 + 配置键**全改**（不留兼容别名，与上一轮 advisor→filter
+> 同样的硬破坏）；`chat-model` 提升到 `im.ttalk.agent.chat-model`（与 chat-client
+> 平级，不留在 `model/` 下）；`im.ttalk.agent.client` 一并改名 `simple-agent`。
+
+- [x] **对标依据**：Spring AI 的 `ChatModel` = 单次 LLM 调用，`ChatClient` =
+      其上带 advisor/tool/memory 的编排器。我们的 `service` map 与 `Kernel`
+      恰是这两层。
+- [x] ns / 文件：`kernel.clj`→`chat_client.clj`、`model/service.clj`→
+      `chat_model.clj`、`client.clj`→`simple_agent.clj`（测试同步：
+      `client_test`→`simple_agent_test`、`service_config_test`→
+      `chat_model_config_test`）。全部走 `git mv`，保住 rename 记录。
+- [x] 符号：`build-kernel`→`build-chat-client`、`create-service`→
+      `create-chat-model`、`service-config`→`chat-model-config`、
+      `Kernel`→`ChatClient`、`Service`→`ChatModel`。
+- [x] 配置键：`:service`→`:chat-model`、`:kernel`→`:chat-client`，
+      诊断键 `:service-keys`/`:kernel-keys` 同步。
+      **陷阱**：Anthropic 的 `:service-tier` / `:service_tier` 是真实 wire 字段，
+      改名脚本里先做占位符保护再还原——无差别 `s/:service/` 会把它一起毁掉。
+- [x] 错误消息随之统一：「Kernel 未配置 LLM 服务」→「ChatClient 未配置 ChatModel」
+      （`context_test` 的断言正则同步）。
+- [x] 历史 ns 名不动：`simple_agent.clj` docstring 里的「合并原 kernel-agent /
+      process-agent」指的是**已删除**的两个 ns，改成 chat-client 就是伪造历史。
+- [x] 别名清理：examples/README 里的 `ka`（kernel agent）/ `pa`（process agent）
+      统一为 `sa`；`simpleagent_examples.clj` 里同一 ns 的两条重复 require 合并。
+- [x] 缩进：`build-kernel`→`build-chat-client` 长度 +5，对齐续行全部错位。
+      写了按「数第 N 个定界符」映射列号的脚本重排（不靠 difflib——首版用它在
+      docstring 上误判过），132 处；随后核对 diff 里**零**处纯空白改动残留。
+- [x] `modules/README.md` 一处语义冲突：原写 `im.ttalk.agent.client - 高级
+      Agent API（≈ ChatClient）`——项目此前把 **SimpleAgent** 对标 Spring 的
+      ChatClient。改名后这行自相矛盾，改写为功能描述（有状态对话 + 工具循环 +
+      pause/resume）。
+- [x] 门禁：`check_docs.clj` 的墓碑表登记 5 条（`im.ttalk.agent.kernel` /
+      `.model.service` / `.client` / `build-kernel` / `create-service`）。
+      **`:service` / `:kernel` 两个裸键刻意不登记**——README 里 `:service-tier`
+      一类合法串会误命中，而该门禁的取舍是「宁可漏报不可误报」。
+- [x] `build.clj` 的 core 模块 description 去掉「Semantic Kernel 风格」。
+- [x] docs/ 分级处理（照 `6165862` 的先例）：只改仍在描述当前机制的
+      `design-principles.md`（§3 标题与两处锚点）/ `filter-chain-design.md` /
+      `tool-timeout-design.md` / `token-stream-filter-design.md` / `docs/README.md`
+      与六个 README；其余 15 份历史设计文档留旧名。
+- [x] `bb check` 全绿：**376 tests / 1630 assertions / 0 failures** + check-docs 绿；
+      138 个 clj 文件过 reader 检查；六个 README 的页内锚点全部可达。
+
+---
+
+## 分层对齐 Spring AI / beamai（2026-08-25，改名之后同日）
+
+> 用户四条指令：① 构建 ChatRequest/ChatResponse 类；② ChatModel 体系，Provider
+> 只管底层，ChatModel 负重（重试）；③ ChatClient 收窄，对标 Spring ChatClient；
+> ④ 该变成类的都变成类。第 ③ 条随后参照 `~/workspace/beamai` 调整为
+> **入口模式 + 拆分**，不照 Spring 全改。
+
+### 调研结论（先读代码再设计，两处都改变了方案）
+
+- [x] **Spring AI 当前主线已把工具循环从 `ChatModel` 挪出去了**——
+      `OpenAiChatModel.internalCall` / `AnthropicChatModel.internalCall` 现在就是
+      单次 LLM 调用，`executeToolCalls` 只出现在 `ToolCallingAdvisor`（advisor 链）。
+      即：指令 ② 的「更重的任务」指**重试 + 选项解析 + 可观测**，不含工具循环；
+      clj-agent 现有的「循环在 react + :iteration 链」与之位置等价，不动。
+- [x] **Spring 是两层两对类型**：`Prompt`/`ChatResponse`（ChatModel 层）+
+      `ChatClientRequest`/`ChatClientResponse`（advisor 层），不是一对。
+- [x] **beamai 的 `beamai_chat_client` 没有照 Spring 收窄**（443 行，保留
+      `invoke_tool` + 整套 Query API）。它做的是 Facade（`beamai.erl` 227 行薄转发）
+      + 按职责拆模块（filter → filter/filter_chain/filters；tool → tool/tool_index/
+      tool_search/tool_error）。用户据此把 ③ 改成入口模式 + 拆分。
+- [x] **beamai 的 chat_model 已跑通重试上移**，两条约束照抄：重试在 filter 栈
+      **之下**（filter 只看到一次逻辑调用）；**流式不重试**（token 已投递给 sink）。
+      第二条本来会漏——直接给 `invoke-chat-stream` 加重试会当场产生重复 token。
+
+### S1 类型层
+
+- [x] 新 `im.ttalk.agent.model.request`：`ChatRequest [messages options]` +
+      `as-chat-request`（扁平 map 写法：除 `:messages` 外全收进 `:options`）。
+      **做成叶子 ns** —— chat-model / filter / chat-client 三家都要它，
+      放进任何一家都会给另外两家造反向依赖。
+- [x] `LLMResponse` record → `ChatResponse`（协议名 `ILLMResponse` 保留，与
+      `ILLMProvider` 对称）。
+- [x] `filter.clj` 新增 `ChatClientRequest [request context on-token]` /
+      `ChatClientResponse [response context]` + `as-*` + 9 个存取器。
+      `:on-token` 放外层而非 `:options`——sink 永远不该出现在 wire 上，
+      两层结构让这件事无需靠白名单保证。
+- [x] 冲击面比预估小：只有 3 个 filter 挂 `:chat` 链（logging / memory /
+      tool-search）；`:turn` 与 `:iteration` 链有各自的请求形状，不受影响。
+
+### S2 ChatModel 体系 + 重试上移
+
+- [x] `IChatModel` 协议（`call` / `stream-call` / `model-options`）+
+      `DefaultChatModel`（包 provider）/ `FnChatModel`（包 `{:chat-fn :stream-fn}`）+
+      `as-chat-model` 归一化 —— 历史裸 map 写法照旧可用。
+- [x] 新 `im.ttalk.agent.retry`（core，**零依赖**）：判据 = canonical error 的
+      `:retryable?`；三级取值；`:on-retry` 观测真实尝试；满抖动退避。
+- [x] **`Retry-After` 不能在上移时丢**：解析 HTTP 头是 provider 边界的事，重试
+      却搬到了 core（不认识 HTTP）。做法是 `http/client/response->error` 顺带把它
+      解析成 `:retry-after-ms` 挂在 canonical error 上，core 只读那个数。
+      不这么传，429 上的服务端退避建议会静默失效。
+- [x] provider chat 路径拆掉 `maybe-with-retry`（anthropic / openai_compat）；
+      embeddings 与 stream_client **保留**（它们不走 ChatModel）。
+- [x] 新 `retry_test.clj`（10 deftest / 29 assertions）钉三条：重试在 filter 栈
+      之下（filter 只跑 1 次而 provider 被打 3 次）、流式不重试、401 永不重试。
+- [x] **抓到一处静默失败并封掉**：live 脚本用 `(assoc cm :chat-fn (fn ...))` 给
+      ChatModel 埋探针（v0.3 前 chat-model 就是那个裸 map）。record 化之后
+      assoc 只往 ext-map 塞键，协议分派看不见——注入被无声丢弃，探针不涨、
+      程序照跑、无任何运行期症状。`as-chat-model` 现在对「已实现 IChatModel
+      却仍带 :chat-fn/:stream-fn」装配期即抛（处置同「拒绝同名工具」）。
+      两个 live 脚本改为 `reify IChatModel` 转调内层。
+- [x] 踩坑记录：测试里手写 `(errors/error :provider-error … {:status 401})` 构造
+      不出「不可重试的 401」——`errors/error` 的默认表里 `:provider-error` 属可重试类，
+      `:status` 不参与判定。须走真实路径 `errors/http-response->error`。
+
+### S3 ChatClient 拆分 + Facade
+
+- [x] 新 `im.ttalk.agent.tool-registry`（248 行）：`ToolMeta` + 三个装配期校验 +
+      `build-tool-meta` + 8 个查询。拆分判据是「这些函数认识什么」——它们全部
+      只认识工具声明，一个都不认识 ChatModel / filter 链 / 消息。
+- [x] `filter-hooks` / `with-filters` 归到 `filter` ns：它们认识的是链，对
+      ChatClient 只用两个关键字取值 → 依赖方向 chat-client → filter 单向，无循环。
+- [x] `chat_client.clj` 565 → **324 行**，公开面 5 个（record + build + 三 invoke）。
+- [x] 新 `im.ttalk.agent` Facade（对照 `beamai.erl`）：15 个一行转发。
+      `filter` 遮蔽 `clojure.core/filter`，显式 `:refer-clojure :exclude`。
+- [x] **Facade 只覆盖 core**——`create-agent` 在 client 模块，core 不能依赖它。
+      beamai 的 `beamai.erl` 同样不暴露 agent 层，写法一致。
+
+### S4 文档与门禁
+
+- [x] 六个 README + `modules/README.md` 架构图（四层表 + mermaid）；
+      新增 ChatModel / 重试 / 两层请求响应 / Facade 四段。
+- [x] `check_docs.clj`：**`LLMResponse` 墓碑登记后当场撤回**——墓碑是子串匹配，
+      而仍在用的协议名 `ILLMResponse` 包含它，登记即误报。理由写进注释。
+- [x] **`design-principles.md` §1.5 显式修订**（本次唯一的原则级改动）：
+      §1.2 四问表把「更像 Spring」整条划进假想列，字面上会把这两轮工作全判成违反。
+      用户拍板推翻该读法。修订后的边界——**本原则管「该不该有这个东西」，不管
+      「这个东西该叫什么、放哪」**：改名/换分层位置不新增 API 面，§1.1 的
+      「成本不对称」论据在那里不成立；为对标而新建抽象/长字段照旧受管。
+- [x] **作者判「不做」、用户当场推翻并判做**：`ChatClient` 的四个工具字段收成
+      `ToolRegistry` record。作者的三条理由（只换来对称性 / `(:tools cc)` 更绕 /
+      第三次改 arity）逐条不成立——换来的是**不变量**（四者总是一起产生、一起
+      使用、一起被子 agent 整体替换，收进去之后「一个 ChatClient 一个注册表」
+      在类型上成立）；平铺才是让调用方替你记着「这四个要一起换」；**改动次数
+      不是判据**，它衡量的是作者的麻烦而非设计的对错，照这条推下去先落地的错
+      形状会因为「已经改过两次」而永久固化。复盘写进 §1.5。
+- [x] 落地：`ToolRegistry [tools tool-vars inline-handlers tool-meta]`；
+      `ChatClient` 9 → **6 个位置参数**；查询函数经 `registry-of` 归一，
+      吃 ChatClient 或裸注册表都行（调用形状不变）；新增 `tool-schemas`
+      替代 `(:tools cc)`。新增 `chat-client-holds-one-tool-registry` 测试
+      钉住「四个旧字段平铺读法必须失效」——否则调用方会以为旧写法还成立。
+- [x] `bb check` 全绿：**386 tests / 1665 assertions / 0 failures** + check-docs 绿。
+
+---
+
+## 修 callbacks_integration_test 的既有失败（2026-08-25）
+
+> 跑完 live 脚本后发现的 5 处失败（此前误记为 4 处）。先用 `git worktree` 拉
+> HEAD 对照跑，确认与本轮重构无关，再逐个查根因——**其中 4 处不是测试写错，
+> 是两个有文档、有设计记录的功能静默消失了**。
+
+- [x] **根因**：callbacks 体系（2026-06）落地时，`:on-tool-call` 版 gate
+      **替换**而非补充了 `:on-pause` 版；`:on-pause` 从 `create-agent` 的
+      `:settings` select-keys 里掉了，`:sensitive` 从此无人消费
+      （`build-func-def` 仍在填它，一路带到 ToolRequest，只是没人读）。
+- [x] **三处文档同时成了幽灵**：README「方式二」整节、`deftool {:sensitive true}`
+      的说明、`docs/unified-invoke-agent.md`（状态 ✅ 已实施，明写「gate 仅靠
+      `:on-pause`」并给了代码）。
+- [x] **为什么没被发现**：**零运行期症状**——不暂停的 agent 照跑，只是敏感工具
+      直接执行了，`chat` 返回 `:completed`。既有单测**全部**走 `:on-tool-call`
+      那条 gate（`dangerous-gate`），一条都照不到 `:on-pause`；唯一在失败的
+      `examples/callbacks_integration_test` 不进 `bb check`，被当成既有噪音。
+      check_docs 也照不到：`:on-pause` 是 map 键，不是可 resolve 的符号。
+- [x] 修复：`gate-of` 两条启用路径并存（回调优先问，放行的敏感工具**仍暂停**——
+      `:sensitive` 是工具作者立的下限）；`finalize` 的 `:paused` 分支触发
+      `:on-pause`（与 `:on-interrupt` 并存，回调抛异常被吞不影响暂停本身）；
+      `:on-pause` 回到 `:settings`。
+- [x] 补单测 `on-pause-gate-test`（5 个 testing）+ `on-pause-resume-test`：
+      单独配 `:on-pause` 能暂停、非敏感工具不暂停、两条都不配 gate 关闭、
+      两条并存时回调放行但敏感仍暂停、回调抛异常不影响暂停。**这是本次唯一
+      让该路径进 `bb check` 的东西**——只靠 examples 钉不住。
+- [x] 第 5 处是**测试自己的 bug**（场景 5）：工具注册名 `do_research`（下划线），
+      mock LLM 却发 `do-research`（连字符），实际拿到的是
+      `"错误: 函数未找到: :do-research"`；而「on-tool-result 触发了 do_research」
+      这条断言比的正是 `"do-research"`——**描述与断言自相矛盾，所以它一直假装
+      通过**。改正名字，并补一条「工具结果不是『函数未找到』」钉住那次假通过。
+      框架行为无误（工具错误渲染成字符串喂回模型，turn 照常收尾）。
+- [x] `create-agent` docstring 补回 `:on-pause` 与两条 gate 的关系说明。
+- [x] `callbacks_integration_test`：**28 PASS / 0 FAIL**；
+      `bb check` 全绿：389 tests / 1695 assertions / 0 failures + check-docs 绿。
+
+---
+
+## 修 streaming 示例（undertow / jetty）（2026-08-25）
+
+> 跑 live 时发现这两个连**加载**都过不去。都是 web 框架 API 漂移，与 clj-agent
+> 无关；按 §2「框架无关」它们不在项目 deps、不进任何门禁，所以一直没人发现。
+> 先用 `git worktree` 拉 HEAD 确认与本轮重构无关，再逐个查。
+
+- [x] **undertow #1（编译期）**：`reify ServerSentEventConnectionCallback` 的
+      **参数**上加了类型 hint，`connected` 匹配不上——报错原文就是提示
+      "leave off hints for auto match"。hint 挪进 body 的 `let`：既能匹配，
+      `.send`/`.close` 也不走反射。
+- [x] **jetty（编译期）**：`jetty/send!` 在 ring-jetty9-adapter 0.36.0 里连 var
+      都没有。0.30+ 已迁到 **Ring 标准 websocket**：handler 对 upgrade 请求返回
+      `{:ring.websocket/listener …}`（listener 可以就是个 map），发送用
+      `ring.websocket/send`；`run-jetty :websockets {…}` 路由表一并取消，
+      WS 与普通请求走同一个 ring handler。SSE 那半（StreamableResponseBody）没变。
+- [x] **undertow #2（运行期，编译看不见）**：`:on-close` 在 1.3.x 已废弃且是
+      **assert 掉的**——WS 握手直接 500（`AssertionError: :on-close has been
+      deprecated`）。正确的键是 `:on-close-message`，收 `{:channel :message}`。
+- [x] **undertow #3（运行期竞态，编译看不见）**：`ServerSentEventConnection.send`
+      是**异步**的，`:done!` 里紧跟 `.close` 会把最后一帧冲掉——客户端永远收不到
+      done/error。改走带 `EventCallback` 的重载，在回调里再关。
+- [x] 四个 streaming 示例的 `MINIMAX_AUTH_TOKEN` 统一为
+      `(or MINIMAX_API_KEY MINIMAX_AUTH_TOKEN)`，与其余 10 个脚本一致。
+- [x] **验证口径升级为端到端**：只做「能加载」正是让 #2/#3 溜进来的那条线。
+      实起服务 + `java.net.http` 打真实流量（WebSocket 与 SSE 各一条，真实
+      MiniMax token）：undertow SSE/WS 双 PASS、jetty SSE/WS 双 PASS。
+      冒烟脚本自身也踩过一次坑：固定 `take N` 行会在 done 帧之前截断造成**假
+      FAIL**，改成读到 done 为止。
+- [x] http_kit / aleph 两个未受影响，加载照常通过。
+- [x] `bb check` 全绿：389 tests / 1695 assertions / 0 failures + check-docs 绿。
+

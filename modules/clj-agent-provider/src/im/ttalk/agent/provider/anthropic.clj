@@ -68,7 +68,6 @@
      [(schema/code-execution-tool)])"
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
-            [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
@@ -411,13 +410,13 @@
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))
         timeout (or (:timeout config) 120000)
-        ;; opt-in 重试：仅当 config 含 :retry 时启用
-        response (retry/maybe-with-retry
-                   config
-                   #(http/post api-url
-                               :headers headers
-                               :body params
-                               :timeout timeout))]
+        ;; 无重试：重试已上移到 ChatModel（`im.ttalk.agent.retry`）。provider
+        ;; 只负责「发这一次请求 + 把失败翻成 canonical error」——两层各 retry
+        ;; 一次会让实际次数变成 m×n，且下层重试对上层的 :on-retry 不可见。
+        response (http/post api-url
+                            :headers headers
+                            :body params
+                            :timeout timeout)]
     (if (:success? response)
       ;; 把限流头信息附加到响应体（内部字段，不影响 normalize-response 的标准解析）
       (let [rl (parse-rate-limit (:headers response))]

@@ -2,7 +2,7 @@
   "SimpleAgent 综合使用示例
 
    覆盖场景:
-   1. 简单对话、多轮对话（Kernel Agent / Process Agent）
+   1. 简单对话、多轮对话（ChatClient Agent / Process Agent）
    2. 带工具的对话、多轮工具调用
    3. Memory 存储：长对话、HIL、保存恢复
    4. 双 Provider 验证（OpenAI 兼容 / Anthropic 兼容）
@@ -18,8 +18,7 @@
   (:require [clojure.edn]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.context :as ctx]
-            [im.ttalk.agent.client :as ka]
-            [im.ttalk.agent.client :as pa]
+            [im.ttalk.agent.simple-agent :as sa]
             [im.ttalk.agent.provider.zhipu :as zhipu]
             [im.ttalk.agent.provider.anthropic :as anthropic]))
 
@@ -132,51 +131,51 @@
 ;;; Part 1: 简单对话和多轮对话
 ;;; ============================================================
 
-(defn test-kernel-simple-chat [provider]
-  (subsection "Kernel Agent: 简单对话")
+(defn test-chat-client-simple-chat [provider]
+  (subsection "ChatClient Agent: 简单对话")
   (safe-call "单轮对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "你是一个简洁的助手，回答尽量用一句话。"})
-            result (ka/chat agent "中国的首都是哪里？")]
+            result (sa/chat agent "中国的首都是哪里？")]
         (println (str "    回复: " (:text result)))
         (assert (some? (:text result)))))))
 
-(defn test-kernel-multi-turn [provider]
-  (subsection "Kernel Agent: 多轮对话")
+(defn test-chat-client-multi-turn [provider]
+  (subsection "ChatClient Agent: 多轮对话")
   (safe-call "多轮对话记忆验证"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "你是助手，回答简短。"})]
         ;; 轮次 1: 告知信息
-        (let [r1 (ka/chat agent "我叫张三，我住在上海，请记住。")]
+        (let [r1 (sa/chat agent "我叫张三，我住在上海，请记住。")]
           (println (str "    轮次1: " (:text r1))))
         (wait api-delay)
         ;; 轮次 2: 追问
-        (let [r2 (ka/chat agent "我住在哪里？直接回答城市名。")]
+        (let [r2 (sa/chat agent "我住在哪里？直接回答城市名。")]
           (println (str "    轮次2: " (:text r2)))
-          (println (str "    历史消息数: " (count (ka/get-history agent)))))
+          (println (str "    历史消息数: " (count (sa/get-history agent)))))
         (wait api-delay)
         ;; 轮次 3: 再追问
-        (let [r3 (ka/chat agent "我叫什么名字？直接回答名字。")]
+        (let [r3 (sa/chat agent "我叫什么名字？直接回答名字。")]
           (println (str "    轮次3: " (:text r3))))))))
 
 (defn test-process-simple-chat [provider]
   (subsection "Process Agent: 简单对话")
   (safe-call "Process Agent 单轮对话"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "你是一个简洁的助手。"})
-            result (pa/chat agent "1+1等于几？")]
+            result (sa/chat agent "1+1等于几？")]
         (println (str "    状态: " (:status result)))
         (println (str "    回复: " (:text result)))
         (assert (= :completed (:status result)))))))
@@ -185,22 +184,22 @@
   (subsection "Process Agent: 多轮对话")
   (safe-call "Process Agent 多轮对话记忆"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "回答简短。"})]
-        (let [r1 (pa/chat agent "我的宠物是一只叫阿黄的狗。")]
+        (let [r1 (sa/chat agent "我的宠物是一只叫阿黄的狗。")]
           (println (str "    轮次1: " (:text r1))))
         (wait api-delay)
-        (let [r2 (pa/chat agent "我的宠物叫什么名字？")]
+        (let [r2 (sa/chat agent "我的宠物叫什么名字？")]
           (println (str "    轮次2: " (:text r2))))))))
 
 (defn run-part1 [provider provider-name]
   (separator (str "Part 1: 简单对话和多轮对话 (" provider-name ")"))
-  (test-kernel-simple-chat provider)
+  (test-chat-client-simple-chat provider)
   (wait api-delay)
-  (test-kernel-multi-turn provider)
+  (test-chat-client-multi-turn provider)
   (wait api-delay)
   (test-process-simple-chat provider)
   (wait api-delay)
@@ -210,57 +209,57 @@
 ;;; Part 2: 带工具的对话
 ;;; ============================================================
 
-(defn test-kernel-tool-call [provider]
-  (subsection "Kernel Agent: 工具调用")
+(defn test-chat-client-tool-call [provider]
+  (subsection "ChatClient Agent: 工具调用")
   (safe-call "单轮工具调用"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools
                      :system-prompt "你是助手，需要时调用工具获取信息。"})
-            result (ka/chat agent "北京今天天气怎么样？")]
+            result (sa/chat agent "北京今天天气怎么样？")]
         (println (str "    回复: " (:text result)))
         (println (str "    工具调用: " (mapv (fn [tc] [(:name tc) (:result tc)])
                                              (:tool-calls-made result))))
         (assert (seq (:tool-calls-made result)))))))
 
-(defn test-kernel-multi-turn-with-tools [provider]
-  (subsection "Kernel Agent: 多轮工具对话")
+(defn test-chat-client-multi-turn-with-tools [provider]
+  (subsection "ChatClient Agent: 多轮工具对话")
   (safe-call "多轮带工具对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools
                      :system-prompt "你是助手，必要时使用工具。"})]
         ;; 轮次 1: 天气查询
-        (let [r1 (ka/chat agent "上海天气怎么样？")]
+        (let [r1 (sa/chat agent "上海天气怎么样？")]
           (println (str "    轮次1: " (:text r1)))
           (println (str "    工具: " (mapv :name (:tool-calls-made r1)))))
         (wait api-delay)
         ;; 轮次 2: 追问
-        (let [r2 (ka/chat agent "现在几点了？")]
+        (let [r2 (sa/chat agent "现在几点了？")]
           (println (str "    轮次2: " (:text r2)))
           (println (str "    工具: " (mapv :name (:tool-calls-made r2)))))
         (wait api-delay)
         ;; 轮次 3: 综合
-        (let [r3 (ka/chat agent "帮我算一下 123*456")]
+        (let [r3 (sa/chat agent "帮我算一下 123*456")]
           (println (str "    轮次3: " (:text r3)))
-          (println (str "    总历史消息数: " (count (ka/get-history agent)))))))))
+          (println (str "    总历史消息数: " (count (sa/get-history agent)))))))))
 
 (defn test-process-tool-call [provider]
   (subsection "Process Agent: 工具调用")
   (safe-call "Process Agent 工具调用（非 sensitive）"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools})
-            result (pa/chat agent "现在几点了？")]
+            result (sa/chat agent "现在几点了？")]
         (println (str "    状态: " (:status result)))
         (println (str "    回复: " (:text result)))
         (println (str "    工具: " (mapv :name (:tool-calls-made result))))
@@ -270,25 +269,25 @@
   (subsection "Process Agent: 多轮工具对话")
   (safe-call "Process Agent 多轮工具调用"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools
                      :system-prompt "你是助手，需要时调用工具。"})]
-        (let [r1 (pa/chat agent "杭州天气如何？")]
+        (let [r1 (sa/chat agent "杭州天气如何？")]
           (println (str "    轮次1 状态: " (:status r1)))
           (println (str "    轮次1 回复: " (:text r1))))
         (wait api-delay)
-        (let [r2 (pa/chat agent "帮我算 2^10")]
+        (let [r2 (sa/chat agent "帮我算 2^10")]
           (println (str "    轮次2 状态: " (:status r2)))
           (println (str "    轮次2 回复: " (:text r2))))))))
 
 (defn run-part2 [provider provider-name]
   (separator (str "Part 2: 带工具的对话 (" provider-name ")"))
-  (test-kernel-tool-call provider)
+  (test-chat-client-tool-call provider)
   (wait api-delay)
-  (test-kernel-multi-turn-with-tools provider)
+  (test-chat-client-multi-turn-with-tools provider)
   (wait api-delay)
   (test-process-tool-call provider)
   (wait api-delay)
@@ -299,10 +298,10 @@
 ;;; ============================================================
 
 (defn test-long-conversation [provider]
-  (subsection "Kernel Agent: 长多轮对话")
+  (subsection "ChatClient Agent: 长多轮对话")
   (safe-call "5轮连续对话验证上下文保持"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
@@ -315,16 +314,16 @@
                         "总结一下你知道的关于我的信息。"]]
           (doseq [[idx msg] (map-indexed vector messages)]
             (when (pos? idx) (wait api-delay))
-            (let [result (ka/chat agent msg)]
+            (let [result (sa/chat agent msg)]
               (println (str "    轮次" (inc idx) ": " (:text result))))))
-        (println (str "    最终历史消息数: " (count (ka/get-history agent))))))))
+        (println (str "    最终历史消息数: " (count (sa/get-history agent))))))))
 
 (defn test-hil-approve [provider]
   (subsection "Process Agent: HIL 审批执行")
   (safe-call "Sensitive 工具暂停 -> 审批 -> 执行"
     (fn []
       (let [pause-log (atom nil)
-            agent (pa/create-agent
+            agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -332,14 +331,14 @@
                      :on-pause (fn [info]
                                  (reset! pause-log info)
                                  (println (str "    [on-pause] " (:reason info))))})]
-        (let [result (pa/chat agent "帮我删除 /tmp/test.txt 文件")]
+        (let [result (sa/chat agent "帮我删除 /tmp/test.txt 文件")]
           (println (str "    状态: " (:status result)))
           (if (= :paused (:status result))
             (do
               (println (str "    待审批: " (:name (:pending-tool result))))
               (println (str "    参数: " (:args (:pending-tool result))))
               ;; 审批
-              (let [resumed (pa/resume agent "approved")]
+              (let [resumed (sa/resume agent "approved")]
                 (println (str "    审批后状态: " (:status resumed)))
                 (println (str "    审批后回复: " (:text resumed)))
                 (assert (= :completed (:status resumed)))))
@@ -349,15 +348,15 @@
   (subsection "Process Agent: HIL 拒绝操作")
   (safe-call "Sensitive 工具暂停 -> 拒绝"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools
                      :on-pause (fn [_] nil)})]
-        (let [result (pa/chat agent "请删除 /home/user/important.dat")]
+        (let [result (sa/chat agent "请删除 /home/user/important.dat")]
           (when (= :paused (:status result))
-            (let [rejected (pa/resume agent "rejected")]
+            (let [rejected (sa/resume agent "rejected")]
               (println (str "    拒绝后状态: " (:status rejected)))
               (println (str "    拒绝后回复: " (:text rejected)))
               (assert (= :completed (:status rejected))))))))))
@@ -366,7 +365,7 @@
   (subsection "Process Agent: HIL 多轮 sensitive")
   (safe-call "多次 sensitive 暂停恢复"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -374,19 +373,19 @@
                      :system-prompt "你是助手，用户要求时调用工具。"
                      :on-pause (fn [_] nil)})]
         ;; 第一次: 保存笔记（sensitive）
-        (let [r1 (pa/chat agent "帮我保存一条笔记，标题是'TODO'，内容是'学习Clojure'")]
+        (let [r1 (sa/chat agent "帮我保存一条笔记，标题是'TODO'，内容是'学习Clojure'")]
           (println (str "    第1次状态: " (:status r1)))
           (when (= :paused (:status r1))
             (println (str "    审批保存笔记..."))
-            (let [resumed (pa/resume agent "approved")]
+            (let [resumed (sa/resume agent "approved")]
               (println (str "    执行后: " (:text resumed))))))
         (wait api-delay)
         ;; 第二次: 删除文件（sensitive）
-        (let [r2 (pa/chat agent "删除 /tmp/old.log")]
+        (let [r2 (sa/chat agent "删除 /tmp/old.log")]
           (println (str "    第2次状态: " (:status r2)))
           (when (= :paused (:status r2))
             (println (str "    拒绝删除..."))
-            (let [rejected (pa/resume agent "rejected")]
+            (let [rejected (sa/resume agent "rejected")]
               (println (str "    拒绝后: " (:text rejected))))))))))
 
 (defn run-part3 [provider provider-name]
@@ -409,12 +408,12 @@
   (subsection (str provider-name ": 简单对话"))
   (safe-call "单轮对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 256
                      :system-prompt "回答简短。"})
-            r (ka/chat agent "1+1=?")]
+            r (sa/chat agent "1+1=?")]
         (println (str "    回复: " (:text r)))
         (assert (some? (:text r))))))
 
@@ -423,12 +422,12 @@
   (subsection (str provider-name ": 工具调用"))
   (safe-call "工具调用验证"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools})
-            r (ka/chat agent "北京天气怎么样？")]
+            r (sa/chat agent "北京天气怎么样？")]
         (println (str "    回复: " (:text r)))
         (println (str "    工具: " (mapv :name (:tool-calls-made r))))
         (assert (some? (:text r))))))
@@ -438,14 +437,14 @@
   (subsection (str provider-name ": 多轮验证"))
   (safe-call "多轮对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "回答简短。"})]
-        (ka/chat agent "我叫小红。")
+        (sa/chat agent "我叫小红。")
         (wait api-delay)
-        (let [r (ka/chat agent "我叫什么？")]
+        (let [r (sa/chat agent "我叫什么？")]
           (println (str "    回复: " (:text r))))))))
 
 ;;; ============================================================

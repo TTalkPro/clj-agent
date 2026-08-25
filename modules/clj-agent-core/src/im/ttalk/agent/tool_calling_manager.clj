@@ -9,7 +9,7 @@
    本协议只提升工具执行入口，使 ReAct 循环可注入替代实现；它不接管声明级
    :serial 策略，不替代单工具 :tool filter around 链，也不接管 :writes 在
    ctx/apply-writes 屏障处的折叠。"
-  (execute-tool-calls [this kernel response opts]
+  (execute-tool-calls [this chat-client response opts]
     "从 ILLMResponse 抽取 tool_calls、调度执行并返回 ToolExecutionResult。
 
      opts 为 {:gate :tool-context :records :on-tool-result}。manager 内部通过
@@ -37,10 +37,10 @@
   "**当前正在执行的工具批**所用的引擎缺省超时（毫秒），nil = 无引擎缺省。
 
    由各 `ToolCallingManager` record 的 `execute-tool-calls` 在入口处 `binding`
-   为自身的 `:timeout`，使 `kernel/effective-tool-timeout` 能读到**实际执行的**
-   manager 的超时——而非从 kernel 的 `:tool-manager` 字段回读（R4: 回读会在
+   为自身的 `:timeout`，使 `chat-client/effective-tool-timeout` 能读到**实际执行的**
+   manager 的超时——而非从 chat-client 的 `:tool-manager` 字段回读（R4: 回读会在
    manager 被 wrap 时读错对象，如 instrumented wrapper 或独立传入的 manager）。
 
-   直接调 `kernel/invoke-tool`（不经 manager）时此 var 为根值 nil，
-   `effective-tool-timeout` 回落到 `(manager-timeout (:tool-manager kernel))`。"
+   直接调 `chat-client/invoke-tool`（不经 manager）时此 var 为根值 nil，
+   `effective-tool-timeout` 回落到 `(manager-timeout (:tool-manager chat-client))`。"
   nil)

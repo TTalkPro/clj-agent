@@ -2,7 +2,7 @@
   "P3 验收（确定性部分）：**走完整 agent 循环**，第二轮发出去的历史里必须带着载荷。
 
    这是 P3 唯一真正要保证的事——单看 response->neutral 或单看 wire 都证明不了它：
-   载荷要穿过 `service 归一化 → memory filter 落库 → 下一轮取历史 → 递给 provider`
+   载荷要穿过 `chat-model 归一化 → memory filter 落库 → 下一轮取历史 → 递给 provider`
    整条链。链上任何一环丢掉它，工具循环第二轮就退回修复前的行为
    （实测代价 M3 正确率 100%→82.5%，docs/provider-variant-design.md §7.5.3）。
 
@@ -10,7 +10,7 @@
    中立消息）。中立 → wire 的逐字还原由 provider 模块的 replay_blocks_test 覆盖，
    各测各的层，不跨模块依赖。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.tool :refer [deftool]]))

@@ -57,9 +57,9 @@
         rfn (or result-fn :text)]
     (try
       ;; 延迟 require：子 agent 使用 client/create-agent + client/chat
-      (require 'im.ttalk.agent.client)
-      (let [create-agent (resolve 'im.ttalk.agent.client/create-agent)
-            chat-fn      (resolve 'im.ttalk.agent.client/chat)
+      (require 'im.ttalk.agent.simple-agent)
+      (let [create-agent (resolve 'im.ttalk.agent.simple-agent/create-agent)
+            chat-fn      (resolve 'im.ttalk.agent.simple-agent/chat)
             ;; 子 agent 默认隔离：无记忆 + 独立 conversation-id
             config (merge {:memory false
                            :conversation-id (str "sub-" (java.util.UUID/randomUUID))}
@@ -88,11 +88,11 @@
   "在虚拟线程上运行子 agent，返回 j.u.c.Future（kill! 用 future-cancel 中断）。
 
    **不用 `bound-fn*` 是故意的，别顺手「修好」**（有测试钉住）：子 agent 是
-   新 Kernel + 新 TCM = **新执行边界**，调用方的动态绑定等 ambient 状态不该隐式
-   穿过去（设计原则 §3「一个 Kernel 绑定一个 TCM，不跨边界」的「边界外不流通」）。
+   新 ChatClient + 新 TCM = **新执行边界**，调用方的动态绑定等 ambient 状态不该隐式
+   穿过去（设计原则 §3「一个 ChatClient 绑定一个 TCM，不跨边界」的「边界外不流通」）。
    要把状态传给子 agent，走 `subagent-config` / prompt **显式**传。
 
-   对照：同一 kernel 内的 `react/run-on-executor` **必须**用 `bound-fn*`——那是
+   对照：同一 chat-client 内的 `react/run-on-executor` **必须**用 `bound-fn*`——那是
    边界**内**，同一条原则的另一侧（「边界内一致」）。"
   [id spec result-promise]
   (.submit ^ExecutorService worker-executor

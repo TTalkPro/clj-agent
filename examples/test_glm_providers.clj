@@ -24,9 +24,9 @@
 ;;; ============================================================
 
 (println "\n[测试 1] Anthropic 兼容协议  open.bigmodel.cn/api/anthropic")
-(def pa (zhipu/create-anthropic-provider {}))
+(def sa (zhipu/create-anthropic-provider {}))
 (try
-  (let [r (model/call-llm pa {:model glm-model :max-tokens 1024}
+  (let [r (model/call-llm sa {:model glm-model :max-tokens 1024}
                           [{:role :user :content "用一句话介绍你自己。"}]
                           [])]
     (println "TEXT:" (resp/response-text r))
@@ -62,7 +62,7 @@
 (def ans (StringBuilder.))
 (def think (StringBuilder.))
 (try
-  (model/call-llm-stream pa {:model glm-model :max-tokens 512}
+  (model/call-llm-stream sa {:model glm-model :max-tokens 512}
                          [{:role :user :content "数到三，只输出：1 2 3"}]
                          nil
                          (fn [{:keys [token reasoning-token]}]

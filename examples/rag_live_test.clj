@@ -33,10 +33,11 @@
    运行（需 MINIMAX_API_KEY，兼容旧的 MINIMAX_AUTH_TOKEN）：
      clojure -M -e \"(load-file \\\"examples/rag_live_test.clj\\\")\""
   (:require [clojure.string :as str]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.memory :as memory]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.filter.rag :as rag]
@@ -122,7 +123,7 @@
 (defn probe [log]
   {:name :probe
    :chat (fn [req chain]
-           (swap! log conj {:messages (:messages req)})
+           (swap! log conj {:messages (flt/req-messages req)})
            (chain req))})
 
 (defn- last-user-content [{:keys [messages]}]
@@ -130,11 +131,11 @@
 
 (defn run-case
   "跑一次对话。rag-filter 为 nil 则是对照组（不挂 RAG）。"
-  [svc rag-filter question]
+  [cm rag-filter question]
   (let [log (atom [])
         store (memory/in-memory-store)
-        k (kernel/build-kernel
-            {:service svc
+        k (chat-client/build-chat-client
+            {:chat-model cm
              :filters (cond-> [(ma/memory-filter store)]
                         rag-filter (conj rag-filter)
                         :always (conj (probe log)))})
@@ -151,11 +152,11 @@
 
 (def q-nimbus "Nimbus-7 型咖啡机多久需要除垢一次？要用什么溶液？")
 
-(defn test-grounding [svc]
+(defn test-grounding [cm]
   (println "\n=== 场景 1: grounding（虚构事实，对照组不可能知道） ===")
   (let [rlog (atom [])
-        base (run-case svc nil q-nimbus)
-        r (run-case svc (rag/qa-turn-filter (keyword-retriever corpus rlog) :top-k 2)
+        base (run-case cm nil q-nimbus)
+        r (run-case cm (rag/qa-turn-filter (keyword-retriever corpus rlog) :top-k 2)
                     q-nimbus)]
 
     (println "   对照组答案:" (clip (:answer base) 90))
@@ -188,10 +189,10 @@
 
 (def q-unrelated "帮我写一句关于春天的短诗。")
 
-(defn test-empty-retrieval [svc]
+(defn test-empty-retrieval [cm]
   (println "\n=== 场景 2: 检索为空 → 不注入（默认） ===")
   (let [rlog (atom [])
-        r (run-case svc (rag/qa-turn-filter (keyword-retriever corpus rlog) :top-k 2)
+        r (run-case cm (rag/qa-turn-filter (keyword-retriever corpus rlog) :top-k 2)
                     q-unrelated)]
     (println "   检索器调用:" (pr-str @rlog))
     (println "   答案:" (clip (:answer r) 90))
@@ -202,10 +203,10 @@
     (check "模型照常作答（没被空上下文逼到拒答）"
            (= :completed (:status (:result r))))))
 
-(defn test-inject-when-empty [svc]
+(defn test-inject-when-empty [cm]
   (println "\n=== 场景 3: :inject-when-empty? true → 恢复 Spring 的严格 grounding ===")
-  (let [r (run-case svc (rag/qa-turn-filter (keyword-retriever corpus) :top-k 2
-                                            :inject-when-empty? true)
+  (let [r (run-case cm (rag/qa-turn-filter (keyword-retriever corpus) :top-k 2
+                                           :inject-when-empty? true)
                     q-unrelated)]
     (println "   发给 provider 的用户消息:" (clip (:sent r) 110))
     (println "   答案:" (clip (:answer r) 90))
@@ -217,10 +218,10 @@
 ;;; 场景 4：top-k 截断
 ;;; ============================================================
 
-(defn test-top-k [svc]
+(defn test-top-k [cm]
   (println "\n=== 场景 4: :top-k 截断（只有 top-1 进 prompt） ===")
   ;; 「公司内部规定」两条都命中；top-k 1 时只应进来最相关的那条
-  (let [r (run-case svc (rag/qa-turn-filter (keyword-retriever corpus) :top-k 1)
+  (let [r (run-case cm (rag/qa-turn-filter (keyword-retriever corpus) :top-k 1)
                     "公司内部报销规定：单笔餐饮费上限是多少？")]
     (println "   发给 provider 的用户消息:" (clip (:sent r) 110))
     (check "命中的那条进了 prompt" (str/includes? (:sent r) "178"))
@@ -233,10 +234,10 @@
 
 (defn run []
   (println "RAG live 验证 | model =" MODEL "| provider = :minimax")
-  (let [svc (service/create-service p {:model MODEL :max-tokens 2048})]
+  (let [cm (chat-model/create-chat-model p {:model MODEL :max-tokens 2048})]
     (doseq [f [test-grounding test-empty-retrieval test-inject-when-empty test-top-k]]
       (try
-        (f svc)
+        (f cm)
         (catch Throwable t
           (swap! failures inc)
           (println "  ✗ 场景异常:" (.getMessage t)))))

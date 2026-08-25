@@ -12,6 +12,117 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### 💥 破坏性变更
 
+- **分层对齐 Spring AI / beamai：类型化 + ChatModel 体系 + ChatClient 拆分**
+  （2026-08-25，紧随改名那轮）。四件事一起做，因为它们是同一条分层线的四段。
+
+  **1) 请求 / 响应类型化（两层）**
+
+      ChatClientRequest{:request ChatRequest :context Context :on-token f}  ← filter 链
+      ChatRequest{:messages [...] :options {...}}                          ← ChatModel
+      ChatClientResponse{:response ChatResponse :context ctx}
+      LLMResponse record → ChatResponse（协议名 ILLMResponse 不变）
+
+  多出来的那层装 `:context` 与 `:on-token`——两者都**不下发给 provider**。合成
+  一个类型就得靠白名单去筛「哪些能发出去」，而那张白名单正是
+  `provider-variant-design.md` §1.2「递不到底」那个 bug 的成因。
+  **迁移**：`:chat` filter 读写请求改走存取器——`(:messages req)` →
+  `(flt/req-messages req)`、`(assoc req :tools ts)` → `(flt/with-option req :tools ts)`。
+  构造仍收 map（`as-chat-client-request` 归一化），但**读字段必须改**：两层结构
+  上 `(:messages req)` 返回 nil，不会静默给你旧语义。`:turn` / `:iteration` 两条
+  链有各自的请求形状，**不受影响**。
+
+  **2) ChatModel 体系 + 重试上移**
+
+      im.ttalk.agent.chat-model  IChatModel 协议（call / stream-call / model-options）
+                                 DefaultChatModel（包 ILLMProvider）
+                                 FnChatModel（包 {:chat-fn :stream-fn}）
+      im.ttalk.agent.retry       通用重试，零依赖
+
+  Provider 只管「怎么发这一个请求」，选项合并 / 重试 / 归一化归 ChatModel。
+  **`provider/http/retry.clj` 的 chat 路径重试已拆除**（anthropic /
+  openai_compat 两处）——embeddings 与 stream_client 不走 ChatModel，保留。
+  - 重试**在整个 filter 栈之下**：filter 看到的是「一次逻辑调用」，重试重入
+    碰不到任何 filter（否则 memory-filter 会把同一轮 delta 写两遍，且无运行期症状）
+  - **流式不重试**：token 已投递给 sink，重跑即重复内容
+  - 判据是 canonical error 的 `:retryable?`；`Retry-After` 由 provider 边界解析成
+    `:retry-after-ms` 传上来，受 `:max-delay` 约束
+  - 三级取值：单次 opts > provider config > 框架默认（2 次）；`:retry false` 关闭
+  **迁移**：`{:chat-fn :stream-fn}` 裸 map 照旧可用（`as-chat-model` 归一化成
+  `FnChatModel`）；但 `(:chat-fn cm)` 这种**直接取字段**的写法要改成
+  `(chat-model/call cm request)`。给 ChatModel 埋探针/包一层的老写法
+  `(assoc cm :chat-fn (fn ...))` 同样要改——包一层 `IChatModel`（`reify` 或
+  `FnChatModel`）在实现里转调。**`as-chat-model` 对这种情况装配期即抛**：
+  record 上 assoc 只是往 ext-map 塞键，协议分派完全看不见，注入会被静默丢弃
+  且没有任何运行期症状（探针不涨、替换不生效，程序照跑）——与
+  `build-chat-client` 拒绝同名工具同一类处置。
+
+  **3) ChatClient 拆分 + Facade**
+
+      im.ttalk.agent                新增 Facade 入口（对照 beamai 的 beamai.erl）
+      im.ttalk.agent.tool-registry  新增：ToolMeta + 装配期建表/校验 + 8 个查询
+      im.ttalk.agent.filter         接收 filter-hooks / with-filters
+
+  `chat_client.clj` 565 → 324 行，公开面只剩 `ChatClient` record + `build-chat-client`
+  + 三个 invoke 原语。**没有照 Spring 收窄到 `prompt/call/stream`**——beamai 的
+  `beamai_chat_client` 同样保留 `invoke_tool` 与 Query API，它靠的是 Facade + 按
+  职责拆模块，不是砍 API。
+  **迁移**：`chat-client/tool-meta` / `serial-tool?` / `return-direct-tool?` /
+  `retry-policy` / `tool-timeout` / `effective-tool-timeout` / `find-function` /
+  `list-functions` → `tool-registry/*`；`chat-client/filter-hooks` /
+  `with-filters` → `filter/*`。**调用形状不变，只是 ns 换了**（查询函数仍吃
+  ChatClient，只读它三个字段）。
+
+  **4) `ChatClient` 的四个工具字段收成 `ToolRegistry`**
+
+      ChatClient  [chat-model filters hooks tool-registry settings tool-manager]
+      ToolRegistry[tools tool-vars inline-handlers tool-meta]
+
+  四者总是一起产生、一起使用、一起被子 agent 整体替换——收成一个值之后
+  「一个 ChatClient 有一个工具注册表」在类型上成立，而不是靠约定。
+  查询函数经 `registry-of` 归一，**吃 ChatClient 或裸 `ToolRegistry` 都行**，
+  故 `(registry/tool-meta cc :x)` 一类调用形状不变。
+  **迁移**：`(:tools cc)` → `(registry/tool-schemas cc)`；
+  `(:tool-vars cc)` / `(:inline-handlers cc)` / `(:tool-meta cc)` →
+  `(:tool-vars (registry/registry-of cc))` 等，或直接用查询函数。
+  `->ChatClient` 位置参数从 9 个减到 6 个（`build-chat-client` 不受影响）。
+
+  **未改的**：`ILLMProvider` / `ILLMResponse` 协议名；三个 Maven 模块名。
+
+- **`kernel` → `chat-client`，`service` → `chat-model`**（2026-08-25），对齐
+  Spring AI 的两级命名：`ChatModel` 是**单次 LLM 调用**的抽象，`ChatClient` 是
+  在它之上带 filter / tool / memory 的**编排器**。我们此前的 `Kernel`（Semantic
+  Kernel 血统）与 `service` map 恰好就是这两层，名字却各自另说一套。同时
+  `im.ttalk.agent.client` 改名 `im.ttalk.agent.simple-agent`——否则它与新的
+  `chat-client` 只差一个词，require 时极易看错。
+
+      im.ttalk.agent.kernel          → im.ttalk.agent.chat-client
+      im.ttalk.agent.model.service   → im.ttalk.agent.chat-model   ;; 提升出 model/
+      im.ttalk.agent.client          → im.ttalk.agent.simple-agent
+
+      build-kernel                   → build-chat-client
+      create-service                 → create-chat-model
+      common/service-config          → common/chat-model-config
+      Kernel record                  → ChatClient record
+      ->Kernel                       → ->ChatClient
+
+      build-kernel 的 :service       → :chat-model
+      create-agent 的 :kernel        → :chat-client
+      Kernel 的 :service 字段         → :chat-model
+      ex-info 的 :kernel-keys/:service-keys → :chat-client-keys/:chat-model-keys
+
+  **迁移**：改 `require` 的 ns 名 + 上表逐条替换。`invoke-chat` / `invoke-tool`
+  / `invoke-chat-stream` / `find-function` / `list-functions` / `tool-meta` /
+  `with-filters` / `filter-hooks` 等**函数名一律不变**，只有它们所在的 ns 变了。
+  ⚠️ 别做无差别文本替换：provider 侧的 `:service-tier`（Anthropic 容量路由，真实
+  wire 字段）与 `:service` 无关，不能跟着改。
+
+  **未改的**：`ILLMProvider` 协议与 `im.ttalk.agent.model.*`（message / response /
+  error / content / embedding）原样；三个 Maven 模块名（`clj-agent-core` /
+  `clj-agent-client` / `clj-agent-provider`）原样。
+  `docs/` 下的历史设计文档保留旧名（它们是当时的记录），只有仍在描述当前机制的
+  `design-principles.md` / `filter-chain-design.md` / `tool-timeout-design.md` /
+  `token-stream-filter-design.md` 与六个 README 同步改名。
+
 - **`im.ttalk.agent.advisor` → `im.ttalk.agent.filter`**（2026-08-25）。ns 名是
   最后一处还叫 advisor 的地方——docstring、配置键 `:filters`、全部函数名
   （`create-filter` / `safeguard-turn-filter` / …）早已统一在 filter 上，只有
@@ -34,6 +145,26 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 - **Kernel record 字段变动**：新增 `hooks` 与 `tool-meta`，移除 `inline-meta`
   （被 `tool-meta` 取代）。位置参数构造 `->Kernel` 的 arity 变了；`build-kernel`
   与 `map->Kernel` 不受影响。
+
+### 🐛 修复
+
+- **`:on-pause` 与 `:sensitive` 自动暂停恢复**（2026-08-25）。这两个功能在
+  callbacks 体系（2026-06）落地时被静默弄丢了：`:on-tool-call` 版 gate
+  **替换**而非补充了 `:on-pause` 版，`:on-pause` 一并从 `create-agent` 的
+  `:settings` select-keys 里掉了。于是三处文档同时变成幽灵——README「方式二」
+  整节、`deftool {:sensitive true}` 的说明、`docs/unified-invoke-agent.md`
+  （状态 ✅ 已实施，明写「gate 仅靠 `:on-pause`」）。
+
+  **为什么一直没人发现**：没有任何运行期症状。不暂停的 agent 照跑，只是敏感
+  工具直接执行了——`chat` 返回 `:completed`，日志干净。而既有单测**全部**走
+  `:on-tool-call` 那条 gate，一条都照不到这里；只有 `examples/` 里那个不进
+  门禁的 `callbacks_integration_test` 在失败，被当成既有噪音。
+
+  现在两条启用路径并存：`:on-pause`（声明式，`:sensitive` 工具一律暂停）与
+  `:callbacks :on-tool-call`（命令式，返回 `{:interrupt reason}`）。两条都配时
+  先问回调；回调放行的，若工具是敏感工具**仍暂停**——`:sensitive` 是工具作者
+  立的下限，不该被一个泛泛的回调放行掉。缺省两条都不配 = 永不暂停（不变）。
+  新增 `on-pause-gate-test` / `on-pause-resume-test` 钉住。
 
 ### ✨ 新增
 

@@ -59,10 +59,10 @@
   [store messages tc response]
   (let [seen (atom nil)
         terminal (fn [req]
-                   (reset! seen (:messages req))
-                   {:response response :context (:context req)})
+                   (reset! seen (flt/req-messages req))
+                   (flt/->ChatClientResponse response (flt/req-context req)))
         chain (flt/build-chain (keep :chat [(mf/memory-filter store)]) terminal)
-        out (chain {:messages messages :context tc})]
+        out (chain (flt/as-chat-client-request {:messages messages :context tc}))]
     {:seen @seen :out out}))
 
 (deftest memory-filter-prepends-history

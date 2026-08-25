@@ -59,11 +59,27 @@
 
 (def tombstones
   "{已删除的记号 说明/替代}。删 API 时在此登记，文档就再也复活不了它。"
-  {":build-result-msgs" "service map 的历史键，已移除（见 model/service.clj）；现为 :chat-fn + :stream-fn"
-   "model.types"        "从未存在的 ns（model 下只有 message/response/error/service）"
+  {":build-result-msgs" "ChatModel map 的历史键，已移除（见 chat_model.clj）；现为 :chat-fn + :stream-fn"
+   "model.types"        "从未存在的 ns（model 下只有 content/embedding/error/message/response）"
    ":assistant-msg"     "chat-fn 返回值的历史字段；现返回归一化 ILLMResponse"
    "create-filter :name :chat :order" "filter 的 :order/:phase 早已移除——执行顺序 = :filters 向量注册顺序"
-   "timeout-filter" "2026-07-16 删除。超时是内建机制：deftool {:timeout ms} > 引擎 (…-tool-calling-manager {:timeout ms}) > 不超时，由 kernel/invoke-tool 强制、开箱即生效；机制本体 tool/call-with-timeout"})
+   "timeout-filter" "2026-07-16 删除。超时是内建机制：deftool {:timeout ms} > 引擎 (…-tool-calling-manager {:timeout ms}) > 不超时，由 chat-client/invoke-tool 强制、开箱即生效；机制本体 tool/call-with-timeout"
+   ;; 2026-08-25 kernel→chat-client / service→chat-model 对齐 Spring AI（破坏性改名）。
+   ;; 注：配置键 :service / :kernel 未登记——README 里 :service-tier 一类合法串会误命中，
+   ;; 而「宁可漏报不可误报」是本门禁的取舍（见 ns 文档）。
+   "im.ttalk.agent.kernel"        "已改名 im.ttalk.agent.chat-client（2026-08-25）"
+   "im.ttalk.agent.model.service" "已改名 im.ttalk.agent.chat-model（2026-08-25）"
+   "im.ttalk.agent.client"        "已改名 im.ttalk.agent.simple-agent（2026-08-25）"
+   "build-kernel"                 "已改名 build-chat-client（2026-08-25）"
+   "create-service"               "已改名 create-chat-model（2026-08-25）"
+   ;; 2026-08-25 第二轮：对齐 Spring AI / beamai 的分层（ChatRequest/ChatResponse
+   ;; 类型化、ChatModel 体系 + 重试上移、ChatClient 拆分 + Facade）。
+   ;; 注 1：搬了家但没删的（tool-meta / filter-hooks / find-function …）不登记——
+   ;;       符号 resolve 检查（第 3 项）已经能抓到「ns 里没有这个符号」。
+   ;; 注 2：record `LLMResponse`→`ChatResponse` **刻意不登记**——墓碑是子串匹配，
+   ;;       而协议名 `ILLMResponse`（仍在用）包含它，登记即当场误报。
+   ;;       「宁可漏报不可误报」见本 ns 文档的设计取舍。
+   })
 
 (def ^:private doc-files
   ["README.md" "README_EN.md" "modules/README.md"

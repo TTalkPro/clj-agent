@@ -4,7 +4,7 @@
    覆盖：关键词索引（latin / 中文二元组 / camelCase）、正则索引、
    :chat filter 的按需展开、with-tool-search 装配、检索工具的 :writes 契约。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.filter.tool-search :as ts]))
 
@@ -116,27 +116,27 @@
 ;;; ============================================================
 
 ;;; react/build-chat-opts 传给 invoke-chat 的 :tools 是**编译后的 schema 向量**
-;;; （react.clj），故测试也按这个形状喂——不经 build-kernel 的 :tools
+;;; （react.clj），故测试也按这个形状喂——不经 build-chat-client 的 :tools
 ;;; （那里只收 var 或带 :handler 的内联 map）。
 
-(defn- probe-kernel
-  "把 chat-fn 收到的 opts 录进 seen；kernel 只装 tool-search 三件套。"
+(defn- probe-chat-client
+  "把 chat-fn 收到的 opts 录进 seen；chat-client 只装 tool-search 三件套。"
   [seen ts-opts]
-  (kernel/build-kernel
+  (chat-client/build-chat-client
     (ts/with-tool-search
-      {:service {:chat-fn (fn [_msgs opts] (reset! seen opts) {:text "ok"})}}
+      {:chat-model {:chat-fn (fn [_msgs opts] (reset! seen opts) {:text "ok"})}}
       (merge {:index (ts/keyword-tool-index)} ts-opts))))
 
 (defn- exposed-names
   "跑一次 invoke-chat，返回 provider 实际看到的工具名。"
   [k seen context]
-  (kernel/invoke-chat k [{:role :user :content "hi"}]
-                      {:tools catalog :context context})
+  (chat-client/invoke-chat k [{:role :user :content "hi"}]
+                           {:tools catalog :context context})
   (names (:tools @seen)))
 
 (deftest filter-progressive-disclosure-test
   (let [seen (atom nil)
-        k (probe-kernel seen nil)]
+        k (probe-chat-client seen nil)]
 
     (testing "初始只暴露 search_tools —— 目录里的工具一个都不进 prompt"
       (is (= ["search_tools"] (exposed-names k seen (ctx/create)))))
@@ -157,17 +157,17 @@
 (deftest filter-always-include-test
   (testing ":always-include 的工具无需检索即常驻"
     (let [seen (atom nil)
-          k (probe-kernel seen {:always-include #{"send_email"}})]
+          k (probe-chat-client seen {:always-include #{"send_email"}})]
       (is (= ["search_tools" "send_email"] (exposed-names k seen (ctx/create)))))))
 
 (deftest filter-no-tools-passthrough-test
   (testing "无工具时 filter 不插手（:tools 为空 → 原样透传）"
     (let [seen (atom nil)
           {:keys [filter]} (ts/tool-search {:index (ts/keyword-tool-index)})
-          k (kernel/build-kernel
-              {:service {:chat-fn (fn [_ opts] (reset! seen opts) {:text "ok"})}
+          k (chat-client/build-chat-client
+              {:chat-model {:chat-fn (fn [_ opts] (reset! seen opts) {:text "ok"})}
                :filters [filter]})]
-      (kernel/invoke-chat k [{:role :user :content "hi"}] {})
+      (chat-client/invoke-chat k [{:role :user :content "hi"}] {})
       (is (nil? (:tools @seen))))))
 
 ;;; ============================================================
@@ -206,7 +206,7 @@
 (deftest with-tool-search-wiring-test
   (testing "工具 / filter / 状态槽三处一次装好"
     (let [opts (ts/with-tool-search
-                 {:service {:chat-fn (fn [_ _] {:text "ok"})}
+                 {:chat-model {:chat-fn (fn [_ _] {:text "ok"})}
                   :tools (vec catalog)
                   :filters [{:name :memory}]}
                  {:index (ts/keyword-tool-index)})]
@@ -216,23 +216,23 @@
           "filter 追加在末尾——memory 保持首位")
       (is (contains? (:state-slots opts) ts/discovered-slot))))
 
-  (testing "用 :tool-vars 键时装到 :tool-vars（build-kernel 取 (or tool-vars tools)）"
+  (testing "用 :tool-vars 键时装到 :tool-vars（build-chat-client 取 (or tool-vars tools)）"
     (let [opts (ts/with-tool-search
-                 {:service {} :tool-vars []}
+                 {:chat-model {} :tool-vars []}
                  {:index (ts/keyword-tool-index)})]
       (is (= "search_tools" (:name (last (:tool-vars opts)))))
       (is (nil? (:tools opts)))))
 
-  (testing "kernel 编译后检索工具可被 invoke-tool 找到（内联 handler 注册成功）"
+  (testing "chat-client 编译后检索工具可被 invoke-tool 找到（内联 handler 注册成功）"
     ;; 索引由 :chat filter 在每次 LLM 调用时建——真实循环里模型必须先经
     ;; invoke-chat 才可能发出 tool-call，故先跑一次 chat 再调工具。
     (let [seen (atom nil)
-          k (probe-kernel seen nil)]
-      (kernel/invoke-chat k [{:role :user :content "hi"}]
-                          {:tools catalog :context (ctx/create)})
+          k (probe-chat-client seen nil)]
+      (chat-client/invoke-chat k [{:role :user :content "hi"}]
+                               {:tools catalog :context (ctx/create)})
       (is (= #{ts/discovered-slot}
-             (set (keys (:writes (kernel/invoke-tool k :search_tools
-                                                     {:query "天气"} (ctx/create)))))))))
+             (set (keys (:writes (chat-client/invoke-tool k :search_tools
+                                                          {:query "天气"} (ctx/create)))))))))
 
   (testing "缺 :index 直接报错（而非静默不检索）"
     (is (thrown? clojure.lang.ExceptionInfo (ts/tool-search {})))))

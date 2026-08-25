@@ -1,5 +1,5 @@
-(ns im.ttalk.agent.service-config-test
-  "create-agent 的 opts → provider 调用 config（common/service-config）。
+(ns im.ttalk.agent.chat-model-config-test
+  "create-agent 的 opts → provider 调用 config（common/chat-model-config）。
 
    动机（docs/provider-variant-design.md P1）：这里早先是白名单
    {:model :max-tokens :temperature}，于是 provider 侧明明实现了的能力
@@ -7,12 +7,14 @@
    `anthropic/build-params` 认 :thinking，agent 门面却把它挡在外面。
 
    改成排除法后，真正要钉住的是**反向**那条：编排层的键不许漏到 provider。
-   `:tools` 漏下去尤其致命——service config 的 :tools 是已编译 schema，
+   `:tools` 漏下去尤其致命——chat-model config 的 :tools 是已编译 schema，
    agent 的 :tools 是 tool var 向量，provider 会转出 {:name nil}，
    MiniMax 报 400「function name is empty」（P0 实验里真撞过）。"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.common :as common]
             [im.ttalk.agent.model :as proto]
+            [im.ttalk.agent.chat-model :as cm]
+            [im.ttalk.agent.model.request :as req]
             [im.ttalk.agent.tool :refer [deftool]]))
 
 (deftool sample-tool
@@ -36,42 +38,42 @@
   (tool->schema [_ tool] tool))
 
 ;;; ============================================================
-;;; service-config：纯函数层
+;;; chat-model-config：纯函数层
 ;;; ============================================================
 
-(deftest service-config-passes-provider-keys
+(deftest chat-model-config-passes-provider-keys
   (testing "provider 专属键透传（P1 要修的就是这条）"
-    (let [c (common/service-config {:provider :dummy
-                                    :model "MiniMax-M2.7"
-                                    :thinking {:type "adaptive"}
-                                    :cache-strategy :system-and-tools
-                                    :service-tier "auto"
-                                    :top-k 40})]
+    (let [c (common/chat-model-config {:provider :dummy
+                                       :model "MiniMax-M2.7"
+                                       :thinking {:type "adaptive"}
+                                       :cache-strategy :system-and-tools
+                                       :service-tier "auto"
+                                       :top-k 40})]
       (is (= {:type "adaptive"} (:thinking c)) ":thinking 必须到得了 provider")
       (is (= :system-and-tools (:cache-strategy c)))
       (is (= "auto" (:service-tier c)))
       (is (= 40 (:top-k c)))))
 
   (testing "缺省值仍在"
-    (let [c (common/service-config {})]
+    (let [c (common/chat-model-config {})]
       (is (= "glm-4" (:model c)))
       (is (= 4096 (:max-tokens c)))))
 
   (testing "显式值覆盖缺省"
-    (let [c (common/service-config {:model "gpt-4" :max-tokens 512 :temperature 0.2})]
+    (let [c (common/chat-model-config {:model "gpt-4" :max-tokens 512 :temperature 0.2})]
       (is (= "gpt-4" (:model c)))
       (is (= 512 (:max-tokens c)))
       (is (= 0.2 (:temperature c)))))
 
   (testing "显式 nil 不覆盖 provider 侧默认（否则 (some? temperature) 那类判据会被 nil 骗过）"
-    (is (not (contains? (common/service-config {:temperature nil}) :temperature)))))
+    (is (not (contains? (common/chat-model-config {:temperature nil}) :temperature)))))
 
-(deftest service-config-excludes-orchestration-keys
+(deftest chat-model-config-excludes-orchestration-keys
   (testing "编排层的键一个都不许漏进 provider config"
-    (let [c (common/service-config
+    (let [c (common/chat-model-config
               {:provider :dummy :model "m"
                :tools [#'sample-tool] :tool-vars [#'sample-tool]
-               :kernel :k :filters [] :memory :store :pause-store :ps
+               :chat-client :k :filters [] :memory :store :pause-store :ps
                :callbacks {:on-turn-start identity} :conversation-id "cid"
                :max-iterations 3 :state-slots {:a inc} :tool-manager :tm
                :eligibility-fn identity :system-prompt "sys"
@@ -83,26 +85,26 @@
           "只该剩 model/max-tokens/thinking")))
 
   (testing ":tools 绝不下沉——漏了它 provider 会拿 tool var 当 schema 转（{:name nil}）"
-    (is (not (contains? (common/service-config {:tools [#'sample-tool]}) :tools)))))
+    (is (not (contains? (common/chat-model-config {:tools [#'sample-tool]}) :tools)))))
 
 ;;; ============================================================
-;;; 端到端：build-kernel 造出的 service 真的把 config 递到了 provider
+;;; 端到端：build-chat-client 造出的 chat-model 真的把 config 递到了 provider
 ;;; ============================================================
 
-(deftest build-kernel-threads-config-to-provider
-  (testing "走 build-kernel → service → provider 一整条，:thinking 抵达 call-llm"
+(deftest build-chat-client-threads-config-to-provider
+  (testing "走 build-chat-client → chat-model → provider 一整条，:thinking 抵达 call-llm"
     (let [seen (atom nil)
-          k (common/build-kernel {:provider (->RecordingProvider seen)
-                                  :model "MiniMax-M2.7"
-                                  :max-tokens 512
-                                  :thinking {:type "adaptive"}
-                                  :tools [#'sample-tool]
-                                  :max-iterations 3})]
-      ((get-in k [:service :chat-fn]) [{:role :user :content "hi"}] {})
+          k (common/build-chat-client {:provider (->RecordingProvider seen)
+                                       :model "MiniMax-M2.7"
+                                       :max-tokens 512
+                                       :thinking {:type "adaptive"}
+                                       :tools [#'sample-tool]
+                                       :max-iterations 3})]
+      (cm/call (:chat-model k) (req/chat-request [{:role :user :content "hi"}]))
       (is (= {:type "adaptive"} (:thinking @seen)) ":thinking 递到了 provider")
       (is (= "MiniMax-M2.7" (:model @seen)))
       (is (= 512 (:max-tokens @seen)))
-      ;; kernel 会在调用时下发**已编译 schema**；基础 config 里不该有 agent 的 tool var
+      ;; chat-client 会在调用时下发**已编译 schema**；基础 config 里不该有 agent 的 tool var
       (is (not (some var? (:tools @seen)))
           "provider 收到的 :tools 不能是 tool var")
       (is (nil? (:max-iterations @seen)) "编排层的键没漏下去"))))

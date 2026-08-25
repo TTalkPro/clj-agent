@@ -14,16 +14,18 @@
   (:require [ring.adapter.undertow :refer [run-undertow]]
             [ring.adapter.undertow.websocket :as ws]
             [cheshire.core :as json]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as st]
             [im.ttalk.agent.provider.minimax :as minimax])
   (:import [io.undertow Handlers]
            [io.undertow.server.handlers.sse
-            ServerSentEventConnectionCallback ServerSentEventConnection]))
+            ServerSentEventConnectionCallback ServerSentEventConnection
+            ServerSentEventConnection$EventCallback]))
 
 (defn make-agent []
   (agent/create-agent
-    {:provider (minimax/create-provider {:api-key (System/getenv "MINIMAX_AUTH_TOKEN")})
+    {:provider (minimax/create-provider {:api-key (or (System/getenv "MINIMAX_API_KEY")
+                                                  (System/getenv "MINIMAX_AUTH_TOKEN"))})
      :model "MiniMax-M2.7" :max-tokens 1024}))
 
 ;; 返回 cancel-token，供连接关闭时 request-cancel!
@@ -50,19 +52,34 @@
               {:emit! (fn [tok] (ws/send (json/encode {:token tok}) channel))
                :done! (fn []    (ws/send (json/encode {:done true}) channel))
                :fail! (fn [err] (ws/send (json/encode {:error err}) channel))})))
-        :on-close (fn [_] (some-> @token st/request-cancel!))}})))   ;; 断连即停
+        ;; ⚠️ 是 :on-close-message 不是 :on-close —— 后者在 ring-undertow-adapter
+        ;; 1.3.x 已废弃，且是 **assert 掉的**：写成 :on-close 时 WS 握手直接 500
+        ;; （`AssertionError: :on-close has been deprecated`），而这只在**运行期**
+        ;; 才炸，加载/编译一路绿灯。回调收 {:channel :message}。
+        :on-close-message (fn [_] (some-> @token st/request-cancel!))}})))   ;; 断连即停
 
 ;; ── SSE：Undertow 原生 handler（挂进 Undertow handler 链 / 指定路径）──
 ;; (.send conn data) 异步推；(.addCloseTask conn ...) 在断连时触发（可接 cancel）
 (defn sse-handler [a]
   (Handlers/serverSentEvents
+    ;; ⚠️ reify 的**参数**上不能加类型 hint：`connected` 会匹配不上，报
+    ;; "Can't find matching method: connected, leave off hints for auto match"。
+    ;; hint 挪进 body 的 let 里——既能匹配，`.send`/`.close` 也不走反射。
     (reify ServerSentEventConnectionCallback
-      (connected [_ ^ServerSentEventConnection conn _last-id]
-        ;; 消息可从 query 取（此处简化为固定示例；真实从 conn 的 exchange 解析 query）
-        (let [token (run-stream! a "用三句话介绍杭州。"
+      (connected [_ conn _last-id]
+        (let [^ServerSentEventConnection conn conn
+              ;; 消息可从 query 取（此处简化为固定示例；真实从 conn 的 exchange 解析 query）
+              ;; ⚠️ `.send` 是**异步**的：紧跟 `.close` 会把最后一帧冲掉——客户端
+              ;; 永远收不到 done/error。收尾必须走带 EventCallback 的重载，在
+              ;; 回调里再关。（这条只有端到端才抓得到：编译、加载全绿。）
+              close-after (fn []
+                            (reify ServerSentEventConnection$EventCallback
+                              (done   [_ c _ _ _]   (.close ^ServerSentEventConnection c))
+                              (failed [_ c _ _ _ _] (.close ^ServerSentEventConnection c))))
+              token (run-stream! a "用三句话介绍杭州。"
                       {:emit! (fn [tok] (.send conn (json/encode {:token tok})))
-                       :done! (fn []    (.send conn (json/encode {:done true})) (.close conn))
-                       :fail! (fn [err] (.send conn (json/encode {:error err})) (.close conn))})]
+                       :done! (fn []    (.send conn (json/encode {:done true})  (close-after)))
+                       :fail! (fn [err] (.send conn (json/encode {:error err}) (close-after)))})]
           ;; 客户端断开 → Undertow 触发 close task（ChannelListener）→ 取消上游、不再烧 token
           (.addCloseTask conn
             (reify org.xnio.ChannelListener

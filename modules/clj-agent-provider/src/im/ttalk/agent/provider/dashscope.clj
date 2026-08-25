@@ -121,7 +121,7 @@
     :usage {...}
     :request_id ...}
 
-   转换为 OpenAI 兼容格式供 kernel 使用:
+   转换为 OpenAI 兼容格式供 chat-client 使用:
    {:choices [{:message {:role :content :tool_calls [...]}}]
     :usage {...}}"
   [response]

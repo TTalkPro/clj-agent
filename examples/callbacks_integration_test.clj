@@ -7,7 +7,7 @@
    3. on-tool-call 中断能力（返回 {:interrupt ...} 触发暂停）
    4. 中断/恢复回调（on-interrupt/on-resume）
    5. 子 Agent 委派工具（delegate-tool）"
-  (:require [im.ttalk.agent.client :as agent]
+  (:require [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.subagent.delegate :as delegate]
             [im.ttalk.agent.model :as provider]))
@@ -199,8 +199,11 @@
                          :subagent-fn subagent-factory
                          :timeout     10000})
 
-        ;; 父 agent：LLM 先调用 do_research 工具，再返回文本
-        p (mock {:text nil :tool-calls [{:id "d1" :name "do-research" :args {:task "分析量子计算"}}]}
+        ;; 父 agent：LLM 先调用 do_research 工具，再返回文本。
+        ;; **工具名必须与注册名逐字相同**（这里是下划线 do_research）——框架不做
+        ;; `-`/`_` 归一化，名字对不上只会得到一条 "错误: 函数未找到" 的工具结果
+        ;; 喂回模型，turn 照常 :completed，没有任何别的症状。
+        p (mock {:text nil :tool-calls [{:id "d1" :name "do_research" :args {:task "分析量子计算"}}]}
                 {:text "综合子agent结论：量子计算前景广阔" :tool-calls nil})
 
         log (atom [])
@@ -213,10 +216,15 @@
       (check "status :completed" (= :completed (:status r)))
       (check "父 agent 得到文本回复" (some? (:text r)))
       (check "on-tool-result 触发了 do_research"
-             (some #(= "do-research" (second %)) @log))
+             (some #(= "do_research" (second %)) @log))
       (check "子 agent 结果包含分析内容"
-             (let [tr (first (filter #(= "do-research" (second %)) @log))]
-               (and tr (clojure.string/includes? (nth tr 2) "子agent分析了")))))))
+             (let [tr (first (filter #(= "do_research" (second %)) @log))]
+               (and tr (clojure.string/includes? (nth tr 2) "子agent分析了"))))
+      ;; 钉住上面那条曾经的假通过：断言比的名字必须就是注册名，
+      ;; 否则「触发了」这条对着一个根本不存在的工具名恒真。
+      (check "工具结果不是「函数未找到」（名字对得上）"
+             (let [tr (first (filter #(= "do_research" (second %)) @log))]
+               (and tr (not (clojure.string/includes? (nth tr 2) "函数未找到"))))))))
 
 ;;; ============================================================
 ;;; 场景 6：callbacks 与 on-pause 向后兼容并存

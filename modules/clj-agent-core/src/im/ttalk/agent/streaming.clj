@@ -6,7 +6,7 @@
 
    用法（应用层）：
      (require '[im.ttalk.agent.streaming :as st]
-              '[im.ttalk.agent.client :as agent])
+              '[im.ttalk.agent.simple-agent :as agent])
      (def token (st/make-cancel-token))
      (future (agent/chat-stream a \"消息\" on-token {:cancel-token token}))
      ;; 客户端断连时：

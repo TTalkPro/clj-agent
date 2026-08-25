@@ -146,7 +146,7 @@
    `{:message m :class c}`——调用方据此组装自己的错误形状（terminal map /
    success-false map / invoke-one 的 :value+:error）。
 
-   **DRY 4 处手抄**：`tool/invoke`、`kernel/invoke-tool` 两个 terminal、
+   **DRY 4 处手抄**：`tool/invoke`、`chat-client/invoke-tool` 两个 terminal、
    `react/invoke-one` 此前各自重复 fatal-check + nil-message + classify-exception
    三步，三元组漂移即出 bug。"
   [^Throwable t]

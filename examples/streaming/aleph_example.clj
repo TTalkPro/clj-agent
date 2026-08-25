@@ -13,13 +13,14 @@
             [manifold.stream :as s]
             [manifold.deferred :as d]
             [cheshire.core :as json]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as st]
             [im.ttalk.agent.provider.minimax :as minimax]))
 
 (defn make-agent []
   (agent/create-agent
-    {:provider (minimax/create-provider {:api-key (System/getenv "MINIMAX_AUTH_TOKEN")})
+    {:provider (minimax/create-provider {:api-key (or (System/getenv "MINIMAX_API_KEY")
+                                                  (System/getenv "MINIMAX_AUTH_TOKEN"))})
      :model "MiniMax-M2.7" :max-tokens 1024}))
 
 (defn- sse-frame [m] (str "data: " (json/encode m) "\n\n"))

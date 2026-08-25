@@ -4,7 +4,7 @@
             "clojars" {:url "https://repo.clojars.org/"}}
 
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}}
- ;; 无内部/外部依赖：core 只含 protocol/契约（im.ttalk.agent.model.*）+ kernel 原语。
+ ;; 无内部/外部依赖：core 只含 protocol/契约（im.ttalk.agent.model.*）+ chat-client 原语。
  ;; Agent 运行时（client/react/memory/subagent，含 timbre/next.jdbc/sqlite 依赖）
  ;; 已下沉 clj-agent-client（2026-07，onion-filter 设计）。
 

@@ -5,7 +5,7 @@
 > （:tool/:chat/:turn）见 `filter-chain-design.md`；本文只讲 token 粒度。
 > 动机来自与 Spring AI `StreamAdvisor` 的对照（§5）。
 >
-> 实现：`core/filter.clj`（契约 + 内置 filter）、`core/kernel.clj`
+> 实现：`core/filter.clj`（契约 + 内置 filter）、`core/chat_client.clj`
 > （invoke-chat-stream terminal 组装点）。
 
 ---
@@ -71,7 +71,7 @@ filter map 增加可选键 `:token-xform`，与 `:tool/:chat/:iteration/:turn` �
 
 ## 3. 组装点与数据流
 
-组装在 `kernel/invoke-chat-stream` 的 **terminal 内**（chat 洋葱最内层）：
+组装在 `chat-client/invoke-chat-stream` 的 **terminal 内**（chat 洋葱最内层）：
 
 ```
 provider 原始 token → :token-xform 链（注册顺序） → 最终 on-token（sink）
@@ -128,7 +128,7 @@ provider 原始 token → :token-xform 链（注册顺序） → 最终 on-token
 3. **组合顺序**：两个改写 xform 按注册顺序作用（先注册先见原始 token）；
 4. **hold-release 两分支**：通过 → 全部缓冲在完流时按原序放行；不通过 →
    只收到一个替换 token；
-5. **退化路径**：无 `:token-xform` 的 kernel，sink 收到原始 token（行为与现状
+5. **退化路径**：无 `:token-xform` 的 chat-client，sink 收到原始 token（行为与现状
    一致）；同步 invoke-chat 带 `:token-xform` filter 不受影响；
 6. **reasoning-token 透传**：`{:reasoning-token ...}` 不被 `:token` 类
    filter 误伤；

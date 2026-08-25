@@ -12,14 +12,15 @@
      ZHIPU_API_KEY - 智谱 AI API Key（必需）"
   (:require [clojure.edn]
             [im.ttalk.agent.tool :refer [deftool]]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.tool-registry :as registry]
             [im.ttalk.agent.filter :as filters]
             [im.ttalk.agent.context :as ctx]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.provider.zhipu :as zhipu]
             [im.ttalk.agent.provider.anthropic :as anthropic]
-            [im.ttalk.agent.client :as ka]
-            [im.ttalk.agent.client :as pa]))
+            [im.ttalk.agent.simple-agent :as sa]
+            [im.ttalk.agent.simple-agent :as sa]))
 
 ;;; ============================================================
 ;;; Provider 配置
@@ -126,40 +127,40 @@
 (def api-delay 2000)
 
 ;;; ============================================================
-;;; Example 1: Kernel 基础功能测试
+;;; Example 1: ChatClient 基础功能测试
 ;;; ============================================================
 
-(defn run-kernel-tests [provider provider-name]
-  (separator (str "Example 1: Kernel 基础功能 (" provider-name ")"))
+(defn run-chat-client-tests [provider provider-name]
+  (separator (str "Example 1: ChatClient 基础功能 (" provider-name ")"))
 
-  (let [service (service/create-service
+  (let [chat-model (chat-model/create-chat-model
                   provider
                   {:model "glm-4.7"
                    :max-tokens 1024})
-        app-kernel (kernel/build-kernel
-                     {:service  service
+        app-chat-client (chat-client/build-chat-client
+                     {:chat-model  chat-model
                       :tools    test-tools
                       :settings {:max-tool-iterations 5}})]
 
     ;; 1.1 Query API
     (test-case "Query API"
       (fn []
-        (assert (= 4 (count (kernel/list-functions app-kernel))))
-        (assert (some? (kernel/find-function app-kernel :get-weather)))
-        (assert (nil? (kernel/find-function app-kernel :nonexistent)))
+        (assert (= 4 (count (registry/list-functions app-chat-client))))
+        (assert (some? (registry/find-function app-chat-client :get-weather)))
+        (assert (nil? (registry/find-function app-chat-client :nonexistent)))
         true))
 
     ;; 1.2 invoke-tool
     (test-case "invoke-tool 函数调用"
       (fn []
-        (let [result (kernel/invoke-tool app-kernel :get-weather {:city "深圳"} (ctx/create))]
+        (let [result (chat-client/invoke-tool app-chat-client :get-weather {:city "深圳"} (ctx/create))]
           (assert (clojure.string/includes? (:value result) "深圳"))
           true)))
 
     ;; 1.3 invoke-chat 单轮
     (test-case "invoke-chat 单轮对话"
       (fn []
-        (let [{:keys [response]} (kernel/invoke-chat app-kernel
+        (let [{:keys [response]} (chat-client/invoke-chat app-chat-client
                                    [{:role "user" :content "1+1=?"}]
                                    {:context (ctx/create)})]
           (assert (some? (:text response)))
@@ -168,16 +169,16 @@
 
     (wait api-delay)
 
-    ;; 注：完整「工具调用循环」已下沉 SimpleAgent（见 Example 4），kernel 只提供 invoke-chat/invoke-tool 原语
+    ;; 注：完整「工具调用循环」已下沉 SimpleAgent（见 Example 4），chat-client 只提供 invoke-chat/invoke-tool 原语
 
     ;; 1.5 多轮对话
     (test-case "invoke-chat 多轮对话"
       (fn []
-        (let [r1 (kernel/invoke-chat app-kernel
+        (let [r1 (chat-client/invoke-chat app-chat-client
                    [{:role "user" :content "我叫小明。"}]
                    {:context (ctx/create)})
               _ (wait api-delay)
-              r2 (kernel/invoke-chat app-kernel
+              r2 (chat-client/invoke-chat app-chat-client
                    [{:role "user" :content "我叫小明。"}
                     {:role "assistant" :content (get-in r1 [:response :text])}
                     {:role "user" :content "我叫什么？"}]
@@ -193,47 +194,47 @@
 (defn run-simpleagent-tests [provider provider-name]
   (separator (str "Example 4: SimpleAgent (" provider-name ")"))
 
-  ;; 4.1 Kernel Agent 简单对话
-  (test-case "Kernel Agent 简单对话"
+  ;; 4.1 ChatClient Agent 简单对话
+  (test-case "ChatClient Agent 简单对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "回答简短。"})
-            result (ka/chat agent "中国的首都是？")]
+            result (sa/chat agent "中国的首都是？")]
         (assert (some? (:text result)))
         (println (str "\n      回复: " (:text result)))
         true)))
 
   (wait api-delay)
 
-  ;; 4.2 Kernel Agent 多轮对话
-  (test-case "Kernel Agent 多轮对话"
+  ;; 4.2 ChatClient Agent 多轮对话
+  (test-case "ChatClient Agent 多轮对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "回答简短。"})]
-        (ka/chat agent "我叫小红。")
+        (sa/chat agent "我叫小红。")
         (wait api-delay)
-        (let [r2 (ka/chat agent "我叫什么？")]
+        (let [r2 (sa/chat agent "我叫什么？")]
           (assert (some? (:text r2)))
           (println (str "\n      回复: " (:text r2)))
           true))))
 
   (wait api-delay)
 
-  ;; 4.3 Kernel Agent 工具调用
-  (test-case "Kernel Agent 工具调用"
+  ;; 4.3 ChatClient Agent 工具调用
+  (test-case "ChatClient Agent 工具调用"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools [test-tools]})
-            result (ka/chat agent "上海天气怎么样？")]
+            result (sa/chat agent "上海天气怎么样？")]
         (assert (some? (:text result)))
         (println (str "\n      工具: " (mapv :name (:tool-calls-made result))))
         (println (str "      回复: " (:text result)))
@@ -244,12 +245,12 @@
   ;; 4.4 Process Agent 简单对话
   (test-case "Process Agent 简单对话"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 512
                      :system-prompt "回答简短。"})
-            result (pa/chat agent "2+2=?")]
+            result (sa/chat agent "2+2=?")]
         (assert (= :completed (:status result)))
         (println (str "\n      回复: " (:text result)))
         true)))
@@ -259,12 +260,12 @@
   ;; 4.5 Process Agent 工具调用
   (test-case "Process Agent 工具调用"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools [test-tools]})
-            result (pa/chat agent "现在几点了？")]
+            result (sa/chat agent "现在几点了？")]
         (assert (= :completed (:status result)))
         (println (str "\n      工具: " (mapv :name (:tool-calls-made result))))
         (println (str "      回复: " (:text result)))
@@ -275,20 +276,20 @@
   ;; 4.6 Process Agent sensitive 工具暂停
   (test-case "Process Agent HIL 审批"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools [test-tools]
                      :on-pause (fn [_] nil)})
-            result (pa/chat agent "帮我删除 /tmp/test.txt")]
+            result (sa/chat agent "帮我删除 /tmp/test.txt")]
         (if (= :paused (:status result))
           (do
             (println (str "\n      暂停原因: " (:pause-reason result)))
             ;; 给 API 一些休息时间
             (Thread/sleep 3000)
             (let [resumed (try
-                            (pa/resume agent "approved")
+                            (sa/resume agent "approved")
                             (catch Exception e
                               {:status :error :error (.getMessage e)}))]
               (if (= :completed (:status resumed))
@@ -315,7 +316,7 @@
   (separator (str "Example 5: Filter 系统 (" provider-name ")"))
 
   (let [filter-log (atom [])
-        service (service/create-service
+        chat-model (chat-model/create-chat-model
                   provider
                   {:model "glm-4.7"
                    :max-tokens 1024})
@@ -337,9 +338,9 @@
                    (swap! filter-log conj {:type :post-chat})
                    resp))}
 
-        filtered-kernel
-        (kernel/build-kernel
-          {:service  service
+        filtered-chat-client
+        (chat-client/build-chat-client
+          {:chat-model  chat-model
            :tools    test-tools
            :filters  [chat-filter tool-filter]
            :settings {:max-tool-iterations 5}})]
@@ -349,7 +350,7 @@
       (fn []
         (reset! filter-log [])
         ;; 调用工具（触发 pre/post invocation）
-        (kernel/invoke-tool filtered-kernel :get-weather {:city "北京"} (ctx/create))
+        (chat-client/invoke-tool filtered-chat-client :get-weather {:city "北京"} (ctx/create))
         (assert (some #(= :pre-invocation (:type %)) @filter-log))
         (assert (some #(= :post-invocation (:type %)) @filter-log))
         (println (str "\n      Invocation Filter 日志: " (count @filter-log) " 条"))
@@ -361,7 +362,7 @@
       (fn []
         (reset! filter-log [])
         ;; 调用 chat（触发 pre/post chat）
-        (kernel/invoke-chat filtered-kernel
+        (chat-client/invoke-chat filtered-chat-client
           [{:role "user" :content "你好"}]
           {:context (ctx/create)})
         (assert (some #(= :pre-chat (:type %)) @filter-log))
@@ -379,7 +380,7 @@
   (println (str "│  使用 " provider-name " 运行所有示例"))
   (println (str "└─────────────────────────────────────────────────────────────────┘"))
 
-  (run-kernel-tests provider provider-name)
+  (run-chat-client-tests provider provider-name)
   (wait api-delay)
   (run-simpleagent-tests provider provider-name)
   (wait api-delay)

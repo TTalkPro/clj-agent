@@ -5,8 +5,8 @@
 
    需要环境变量: ZHIPU_API_KEY"
   (:require [im.ttalk.agent.tool :refer [deftool]]
-            [im.ttalk.agent.client :as ka]
-            [im.ttalk.agent.client :as pa]
+            [im.ttalk.agent.simple-agent :as sa]
+            [im.ttalk.agent.simple-agent :as sa]
             [im.ttalk.agent.provider.zhipu :as zhipu]))
 
 ;;; ============================================================
@@ -71,59 +71,59 @@
       nil)))
 
 ;;; ============================================================
-;;; 测试 1: Kernel Agent 简单对话
+;;; 测试 1: ChatClient Agent 简单对话
 ;;; ============================================================
 
-(defn test-kernel-simple-chat []
-  (separator "测试 1: Kernel Agent 简单对话")
-  (safe-call "Kernel Agent 创建与对话"
+(defn test-chat-client-simple-chat []
+  (separator "测试 1: ChatClient Agent 简单对话")
+  (safe-call "ChatClient Agent 创建与对话"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :system-prompt "你是一个简洁的助手，回答尽量简短。"})]
-        (let [result (ka/chat agent "你好，用一句话介绍自己")]
+        (let [result (sa/chat agent "你好，用一句话介绍自己")]
           (println "    回复:" (:text result))
-          (println "    messages count:" (count (ka/get-messages agent))))))))
+          (println "    messages count:" (count (sa/get-messages agent))))))))
 
 ;;; ============================================================
-;;; 测试 2: Kernel Agent 工具调用
+;;; 测试 2: ChatClient Agent 工具调用
 ;;; ============================================================
 
-(defn test-kernel-tool-call []
-  (separator "测试 2: Kernel Agent 工具调用")
-  (safe-call "Kernel Agent 工具调用"
+(defn test-chat-client-tool-call []
+  (separator "测试 2: ChatClient Agent 工具调用")
+  (safe-call "ChatClient Agent 工具调用"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools})]
-        (let [result (ka/chat agent "北京现在天气怎么样？")]
+        (let [result (sa/chat agent "北京现在天气怎么样？")]
           (println "    回复:" (:text result))
           (println "    tool-calls:" (mapv (fn [tc] [(:name tc) (:result tc)])
                                            (:tool-calls-made result))))))))
 
 ;;; ============================================================
-;;; 测试 3: Kernel Agent 多轮对话
+;;; 测试 3: ChatClient Agent 多轮对话
 ;;; ============================================================
 
-(defn test-kernel-multi-turn []
-  (separator "测试 3: Kernel Agent 多轮对话")
+(defn test-chat-client-multi-turn []
+  (separator "测试 3: ChatClient Agent 多轮对话")
   (safe-call "多轮对话 context 累积"
     (fn []
-      (let [agent (ka/create-agent
+      (let [agent (sa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :system-prompt "简短回复"})]
-        (let [r1 (ka/chat agent "我叫小明，记住。")]
+        (let [r1 (sa/chat agent "我叫小明，记住。")]
           (println "    轮次1:" (:text r1)))
         (wait 3000)
-        (let [r2 (ka/chat agent "我叫什么名字？直接回答名字。")]
+        (let [r2 (sa/chat agent "我叫什么名字？直接回答名字。")]
           (println "    轮次2:" (:text r2))
-          (println "    history count:" (count (ka/get-history agent))))))))
+          (println "    history count:" (count (sa/get-history agent))))))))
 
 ;;; ============================================================
 ;;; 测试 4: Process Agent sensitive 工具暂停
@@ -134,7 +134,7 @@
   (safe-call "Process Agent sensitive 工具暂停与恢复"
     (fn []
       (let [pause-log (atom nil)
-            agent (pa/create-agent
+            agent (sa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
@@ -142,14 +142,14 @@
                      :on-pause (fn [info]
                                  (reset! pause-log info)
                                  (println "    [on-pause] 原因:" (:reason info)))})]
-        (let [result (pa/chat agent "请帮我删除 /tmp/test.txt 文件")]
+        (let [result (sa/chat agent "请帮我删除 /tmp/test.txt 文件")]
           (println "    状态:" (:status result))
           (if (= :paused (:status result))
             (do
               (println "    暂停原因:" (:pause-reason result))
               (println "    待审批工具:" (:name (:pending-tool result)))
               ;; 批准执行
-              (let [resume-result (pa/resume agent "approved")]
+              (let [resume-result (sa/resume agent "approved")]
                 (println "    恢复后状态:" (:status resume-result))
                 (println "    恢复后回复:" (:text resume-result))))
             (println "    直接完成:" (:text result))))))))
@@ -162,15 +162,15 @@
   (separator "测试 5: Process Agent 拒绝 sensitive 操作")
   (safe-call "拒绝 sensitive 工具"
     (fn []
-      (let [agent (pa/create-agent
+      (let [agent (sa/create-agent
                     {:provider openai-provider
                      :model "glm-4.7"
                      :max-tokens 1024
                      :tools agent-tools
                      :on-pause (fn [_] nil)})]
-        (let [result (pa/chat agent "请删除 /home/user/important.txt")]
+        (let [result (sa/chat agent "请删除 /home/user/important.txt")]
           (when (= :paused (:status result))
-            (let [reject-result (pa/resume agent "rejected")]
+            (let [reject-result (sa/resume agent "rejected")]
               (println "    拒绝后状态:" (:status reject-result))
               (println "    拒绝后回复:" (:text reject-result)))))))))
 
@@ -188,11 +188,11 @@
     (println "\n  ⚠ 未设置 ZHIPU_API_KEY 环境变量，跳过集成测试")
     (System/exit 1))
 
-  (test-kernel-simple-chat)
+  (test-chat-client-simple-chat)
   (wait 3000)
-  (test-kernel-tool-call)
+  (test-chat-client-tool-call)
   (wait 3000)
-  (test-kernel-multi-turn)
+  (test-chat-client-multi-turn)
   (wait 3000)
   (test-process-pause-resume)
   (wait 3000)

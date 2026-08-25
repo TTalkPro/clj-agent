@@ -19,10 +19,10 @@
    场景 4 用**纯 CPU 忙循环**——这两条是 JVM 上「可取消 / 不可取消」的真实分界，
    实测得出（见文件末尾的实测记录）。"
   (:require [clojure.string :as str]
-            [im.ttalk.agent.client :as agent]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.simple-agent :as agent]
+            [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.react :as react]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.provider.factory.builder :as factory]
             [im.ttalk.agent.provider.minimax :as minimax]
             [im.ttalk.agent.tool :refer [deftool]])
@@ -133,7 +133,7 @@
 ;;; ============================================================
 ;;; 观测：记录超时结果上报给循环的时刻
 ;;;
-;;; 用 :on-tool-result 回调而非 filter——声明式超时现在由 kernel/invoke-tool 强制
+;;; 用 :on-tool-result 回调而非 filter——声明式超时现在由 chat-client/invoke-tool 强制
 ;;; （在 filter 链**之外**），故没有任何 filter 看得见它。回调是超时结果抵达循环的
 ;;; 第一现场，本就是更贴切的探针。
 ;;; ============================================================
@@ -144,20 +144,27 @@
    工具自己的 `deftool {:timeout ms}` 恒优先。"
   [tools default-ms]
   (let [provider (factory/create-provider-from-env :minimax)
-        svc (service/create-service provider {:model minimax/default-model
-                                              :max-tokens 512
-                                              :temperature 0})
+        cm (chat-model/create-chat-model provider {:model minimax/default-model
+                                                   :max-tokens 512
+                                                   :temperature 0})
         llm-calls (atom 0)
-        instrumented (assoc svc :chat-fn
-                            (fn [messages opts]
-                              (swap! llm-calls inc)
-                              ((:chat-fn svc) messages opts)))
-        k (kernel/build-kernel {:service instrumented
-                                :tools tools
+        ;; 给 ChatModel 埋探针：包一层 IChatModel 转调内层。
+        ;; **不能**再用 (assoc cm :chat-fn ...)——chat-model 是 record 了，
+        ;; assoc 只往 ext-map 塞键，协议分派看不见（as-chat-model 会当场抛）。
+        instrumented (reify chat-model/IChatModel
+                       (call [_ request]
+                         (swap! llm-calls inc)
+                         (chat-model/call cm request))
+                       (stream-call [_ request on-token]
+                         (swap! llm-calls inc)
+                         (chat-model/stream-call cm request on-token))
+                       (model-options [_] (chat-model/model-options cm)))
+        k (chat-client/build-chat-client {:chat-model instrumented
+                                          :tools tools
 :tool-manager (react/sequential-tool-calling-manager
                 {:timeout default-ms})})]
     {:agent (agent/create-agent
-              {:kernel k
+              {:chat-client k
                :callbacks {:on-tool-result
                            (fn [_ result]
                              (when (str/includes? (str result) "超时")

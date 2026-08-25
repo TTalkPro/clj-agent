@@ -9,21 +9,25 @@
      ring/ring-core                 {:mvn/version \"1.12.0\"}
      cheshire/cheshire              {:mvn/version \"5.12.0\"}
 
-   注：ring-jetty9-adapter 各版本的 WebSocket API 略有差异（旧版 :websockets map /
-   新版 ring.websocket 标准）。下面用广泛文档化的 :websockets map 形式；按你的版本对齐即可。
+   注：ring-jetty9-adapter 的 WebSocket API 换过代——**0.30+ 走 Ring 标准**
+   （handler 返回 `{:ring.websocket/listener …}`，用 `ring.websocket/send`），
+   旧版那套 `run-jetty :websockets {…}` + `jetty/send!` 在 0.36.0 已不存在
+   （`jetty/send!` 连 var 都没有，加载即报 No such var）。下面用标准那套。
 
    运行（REPL）：(start! 3000)"
   (:require [ring.adapter.jetty9 :as jetty]
+            [ring.websocket :as ws]
             [ring.core.protocols :as ring-proto]
             [cheshire.core :as json]
             [clojure.java.io :as io]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as st]
             [im.ttalk.agent.provider.minimax :as minimax]))
 
 (defn make-agent []
   (agent/create-agent
-    {:provider (minimax/create-provider {:api-key (System/getenv "MINIMAX_AUTH_TOKEN")})
+    {:provider (minimax/create-provider {:api-key (or (System/getenv "MINIMAX_API_KEY")
+                                                  (System/getenv "MINIMAX_AUTH_TOKEN"))})
      :model "MiniMax-M2.7" :max-tokens 1024}))
 
 (defn- sse-frame [m] (str "data: " (json/encode m) "\n\n"))
@@ -40,18 +44,20 @@
         (catch Exception e (fail! (.getMessage e)))))
     token))
 
-;; ── WebSocket：ring-jetty9 :websockets 路由 ──────────────────────
-;; ws 对象的发送用 (jetty/send! ws msg)；客户端发文本 → on-text → 流式回
-(defn ws-handler [a]
+;; ── WebSocket：Ring 标准（ring.websocket）────────────────────────
+;; handler 对 upgrade 请求返回 {:ring.websocket/listener listener}；
+;; listener 可以就是个 map（Ring 已把 Listener 协议 extend 到 map），
+;; 各 fn 收 socket 作首参；发送用 (ws/send socket msg)。
+(defn ws-listener [a]
   (let [token (atom nil)]
-    {:on-text
-     (fn [ws message]
+    {:on-message
+     (fn [socket message]
        (reset! token
-         (run-stream! a message
-           {:emit! (fn [tok] (jetty/send! ws (json/encode {:token tok})))
-            :done! (fn []    (jetty/send! ws (json/encode {:done true})))
-            :fail! (fn [err] (jetty/send! ws (json/encode {:error err})))})))
-     :on-close (fn [_ws _status _reason] (some-> @token st/request-cancel!))}))   ;; 断连即停
+         (run-stream! a (str message)
+           {:emit! (fn [tok] (ws/send socket (json/encode {:token tok})))
+            :done! (fn []    (ws/send socket (json/encode {:done true})))
+            :fail! (fn [err] (ws/send socket (json/encode {:error err})))})))
+     :on-close (fn [_socket _code _reason] (some-> @token st/request-cancel!))}))   ;; 断连即停
 
 ;; ── SSE：Ring StreamableResponseBody（可移植）────────────────────
 (defn sse-response [a message]
@@ -80,16 +86,23 @@
 ;; ── 路由 + 启动 ────────────────────────────────────────────────
 (defn ring-app [a]
   (fn [req]
-    (case (:uri req)
-      "/sse" (sse-response a (get-in req [:query-params "q"] "你好"))
-      {:status 404 :body "GET /sse?q=... ; WS at /ws"})))
+    (cond
+      ;; WS 升级请求走同一个 ring handler（标准 API 不再有单独的 :websockets 路由表）
+      (and (= "/ws" (:uri req)) (ws/upgrade-request? req))
+      {:ring.websocket/listener (ws-listener a)}
+
+      (= "/sse" (:uri req))
+      (sse-response a (or (some-> (:query-string req)
+                                  (->> (re-find #"q=([^&]*)"))
+                                  second
+                                  (java.net.URLDecoder/decode "UTF-8"))
+                          "你好"))
+
+      :else {:status 404 :body "GET /sse?q=... ; WS at /ws"})))
 
 (defonce server (atom nil))
 (defn start! [port]
   (let [a (make-agent)]
-    (reset! server
-            (jetty/run-jetty (ring-app a)
-                             {:port port :join? false
-                              :websockets {"/ws" (ws-handler a)}}))
+    (reset! server (jetty/run-jetty (ring-app a) {:port port :join? false}))
     (println "Jetty 启动于" port "— ws://localhost:" port "/ws  |  /sse?q=...")))
 (defn stop! [] (when-let [s @server] (.stop s) (reset! server nil)))

@@ -37,7 +37,7 @@
   (->MockProvider (atom responses)))
 
 ;;; ============================================================
-;;; Kernel Agent 测试工具
+;;; ChatClient Agent 测试工具
 ;;; ============================================================
 
 (deftool mock-get-weather
@@ -51,7 +51,7 @@
   (str "结果: 42"))
 
 (def mock-tools
-  "Kernel Agent 测试工具集"
+  "ChatClient Agent 测试工具集"
   [#'mock-get-weather #'mock-calculate])
 
 ;;; ============================================================

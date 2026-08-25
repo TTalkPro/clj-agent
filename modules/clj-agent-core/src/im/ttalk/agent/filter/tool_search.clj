@@ -13,7 +13,7 @@
    1. `run-tool-loop` 每轮都把**当轮 tool-context** 塞进 ChatRequest 的
       `:context`（react.clj）；
    2. `invoke-chat` 的 terminal 由 **request 当前字段重建** chat-opts
-      （kernel.clj），故 `:chat` filter 改写 `:tools` 会抵达 provider；
+      （chat_client.clj），故 `:chat` filter 改写 `:tools` 会抵达 provider；
    3. v0.3 的 `:writes` + `:state-slots` 槽级 reducer 让工具的写意图在屏障处
       按序折叠进 context。
 
@@ -42,9 +42,9 @@
    ## 用法
 
    ```clojure
-   (kernel/build-kernel
+   (chat-client/build-chat-client
      (ts/with-tool-search
-       {:service svc :tools [#'t1 #'t2 ... #'t80]
+       {:chat-model cm :tools [#'t1 #'t2 ... #'t80]
         :filters [(ma/memory-filter store)]}
        {:index (ts/keyword-tool-index) :limit 5}))
    ```
@@ -284,33 +284,33 @@
      :filter
      (flt/create-filter :tool-search
       :chat (fn [req chain]
-              (let [all (:tools req)]
+              (let [all (flt/req-option req :tools)]
                 (if (empty? all)
                   (chain req)
                   (let [catalog (filterv #(not= search-tool-name (:name %)) all)
                         _ (ensure-indexed! catalog)
-                        discovered (get (:context req) discovered-slot #{})
+                        discovered (get (flt/req-context req) discovered-slot #{})
                         exposed (filterv #(or (contains? discovered (:name %))
                                               (contains? always (:name %)))
                                          catalog)]
-                    (chain (assoc req :tools (into [st-schema] exposed))))))))
+                    (chain (flt/with-option req :tools (into [st-schema] exposed))))))))
 
      :state-slots {discovered-slot {:init #{} :reduce into}}}))
 
 (defn with-tool-search
-  "把 ToolSearch 装进 `build-kernel` 的 opts map（工具 / filter / 状态槽三处
+  "把 ToolSearch 装进 `build-chat-client` 的 opts map（工具 / filter / 状态槽三处
    一次装好）。filter 追加在末尾——memory 若在首位仍保持首位。
 
    ```clojure
-   (kernel/build-kernel
-     (with-tool-search {:service svc :tools [...] :filters [(memory-filter store)]}
+   (chat-client/build-chat-client
+     (with-tool-search {:chat-model cm :tools [...] :filters [(memory-filter store)]}
                        {:index (keyword-tool-index)}))
    ```"
-  [kernel-opts opts]
+  [chat-client-opts opts]
   (let [{:keys [tool filter state-slots]} (tool-search opts)
-        ;; build-kernel 取 (or tool-vars tools)——用户用哪个键就往哪个键装
-        tools-key (if (contains? kernel-opts :tool-vars) :tool-vars :tools)]
-    (-> kernel-opts
+        ;; build-chat-client 取 (or tool-vars tools)——用户用哪个键就往哪个键装
+        tools-key (if (contains? chat-client-opts :tool-vars) :tool-vars :tools)]
+    (-> chat-client-opts
         (update tools-key (fnil conj []) tool)
         (update :filters (fnil conj []) filter)
         (update :state-slots merge state-slots))))

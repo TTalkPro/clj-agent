@@ -2,9 +2,9 @@
   "resume 带 payload（设计文档 §13）——
    拒绝带理由 / 批准改参 / reply 即结果（ask-user）/ 参数校验。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.context :as context]
-            [im.ttalk.agent.kernel :as core]
+            [im.ttalk.agent.chat-client :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
@@ -33,22 +33,22 @@
                     :tool-calls [{:id "p1" :name "echo-args" :args {:v "原参数"}}])
                   (response/make-response :text final-text :tool-calls nil)))}))
 
-(defn- paused-run [svc conv-id]
+(defn- paused-run [cm conv-id]
   (let [store (memory/in-memory-store)
-        kernel (core/build-kernel {:service svc :tools [#'echo-args]
-                                   :filters [(ma/memory-filter store)]})
-        r (agent-loop/invoke kernel store [(msg/user "干活")]
+        chat-client (core/build-chat-client {:chat-model cm :tools [#'echo-args]
+                                             :filters [(ma/memory-filter store)]})
+        r (agent-loop/invoke chat-client store [(msg/user "干活")]
             {:context (context/with-conversation-id (context/create) conv-id)
              :tool-gate (fn [_] :pause)})]
     (is (= :paused (:status r)))
     (is (= "p1" (get-in r [:loop-state :pending-id])) "loop-state 携带 pending-id")
-    {:kernel kernel :store store :r r
+    {:chat-client chat-client :store store :r r
      :opts {:context (context/with-conversation-id (context/create) conv-id)}}))
 
 (deftest rejected-with-message-test
   (reset! executed nil)
-  (let [{:keys [kernel r opts store]} (paused-run (pause-then "收到") "rp-1")
-        r2 (agent-loop/resume kernel (:loop-state r) :rejected
+  (let [{:keys [chat-client r opts store]} (paused-run (pause-then "收到") "rp-1")
+        r2 (agent-loop/resume chat-client (:loop-state r) :rejected
              (assoc opts :payload {:message "参数有风险，先改 v"}
                          :tool-gate (fn [_] :pause)))]
     (is (= :completed (:status r2)))
@@ -60,16 +60,16 @@
 
 (deftest approved-with-args-test
   (reset! executed nil)
-  (let [{:keys [kernel r opts]} (paused-run (pause-then "改参执行完") "rp-2")
-        r2 (agent-loop/resume kernel (:loop-state r) :approved
+  (let [{:keys [chat-client r opts]} (paused-run (pause-then "改参执行完") "rp-2")
+        r2 (agent-loop/resume chat-client (:loop-state r) :approved
              (assoc opts :payload {:args {:v "改后的参数"}}))]
     (is (= :completed (:status r2)))
     (is (= "改后的参数" @executed) "pending 工具以替换后的参数执行")))
 
 (deftest reply-as-result-test
   (reset! executed nil)
-  (let [{:keys [kernel r opts store]} (paused-run (pause-then "明白") "rp-3")
-        r2 (agent-loop/resume kernel (:loop-state r) :reply
+  (let [{:keys [chat-client r opts store]} (paused-run (pause-then "明白") "rp-3")
+        r2 (agent-loop/resume chat-client (:loop-state r) :reply
              (assoc opts :payload {:message "用户选择了 B 方案"}))]
     (is (= :completed (:status r2)))
     (is (nil? @executed) "reply 不执行工具")
@@ -80,13 +80,13 @@
         "records 记录 reply 值")))
 
 (deftest reply-validation-test
-  (let [{:keys [kernel r opts]} (paused-run (pause-then "x") "rp-4")]
+  (let [{:keys [chat-client r opts]} (paused-run (pause-then "x") "rp-4")]
     (testing ":reply 缺 :message → 抛"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #":message"
-            (agent-loop/resume kernel (:loop-state r) :reply opts))))
+            (agent-loop/resume chat-client (:loop-state r) :reply opts))))
     (testing ":reply 遇旧版无 :pending-id 的 loop-state → 抛"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"pending-id"
-            (agent-loop/resume kernel (dissoc (:loop-state r) :pending-id) :reply
+            (agent-loop/resume chat-client (dissoc (:loop-state r) :pending-id) :reply
               (assoc opts :payload {:message "m"})))))))
 
 ;;; ============================================================

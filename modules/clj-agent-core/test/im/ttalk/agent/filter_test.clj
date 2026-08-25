@@ -5,7 +5,8 @@
     / ChatRequest 字段改写抵达 provider（:tools 动态化的地基）。"
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
+            [im.ttalk.agent.tool-registry :as registry]
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.tool :as tool :refer [deftool]]
             [im.ttalk.agent.tool-calling-manager :as tcm]
@@ -161,15 +162,15 @@
 ;;; ============================================================
 ;;; :chat 链改写 ChatRequest → 抵达 provider
 ;;; ============================================================
-;;; kernel/invoke-chat 的 terminal 由 request 当前字段**重建** chat-opts
-;;; （kernel.clj），故 :chat filter 对 :tools/:tool-choice/:system-prompt 的
+;;; chat-client/invoke-chat 的 terminal 由 request 当前字段**重建** chat-opts
+;;; （chat_client.clj），故 :chat filter 对 :tools/:tool-choice/:system-prompt 的
 ;;; 改写会吃到。tool-search filter 完全建立在这条契约上——此前无测试钉住。
 
-(defn- probe-kernel
-  "组一个把 chat-fn 收到的 opts 录进 seen 的 kernel。"
+(defn- probe-chat-client
+  "组一个把 chat-fn 收到的 opts 录进 seen 的 chat-client。"
   [seen filters]
-  (kernel/build-kernel
-    {:service {:chat-fn (fn [msgs opts]
+  (chat-client/build-chat-client
+    {:chat-model {:chat-fn (fn [msgs opts]
                           (reset! seen {:messages msgs :opts opts})
                           {:text "ok"})}
      :filters filters}))
@@ -179,10 +180,10 @@
     (let [seen (atom nil)
           narrow {:name :narrow
                   :chat (fn [req chain]
-                          (chain (assoc req :tools [{:name "kept"}])))}
-          k (probe-kernel seen [narrow])]
-      (kernel/invoke-chat k [{:role :user :content "hi"}]
-                          {:tools [{:name "a"} {:name "b"} {:name "c"}]})
+                          (chain (flt/with-option req :tools [{:name "kept"}])))}
+          k (probe-chat-client seen [narrow])]
+      (chat-client/invoke-chat k [{:role :user :content "hi"}]
+                               {:tools [{:name "a"} {:name "b"} {:name "c"}]})
       (is (= [{:name "kept"}] (:tools (:opts @seen)))
           "provider 应收到 filter 改写后的 :tools，而非入参的三个工具")))
 
@@ -191,21 +192,22 @@
           ;; 与 tool-search 同构：从只读 :context 读出「已发现」的工具名
           expand {:name :expand
                   :chat (fn [req chain]
-                          (let [discovered (get-in req [:context :discovered] #{})]
-                            (chain (update req :tools
-                                           #(filterv (comp discovered :name) %)))))}
-          k (probe-kernel seen [expand])]
-      (kernel/invoke-chat k [{:role :user :content "hi"}]
-                          {:tools [{:name "a"} {:name "b"} {:name "c"}]
-                           :context {:discovered #{"b" "c"}}})
+                          (let [discovered (get (flt/req-context req) :discovered #{})]
+                            (chain (flt/with-option req :tools
+                                     (filterv (comp discovered :name)
+                                              (flt/req-option req :tools))))))}
+          k (probe-chat-client seen [expand])]
+      (chat-client/invoke-chat k [{:role :user :content "hi"}]
+                               {:tools [{:name "a"} {:name "b"} {:name "c"}]
+                                :context {:discovered #{"b" "c"}}})
       (is (= [{:name "b"} {:name "c"}] (:tools (:opts @seen)))
           "context 驱动的工具集应抵达 provider")))
 
   (testing "无 :chat filter 时 :tools 原样抵达"
     (let [seen (atom nil)
-          k (probe-kernel seen [])]
-      (kernel/invoke-chat k [{:role :user :content "hi"}]
-                          {:tools [{:name "a"}]})
+          k (probe-chat-client seen [])]
+      (chat-client/invoke-chat k [{:role :user :content "hi"}]
+                               {:tools [{:name "a"}]})
       (is (= [{:name "a"}] (:tools (:opts @seen)))))))
 
 ;;; ============================================================
@@ -304,7 +306,8 @@
           f (flt/logging-chat-filter :log-fn #(swap! lines conj %))
           terminal (fn [_] {:response (resp/make-response :text "你好")})]
       ((flt/build-chain [(:chat f)] terminal)
-       {:messages [{:role :user :content "hi"}] :tools [{:name "t"}] :tool-choice :auto})
+       (flt/as-chat-client-request
+         {:messages [{:role :user :content "hi"}] :tools [{:name "t"}] :tool-choice :auto}))
       (is (= 2 (count @lines)))
       (is (clojure.string/includes? (first @lines) "messages=1"))
       (is (clojure.string/includes? (first @lines) "tools=1"))
@@ -327,12 +330,12 @@
       (is (< (count (second @lines)) 40)))))
 
 ;;; ============================================================
-;;; 超时机制（tool/call-with-timeout —— 唯一实现，kernel/invoke-tool 消费）
+;;; 超时机制（tool/call-with-timeout —— 唯一实现，chat-client/invoke-tool 消费）
 ;;; + 内置 filter：approval
 ;;;
 ;;; 注：timeout-filter 已删除（2026-07-16）——超时是内建机制：工具声明 >
 ;;; 引擎缺省 > 不超时，由 invoke-tool 强制。下面的机制测试直接打
-;;; call-with-timeout 本体；端到端（声明/引擎缺省/优先级）见 kernel 级测试。
+;;; call-with-timeout 本体；端到端（声明/引擎缺省/优先级）见 chat-client 级测试。
 ;;; ============================================================
 
 (defn- run-tool-chain
@@ -407,13 +410,13 @@
     timeout (assoc :timeout timeout)))
 
 (deftest declared-timeout-works-without-any-filter-test
-  (testing "**开箱即生效**：裸 kernel、零 filter，deftool :timeout 照样强制
+  (testing "**开箱即生效**：裸 chat-client、零 filter，deftool :timeout 照样强制
             （回归 review#4：曾经唯独 :timeout 要用户手动挂 filter 才生效，
-             而 :serial / :retry / :return-direct 都是 react/kernel 直接消费——
+             而 :serial / :retry / :return-direct 都是 react/chat-client 直接消费——
              用户写下声明却静默无效，正是我们要修的那个 bug 换了个位置）"
-    (let [k  (kernel/build-kernel {:service {} :tools [#'sleepy-declared]})
+    (let [k  (chat-client/build-chat-client {:chat-model {} :tools [#'sleepy-declared]})
           t0 (System/currentTimeMillis)
-          r  (kernel/invoke-tool k :sleepy-declared {} nil)
+          r  (chat-client/invoke-tool k :sleepy-declared {} nil)
           dt (- (System/currentTimeMillis) t0)]
       (is (clojure.string/includes? (:value r) "超时"))
       (is (= :transient (get-in r [:error :class])) "归 :transient → 声明 :retry 的工具可重试")
@@ -421,9 +424,9 @@
       (is (nil? (:writes r)) "超时结果不带 writes（事务性）")))
 
   (testing "未声明 → 不超时、零开销（不起线程，与从前逐字相同）"
-    (let [k (kernel/build-kernel {:service {} :tools [#'sleepy-plain]})
+    (let [k (chat-client/build-chat-client {:chat-model {} :tools [#'sleepy-plain]})
           done (promise)]
-      (.start (Thread. ^Runnable (fn [] (kernel/invoke-tool k :sleepy-plain {} nil)
+      (.start (Thread. ^Runnable (fn [] (chat-client/invoke-tool k :sleepy-plain {} nil)
                                    (deliver done :finished))))
       (is (= :still-running (deref done 600 :still-running))
           "没有声明就没有超时——不该被任何缺省砍掉"))))
@@ -433,21 +436,21 @@
             两个 func-def 构造点分头维护，inline 那个硬编码没带 :timeout；
             而 inline 的 :serial / :retry 一直是生效的，独 :timeout 静默失效。
             delegate-tool 恰恰是内联且跑整个子 agent，最需要超时的就是它）"
-    (let [k  (kernel/build-kernel {:service {} :tools [(inline-sleepy "slow" :timeout 200)]})
+    (let [k  (chat-client/build-chat-client {:chat-model {} :tools [(inline-sleepy "slow" :timeout 200)]})
           t0 (System/currentTimeMillis)
-          r  (kernel/invoke-tool k :slow {} nil)
+          r  (chat-client/invoke-tool k :slow {} nil)
           dt (- (System/currentTimeMillis) t0)]
       (is (clojure.string/includes? (:value r) "超时"))
       (is (= :transient (get-in r [:error :class])))
       (is (< dt 5000) "修复前：睡满 60s")))
 
   (testing "内联工具未声明 → 不超时（与 var 工具对称）"
-    (let [k (kernel/build-kernel {:service {} :tools [(inline-sleepy "plain")]})]
-      (is (nil? (kernel/tool-timeout k :plain))))))
+    (let [k (chat-client/build-chat-client {:chat-model {} :tools [(inline-sleepy "plain")]})]
+      (is (nil? (registry/tool-timeout k :plain))))))
 
 ;; 引擎桩：satisfies ToolCallingManager **且**携带 :timeout 字段。
 ;; 不用裸 map `{:timeout ms}`——那是个陷阱先例：manager-timeout 读得到它，但这样的
-;; kernel 一旦进真实 react 循环，会在 tcm/execute-tool-calls 抛 No implementation
+;; chat-client 一旦进真实 react 循环，会在 tcm/execute-tool-calls 抛 No implementation
 ;; of method（P9 review 逮到的 R5 尾巴）。真引擎（三个构造器）在 client 模块，
 ;; core 造不了，故用最小 defrecord 桩：协议 + 字段两个契约都满足。
 (defrecord StubManager [timeout]
@@ -459,65 +462,65 @@
   (testing "优先级：工具声明 > 引擎缺省（声明更**宽**时引擎缺省不砍它）"
     (let [slowish (assoc (inline-sleepy "s" :timeout 5000)
                          :handler (fn [_ _] (Thread/sleep 300) "done"))
-          k (kernel/build-kernel {:service {} :tools [slowish]
-                                  :tool-manager (->StubManager 100)})]
-      (is (= "done" (:value (kernel/invoke-tool k :s {} nil)))
+          k (chat-client/build-chat-client {:chat-model {} :tools [slowish]
+                                            :tool-manager (->StubManager 100)})]
+      (is (= "done" (:value (chat-client/invoke-tool k :s {} nil)))
           "引擎缺省 100ms < 下游 300ms，但声明 5000ms 胜出")))
 
   (testing "优先级：工具声明 > 引擎缺省（声明更**紧**时提前超时，报的是声明值）"
-    (let [k (kernel/build-kernel {:service {}
-                                  :tools [#'sleepy-declared]
-                                  :tool-manager (->StubManager 60000)})
-          r (kernel/invoke-tool k :sleepy-declared {} nil)]
+    (let [k (chat-client/build-chat-client {:chat-model {}
+                                            :tools [#'sleepy-declared]
+                                            :tool-manager (->StubManager 60000)})
+          r (chat-client/invoke-tool k :sleepy-declared {} nil)]
       (is (clojure.string/includes? (:value r) "200ms")
           "报的是工具声明的 200ms，不是引擎的 60000ms")))
 
   (testing "未声明的工具吃引擎缺省"
-    (let [k (kernel/build-kernel {:service {}
-                                  :tools [#'sleepy-plain]
-                                  :tool-manager (->StubManager 150)})
-          r (kernel/invoke-tool k :sleepy-plain {} nil)]
+    (let [k (chat-client/build-chat-client {:chat-model {}
+                                            :tools [#'sleepy-plain]
+                                            :tool-manager (->StubManager 150)})
+          r (chat-client/invoke-tool k :sleepy-plain {} nil)]
       (is (clojure.string/includes? (:value r) "150ms"))))
 
   (testing "都没给 → 不超时（缺省语义）"
     (let [quick (assoc (inline-sleepy "q")
                        :handler (fn [_ _] (Thread/sleep 200) "done"))
-          k (kernel/build-kernel {:service {} :tools [quick]})]
-      (is (= "done" (:value (kernel/invoke-tool k :q {} nil)))))))
+          k (chat-client/build-chat-client {:chat-model {} :tools [quick]})]
+      (is (= "done" (:value (chat-client/invoke-tool k :q {} nil)))))))
 
-(deftest timeout-validated-at-build-kernel-test
+(deftest timeout-validated-at-build-chat-client-test
   (testing "坏 :timeout 在**装配期**就炸，而非执行期（回归 review#3：
             \"5s\" 曾每次调用抛 ClassCastException，-1 曾让工具每次静默立刻超时）"
     (doseq [bad ["5s" -1 0 2.7]]
       (is (thrown-with-msg?
             clojure.lang.ExceptionInfo #":timeout 必须为正整数毫秒"
-            (kernel/build-kernel {:service {} :tools [(inline-sleepy "bad" :timeout bad)]}))
+            (chat-client/build-chat-client {:chat-model {} :tools [(inline-sleepy "bad" :timeout bad)]}))
           (str "应拒绝 " (pr-str bad)))))
 
   (testing "合法值与未声明照常通过"
-    (is (some? (kernel/build-kernel {:service {} :tools [(inline-sleepy "ok" :timeout 500)]})))
-    (is (some? (kernel/build-kernel {:service {} :tools [(inline-sleepy "none")]})))
-    (is (some? (kernel/build-kernel {:service {} :tools [#'sleepy-declared]})))))
+    (is (some? (chat-client/build-chat-client {:chat-model {} :tools [(inline-sleepy "ok" :timeout 500)]})))
+    (is (some? (chat-client/build-chat-client {:chat-model {} :tools [(inline-sleepy "none")]})))
+    (is (some? (chat-client/build-chat-client {:chat-model {} :tools [#'sleepy-declared]})))))
 
-(deftest manager-timeout-validated-at-build-kernel-test
+(deftest manager-timeout-validated-at-build-chat-client-test
   (testing "R5: :tool-manager 的坏 :timeout 在装配期即拒（与工具声明的校验对称）"
     (doseq [bad ["5s" -1 0 2.7]]
       (is (thrown-with-msg?
             clojure.lang.ExceptionInfo #":tool-manager 的 :timeout 必须为正整数毫秒"
-            (kernel/build-kernel {:service {}
-                                  :tools [(inline-sleepy "ok")]
-                                  :tool-manager (->StubManager bad)}))
+            (chat-client/build-chat-client {:chat-model {}
+                                            :tools [(inline-sleepy "ok")]
+                                            :tool-manager (->StubManager bad)}))
           (str "应拒绝 " (pr-str bad)))))
 
   (testing "合法的 :tool-manager :timeout 照常通过"
-    (is (some? (kernel/build-kernel {:service {}
-                                     :tools [(inline-sleepy "ok")]
-                                     :tool-manager (->StubManager 500)}))))
+    (is (some? (chat-client/build-chat-client {:chat-model {}
+                                               :tools [(inline-sleepy "ok")]
+                                               :tool-manager (->StubManager 500)}))))
 
   (testing "无 :timeout 字段的 :tool-manager 不受影响（reify/自定义实现）"
-    (is (some? (kernel/build-kernel {:service {}
-                                     :tools [(inline-sleepy "ok")]
-                                     :tool-manager (->StubManager nil)})))))
+    (is (some? (chat-client/build-chat-client {:chat-model {}
+                                               :tools [(inline-sleepy "ok")]
+                                               :tool-manager (->StubManager nil)})))))
 
 (deftool instant-tool
   "瞬间返回的工具（R1 测试用：审批耗时应排除在超时预算外）"
@@ -534,11 +537,11 @@
                                  (Thread/sleep 800)  ;; 远超工具声明的 300ms 超时
                                  (chain req))}
           ;; 工具声明 300ms 超时，但工具本体瞬间返回
-          k (kernel/build-kernel {:service {}
-                                  :tools [#'instant-tool]
-                                  :filters [slow-approval]})
+          k (chat-client/build-chat-client {:chat-model {}
+                                            :tools [#'instant-tool]
+                                            :filters [slow-approval]})
           t0 (System/currentTimeMillis)
-          r (kernel/invoke-tool k :instant-tool {:x "ok"} nil)
+          r (chat-client/invoke-tool k :instant-tool {:x "ok"} nil)
           dt (- (System/currentTimeMillis) t0)]
       ;; 修复后：审批 800ms 在计时区外，工具本体瞬间完成 → 不超时
       (is (= "done:ok" (:value r))
@@ -552,8 +555,8 @@
                      :input_schema {:type "object" :properties {} :required []}
                      :timeout 200
                      :handler (fn [_ _] (Thread/sleep 60000) "never")}
-          k (kernel/build-kernel {:service {} :tools [slow-tool]})]
-      (is (clojure.string/includes? (:value (kernel/invoke-tool k :slow {} nil)) "超时")))))
+          k (chat-client/build-chat-client {:chat-model {} :tools [slow-tool]})]
+      (is (clojure.string/includes? (:value (chat-client/invoke-tool k :slow {} nil)) "超时")))))
 
 (deftest approval-filter-test
   (testing "敏感工具 + 批准 → 执行下游"
@@ -701,32 +704,32 @@
                                [(flt/token-redact-filter #"x" "*")]))))))
 
 ;;; ============================================================
-;;; kernel 侧：预编译链的装配、替换与兜底
+;;; chat-client 侧：预编译链的装配、替换与兜底
 ;;; ============================================================
 
-(deftest kernel-hooks-test
-  (testing "build-kernel 归一化 :filters 为 record，hooks 与之同源"
-    (let [k (kernel/build-kernel {:service {} :filters [{:name :a :chat identity}]})]
+(deftest chat-client-hooks-test
+  (testing "build-chat-client 归一化 :filters 为 record，hooks 与之同源"
+    (let [k (chat-client/build-chat-client {:chat-model {} :filters [{:name :a :chat identity}]})]
       (is (every? flt/filter? (:filters k)))
       (is (identical? (:filters k) (:source (:hooks k))))
-      (is (identical? (:hooks k) (kernel/filter-hooks k))
+      (is (identical? (:hooks k) (flt/filter-hooks k))
           "同源时 filter-hooks 直接返回装配期那份，不重编")))
 
   (testing "with-filters 换链 → hooks 跟着重编"
-    (let [k  (kernel/build-kernel {:service {} :filters [{:name :a :chat identity}]})
-          k2 (kernel/with-filters k [{:name :b :chat identity}])]
+    (let [k  (chat-client/build-chat-client {:chat-model {} :filters [{:name :a :chat identity}]})
+          k2 (flt/with-filters k [{:name :b :chat identity}])]
       (is (= [:b] (mapv :name (:filters k2))))
       (is (identical? (:filters k2) (:source (:hooks k2))))
-      (is (= [:a] (mapv :name (:filters k))) "原 kernel 不受影响")))
+      (is (= [:a] (mapv :name (:filters k))) "原 chat-client 不受影响")))
 
   (testing "绕过 with-filters 直接 assoc :filters → filter-hooks 现场重编兜底"
     (let [seen (atom nil)
-          k (kernel/build-kernel
-              {:service {:chat-fn (fn [_ opts] (reset! seen opts) {:text "ok"})}
+          k (chat-client/build-chat-client
+              {:chat-model {:chat-fn (fn [_ opts] (reset! seen opts) {:text "ok"})}
                :filters []})
           rogue {:name :rogue
-                 :chat (fn [req chain] (chain (assoc req :tool-choice :forced)))}
+                 :chat (fn [req chain] (chain (flt/with-option req :tool-choice :forced)))}
           k2 (assoc k :filters [rogue])]     ;; 刻意绕开 API
-      (kernel/invoke-chat k2 [{:role :user :content "hi"}] {})
+      (chat-client/invoke-chat k2 [{:role :user :content "hi"}] {})
       (is (= :forced (:tool-choice @seen))
           "hooks 与 :filters 脱钩时必须重编——静默用旧链会让 filter 悄悄失效"))))

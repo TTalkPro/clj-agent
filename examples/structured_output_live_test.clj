@@ -46,10 +46,10 @@
      clojure -M -e \"(load-file \\\"examples/structured_output_live_test.clj\\\")\""
   (:require [clojure.string :as str]
             [cheshire.core :as json]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.memory :as memory]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.filter.memory :as ma]
@@ -95,7 +95,7 @@
   {:name :probe
    :chat (fn [req chain]
            (let [r (chain req)]
-             (swap! log conj {:messages (:messages req)
+             (swap! log conj {:messages (flt/req-messages req)
                               :text (resp/response-text (:response r))})
              r))})
 
@@ -103,11 +103,11 @@
   "挂 memory + validation(turn) + probe 跑一轮。
    probe 在 memory 之后 = 洋葱更内层 → 看到的 :messages 是 memory 展开的完整历史
    （反馈消息也在里面）。"
-  [svc schema question & {:keys [max-retries] :or {max-retries 2}}]
+  [cm schema question & {:keys [max-retries] :or {max-retries 2}}]
   (let [log (atom [])
         store (memory/in-memory-store)
-        k (kernel/build-kernel
-            {:service svc
+        k (chat-client/build-chat-client
+            {:chat-model cm
              :filters [(ma/memory-filter store)
                        (flt/validation-turn-filter
                          (so/validate-fn schema :parse-fn parse-json)
@@ -147,9 +147,9 @@
                 (catch Throwable _ ::unparseable))]
     (and (not= ::unparseable t1) (nil? (so/validate-value t1 schema)))))
 
-(defn test-happy-path [svc]
+(defn test-happy-path [cm]
   (println "\n=== 场景 1: 合格输出 → 一次通过，不重试 ===")
-  (let [r (run-case svc films-schema
+  (let [r (run-case cm films-schema
                     "生成一位知名演员的电影作品列表。只输出 JSON，字段：actor（演员名，字符串）、films（电影名数组）。不要输出任何其它文字。")]
     (println "   原始输出:" (clip (:raw r) 100))
     (println "   LLM 调用次数:" (:attempts r))
@@ -183,9 +183,9 @@
                 :birth_year {:type "integer"}}
    :required ["actor" "films" "birth_year"]})
 
-(defn test-self-correction [svc]
+(defn test-self-correction [cm]
   (println "\n=== 场景 2: 自我修正（真实校验失败 → 反馈 → 模型改对） ===")
-  (let [r (run-case svc strict-schema
+  (let [r (run-case cm strict-schema
                     ;; 刻意不提 birth_year —— 让失败真实发生
                     "生成一位知名演员的电影作品列表。只输出 JSON，字段：actor（演员名，字符串）、films（电影名数组）。不要输出任何其它文字。")
         feedback (all-user-text r)
@@ -218,9 +218,9 @@
    :properties {:status {:type "string" :enum []}}
    :required ["status"]})
 
-(defn test-exhaustion [svc]
+(defn test-exhaustion [cm]
   (println "\n=== 场景 3: 重试耗尽 → 原样返回（max-retries 1 → 恰好 2 次调用） ===")
-  (let [r (run-case svc impossible-schema
+  (let [r (run-case cm impossible-schema
                     "只输出 JSON：{\"status\": \"ok\"}。不要输出任何其它文字。"
                     :max-retries 1)]
     (println "   LLM 调用次数:" (:attempts r))
@@ -237,10 +237,10 @@
 
 (defn run []
   (println "结构化输出自我修正 live 验证 | model =" MODEL "| provider = :minimax")
-  (let [svc (service/create-service p {:model MODEL :max-tokens 2048})]
+  (let [cm (chat-model/create-chat-model p {:model MODEL :max-tokens 2048})]
     (doseq [f [test-happy-path test-self-correction test-exhaustion]]
       (try
-        (f svc)
+        (f cm)
         (catch Throwable t
           (swap! failures inc)
           (println "  ✗ 场景异常:" (.getMessage t)))))

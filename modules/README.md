@@ -2,12 +2,12 @@
 
 ## 模块结构
 
-clj-agent 采用**依赖倒置(DIP)**的三层划分:**Core 定义协议(端口)+ kernel 原语;Provider 实现协议(适配器);Client 是 Agent 运行时(循环/记忆/门面)。** 任何实现了 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能作为 provider 注入 agent。
+clj-agent 采用**依赖倒置(DIP)**的三层划分:**Core 定义协议(端口)+ chat-client 原语;Provider 实现协议(适配器);Client 是 Agent 运行时(循环/记忆/门面)。** 任何实现了 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能作为 provider 注入 agent。
 
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/      # 协议(端口) + kernel 原语;零依赖
+│   ├── clj-agent-core/      # 协议(端口) + chat-client 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
 │   └── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
 ├── bb.edn                   # 开发任务(bb test / bb jar / bb release …)
@@ -21,19 +21,22 @@ clj-agent/
 
 ## 模块说明
 
-### 1. clj-agent-core — 协议 + kernel 原语
+### 1. clj-agent-core — 协议 + chat-client 原语
 
-**职责**: 定义 LLM 抽象契约(端口)与 kernel 编排原语。**不依赖任何 provider 实现,对记忆/循环零感知**。
+**职责**: 定义 LLM 抽象契约(端口)与 chat-client 编排原语。**不依赖任何 provider 实现,对记忆/循环零感知**。
 
 **契约 / 端口**(`im.ttalk.agent.model.*`):
-- `im.ttalk.agent.model` — `ILLMProvider` 协议(≈ Spring AI `ChatModel`),以**中立消息**为边界
-- `im.ttalk.agent.model.message` / `.response` / `.error` / `.types` — 中立消息、统一响应、错误、构造器
-- `im.ttalk.agent.model.service` — **通用** `create-service`:仅凭协议把任意 provider 包成 kernel service
+- `im.ttalk.agent.model` — `ILLMProvider` 协议,以**中立消息**为边界（**一次 HTTP 往返**,不含重试）
+- `im.ttalk.agent.model.message` / `.request` / `.response` / `.error` — 中立消息、`ChatRequest`、`ChatResponse`、错误
+- `im.ttalk.agent.chat-model` — `IChatModel` 协议（≈ Spring AI `ChatModel`）+ `DefaultChatModel` / `FnChatModel`；**一次逻辑调用**:选项合并 → 重试 → 归一化
+- `im.ttalk.agent.retry` — 通用重试（判据取自 canonical error 的 `:retryable?`）,零依赖
 
-**Kernel 原语**:
-- `im.ttalk.agent.kernel` - Kernel（build-kernel / invoke-chat / invoke-tool）
+**ChatClient 原语**:
+- `im.ttalk.agent` - **Facade 入口**（≈ beamai `beamai.erl`）:常用 API 一个地方找得到,一行转发
+- `im.ttalk.agent.chat-client` - ChatClient（≈ Spring AI `ChatClient`）:`build-chat-client` + 三个 invoke 原语
+- `im.ttalk.agent.tool-registry` - 工具声明表:装配期建表/校验 + 运行期 8 个查询
 - `im.ttalk.agent.tool` - deftool 宏（≈ `ToolCallback`）
-- `im.ttalk.agent.filter` - 洋葱链执行器与装配期预编译（≈ `CallAdvisorChain`）；四条 around 链 `:chat`/`:tool`/`:iteration`/`:turn` + `:token-xform`
+- `im.ttalk.agent.filter` - 洋葱链执行器与装配期预编译（≈ `CallAdvisorChain`）；四条 around 链 `:chat`/`:tool`/`:iteration`/`:turn` + `:token-xform`；`ChatClientRequest`/`ChatClientResponse`
 - `im.ttalk.agent.context` - 请求级上下文
 - `im.ttalk.agent.streaming` - 流式取消令牌
 
@@ -45,13 +48,13 @@ clj-agent/
 
 **职责**: 在 core 原语之上构建 Agent 运行时（2026-07 自 core 下沉，命名空间不变）。
 
-- `im.ttalk.agent.client` - 高级 Agent API（≈ `ChatClient`）
+- `im.ttalk.agent.simple-agent` - 高级 Agent API（有状态对话 + 工具循环 + pause/resume）
 - `im.ttalk.agent.react` - ReAct 工具调用循环
 - `im.ttalk.agent.memory` / `.memory.sqlite` - ChatMemory
 - `im.ttalk.agent.filter.memory` - 记忆 filter（≈ `MessageChatMemoryAdvisor`）
 - `im.ttalk.agent.callbacks` - 生命周期回调
 - `im.ttalk.agent.subagent.*` - 子 agent 体系
-- `im.ttalk.agent.common` - 共享 Kernel 构建
+- `im.ttalk.agent.common` - 共享 ChatClient 构建
 
 **依赖**: `clj-agent-core`; timbre, next.jdbc, sqlite-jdbc
 

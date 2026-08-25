@@ -3,8 +3,8 @@
    writes 进历史 / wire 剥除 / fork 前缀与血缘 / 暂停 fork 带快照 +
    HITL 决策分支 / rollback / prune / ancestry / 编辑重试。"
   (:require [clojure.test :refer [deftest testing is]]
-            [im.ttalk.agent.client :as agent]
-            [im.ttalk.agent.kernel :as core]
+            [im.ttalk.agent.simple-agent :as agent]
+            [im.ttalk.agent.chat-client :as core]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
@@ -31,16 +31,16 @@
 
 (deftest writes-recorded-in-history-test
   (let [calls (atom 0)
-        svc {:chat-fn (fn [_ _]
+        cm {:chat-fn (fn [_ _]
                         (if (= 1 (swap! calls inc))
                           (response/make-response :text nil
                             :tool-calls [{:id "w1" :name "tl-writer" :args {:v "x"}}
                                          {:id "b1" :name "tl-boom" :args {}}])
                           (response/make-response :text "done" :tool-calls nil)))}
         store (memory/in-memory-store)
-        kernel (core/build-kernel {:service svc :tools [#'tl-writer #'tl-boom]
-                                   :filters [(ma/memory-filter store)]})]
-    (agent-loop/invoke kernel store [(msg/user "干活")]
+        chat-client (core/build-chat-client {:chat-model cm :tools [#'tl-writer #'tl-boom]
+                                             :filters [(ma/memory-filter store)]})]
+    (agent-loop/invoke chat-client store [(msg/user "干活")]
       {:context {:conversation-id "wh-1"}})
     (let [stored (memory/mem-get store "wh-1")
           by-id (into {} (map (juxt :tool-call-id identity)) stored)]

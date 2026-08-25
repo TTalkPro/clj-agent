@@ -23,11 +23,11 @@
    运行（需 MINIMAX_API_KEY，兼容旧的 MINIMAX_AUTH_TOKEN）：
      clojure -M -e \"(load-file \\\"examples/return_direct_live_test.clj\\\")\""
   (:require [clojure.string :as str]
-            [im.ttalk.agent.kernel :as kernel]
+            [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.tool :refer [deftool]]
-            [im.ttalk.agent.model.service :as service]
+            [im.ttalk.agent.chat-model :as chat-model]
             [im.ttalk.agent.model.response :as resp]
             [im.ttalk.agent.filter.memory :as ma]
             [im.ttalk.agent.react :as react]
@@ -91,8 +91,8 @@
    :chat (fn [req chain] (swap! calls inc) (chain req))})
 
 (defn build [store calls tools & {:keys [eligibility-fn]}]
-  (kernel/build-kernel
-    (cond-> {:service (service/create-service p {:model MODEL :max-tokens 1024})
+  (chat-client/build-chat-client
+    (cond-> {:chat-model (chat-model/create-chat-model p {:model MODEL :max-tokens 1024})
              :tools (vec tools)
              :filters [(ma/memory-filter store) (probe calls)]}
       eligibility-fn (assoc :eligibility-fn eligibility-fn))))

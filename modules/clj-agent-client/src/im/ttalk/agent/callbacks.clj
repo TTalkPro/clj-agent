@@ -1,5 +1,5 @@
 (ns im.ttalk.agent.callbacks
-  "Agent 独立回调系统 — 与 kernel filter 完全解耦。
+  "Agent 独立回调系统 — 与 chat-client filter 完全解耦。
 
    9 个回调钩子（对标 beamai_agent_callbacks）：
      :on-turn-start   (fn [metadata])                  新 turn 开始
@@ -19,10 +19,10 @@
      - 大部分回调仅观察，不影响主流程
      - :on-tool-call 是唯一可影响流程的回调（返回 {:interrupt reason} 触发中断）
      - 回调抛异常时静默忽略（确保不中断主流程）
-     - 与 kernel filter 完全解耦：回调不走 filter 链，直接在关键节点触发
+     - 与 chat-client filter 完全解耦：回调不走 filter 链，直接在关键节点触发
 
-   与 kernel filter 的区别：
-     - kernel filter  洋葱式 around 拦截，可改写请求/响应，适合 memory/retry/cache
+   与 chat-client filter 的区别：
+     - chat-client filter  洋葱式 around 拦截，可改写请求/响应，适合 memory/retry/cache
      - callback       轻量事件通知，适合日志/监控/审计/告警/中断控制")
 
 (set! *warn-on-reflection* true)

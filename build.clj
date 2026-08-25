@@ -50,7 +50,7 @@
   [{:key :core
     :lib 'im.ttalk/clj-agent-core
     :dir "modules/clj-agent-core"
-    :description "clj-agent Core - Semantic Kernel 风格 AI Agent 核心模块"}
+    :description "clj-agent Core - ChatClient / ChatModel 原语与协议（对齐 Spring AI 命名）"}
    {:key :client
     :lib 'im.ttalk/clj-agent-client
     :dir "modules/clj-agent-client"

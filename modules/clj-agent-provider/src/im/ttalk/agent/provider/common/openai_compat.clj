@@ -18,7 +18,6 @@
    (compat/call-api-stream api-url api-key config messages tools on-token)"
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
-            [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]
             [im.ttalk.agent.model.error :as errors]))
@@ -181,13 +180,13 @@
         headers (merge {"Authorization" (str "Bearer " api-key)}
                        (:extra-headers config)
                        (:extra-headers opts))
-        ;; opt-in 重试：config 含 :retry 时启用
-        response (retry/maybe-with-retry
-                   config
-                   #(http/post api-url
-                               :headers headers
-                               :body params
-                               :timeout timeout))]
+        ;; 无重试：重试已上移到 ChatModel（`im.ttalk.agent.retry`）。provider
+        ;; 只负责「发这一次请求 + 把失败翻成 canonical error」——两层各 retry
+        ;; 一次会让实际次数变成 m×n，且下层重试对上层的 :on-retry 不可见。
+        response (http/post api-url
+                            :headers headers
+                            :body params
+                            :timeout timeout)]
     (if (:success? response)
       (:body response)
       (errors/throw! (response->error response (:provider-name config))))))

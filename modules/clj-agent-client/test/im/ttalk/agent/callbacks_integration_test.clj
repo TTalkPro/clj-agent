@@ -9,7 +9,7 @@
    5. on-turn-error 触发（max-iterations 超限）
    6. delegate-tool 子 Agent 委派"
   (:require [clojure.test :refer [deftest is testing run-tests]]
-            [im.ttalk.agent.client :as agent]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.subagent.delegate :as delegate]
             [im.ttalk.agent.test-support :as ts]))
