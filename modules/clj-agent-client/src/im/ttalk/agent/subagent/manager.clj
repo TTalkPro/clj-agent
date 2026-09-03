@@ -23,7 +23,31 @@
    {:subagent-config map    — 传给 client/create-agent 的配置
     :prompt          string — 子 agent 的用户输入
     :result-fn       fn?    — (fn [chat-result] -> string)，默认取 :text
-    :owner           any?   — 归属标识，用于 list-agents 过滤}"
+    :owner           any?   — 归属标识，用于 list-agents 过滤
+    :observer        fn?    — 观察者工厂，见下
+    :subagent-name   string — 给观察者看的标签（缺省 \"subagent\"）
+    :task            string — 同上，缺省取 :prompt
+    :parent-tool-call-id string — 同上，发起本次委派的 tool-call id}
+
+   **观察者（`:observer`）——协议无关的观察挂点**
+
+   `(fn [{:keys [id name task owner attempt parent-tool-call-id]}]
+      -> {:decorate :chat-opts :start! :settle!})`
+
+   | 键 | 类型 | 说明 |
+   |---|---|---|
+   | `:decorate`  | `(fn [agent] agent')` | 给子 agent 挂采集（如事件发射）。抛异常 → 用原 agent |
+   | `:chat-opts` | map | 并进子 agent 的 `chat` opts（如 `:on-token`） |
+   | `:start!`    | `(fn [])` | 建 agent 之前 |
+   | `:settle!`   | `(fn [outcome])` | **在 `finally` 里**，故 kill / 超时 / 崩溃三条路径都覆盖得到 |
+
+   三条契约：
+
+   1. **工厂在 worker 线程上调用，每次 spawn 一次**（`restart!` 算新的一次，
+      `:attempt` 递增）——fan-out N 路 = N 个观察者实例，各自独立；
+   2. **四个钩子全可选、各自吞异常**：观察者永远不许改变被观察者的行为；
+   3. 本 ns **不认识任何协议**。AG-UI 那侧（`agui.subagent`）负责把这四个钩子
+      翻译成事件——client 模块不依赖 agui，反向依赖也不存在。"
   (:require [taoensso.timbre :as log])
   (:import [java.util.concurrent ExecutorService Executors Callable]))
 
@@ -49,10 +73,33 @@
 ;;; 工作线程
 ;;; ============================================================
 
+(defn- safe-call
+  "调观察钩子：**吞异常**。观察者不许改变被观察者的行为——一个日志回调抛异常
+   把子 agent 跑挂了，是最难查的那类故障。返回 nil 表示没钩子或钩子炸了。"
+  [f & args]
+  (when f
+    (try (apply f args)
+         (catch Throwable t
+           (log/warn "子 agent 观察钩子抛异常（已兜住，子 agent 不受影响）:" (.getMessage t))
+           nil))))
+
+(defn- observer-of
+  "在 **worker 线程上**造一次观察者。工厂本身抛异常也兜住——没有观察者就当没挂。"
+  [spec id attempt]
+  (when-let [f (:observer spec)]
+    (safe-call f {:id      id
+                  :attempt attempt
+                  :name    (or (:subagent-name spec) "subagent")
+                  :task    (or (:task spec) (:prompt spec))
+                  :owner   (:owner spec)
+                  :parent-tool-call-id (:parent-tool-call-id spec)})))
+
 (defn- do-run
   "在独立线程中创建并运行子 agent，返回 {:ok result-str} 或 {:error reason}。
-   使用延迟 require 避免与 client 的循环依赖（manager 在 client 之后加载）。"
-  [spec]
+   使用延迟 require 避免与 client 的循环依赖（manager 在 client 之后加载）。
+
+   `observer` 可为 nil；非 nil 时它的 `:decorate` / `:chat-opts` 在这里生效。"
+  [spec observer]
   (let [{:keys [subagent-config prompt result-fn]} spec
         rfn (or result-fn :text)]
     (try
@@ -65,7 +112,10 @@
                            :conversation-id (str "sub-" (java.util.UUID/randomUUID))}
                           subagent-config)
             agent  (create-agent config)
-            resp   (chat-fn agent prompt)]
+            ;; :decorate 抛异常 → safe-call 返回 nil → 退回未装饰的 agent。
+            ;; 「观察挂不上」不该等于「子 agent 跑不了」。
+            agent  (or (safe-call (:decorate observer) agent) agent)
+            resp   (chat-fn agent prompt (:chat-opts observer))]
         (if (= :completed (:status resp))
           {:ok (rfn resp)}
           {:error {:status (:status resp) :detail resp}}))
@@ -94,18 +144,28 @@
 
    对照：同一 chat-client 内的 `react/run-on-executor` **必须**用 `bound-fn*`——那是
    边界**内**，同一条原则的另一侧（「边界内一致」）。"
-  [id spec result-promise]
+  [id spec result-promise attempt]
   (.submit ^ExecutorService worker-executor
            ^Callable
            (fn []
-             (try
-               (let [outcome (do-run spec)]
-                 (deliver result-promise outcome)
-                 (finish! id result-promise (if (:ok outcome) :done :failed) outcome))
-               (catch Throwable t
-                 (let [err {:error {:crashed true :message (.getMessage t)}}]
-                   (deliver result-promise err)
-                   (finish! id result-promise :failed err)))))))
+             (let [observer (observer-of spec id attempt)]
+               (try
+                 (safe-call (:start! observer))
+                 (let [outcome (do-run spec observer)]
+                   (deliver result-promise outcome)
+                   (finish! id result-promise (if (:ok outcome) :done :failed) outcome))
+                 (catch Throwable t
+                   (let [err {:error {:crashed true :message (.getMessage t)}}]
+                     (deliver result-promise err)
+                     (finish! id result-promise :failed err)))
+                 (finally
+                   ;; **在 finally 里**：kill 会从调用方线程 deliver {:error :killed} 并
+                   ;; 中断本线程，中断的 unwind 照样跑 finally，于是三条异常路径
+                   ;; （kill / 超时后 kill / 崩溃）都有且只有一次 settle。
+                   ;; promise 此刻必已 deliver（try 的三条出口各自 deliver 过一次），
+                   ;; 0ms 兜底只是不信任「必然」。
+                   (safe-call (:settle! observer)
+                              (deref result-promise 0 {:error :unknown}))))))))
 
 ;;; ============================================================
 ;;; API
@@ -128,9 +188,10 @@
             :result      nil
             :spec        spec
             :owner       (:owner spec)
+            :attempt     0
             :started-at  (now-ms)
             :finished-at nil})
-    (swap! registry update id assoc :future (spawn-worker! id spec p))
+    (swap! registry update id assoc :future (spawn-worker! id spec p 0))
     {:ok id}))
 
 (defn await!
@@ -183,7 +244,10 @@
   "用原 spec 重启子 agent（同 id，状态回 :running）。"
   [id]
   (if-let [entry (get @registry id)]
-    (let [spec (:spec entry)]
+    (let [spec (:spec entry)
+          ;; **换代号**：restart 是同一条委派的另一次尝试，观察者据此把两次区分开
+          ;; （同一个 lane id 开两次，消费方只能把两次尝试叠在一起看）。
+          attempt (inc (or (:attempt entry) 0))]
       (kill! id)
       (let [p (promise)]
         ;; 同 spawn!：先换代（promise/status），后启动 worker
@@ -192,9 +256,10 @@
                 :future      nil
                 :status      :running
                 :result      nil
+                :attempt     attempt
                 :started-at  (now-ms)
                 :finished-at nil})
-        (swap! registry update id assoc :future (spawn-worker! id spec p)))
+        (swap! registry update id assoc :future (spawn-worker! id spec p attempt)))
       {:ok id})
     {:error :not-found}))
 
