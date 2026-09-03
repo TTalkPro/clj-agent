@@ -31,18 +31,24 @@
 | `im.ttalk.agent.agui.emit` | 接线：`on-token` + `:iteration` filter + `:on-llm-result` → 事件 |
 | `im.ttalk.agent.agui.codec` | 中立事件 ⇄ AG-UI 事件、中立消息 → AG-UI 消息、`RunAgentInput` 解析 |
 | `im.ttalk.agent.agui.tools` | AG-UI 前端工具（client-side tool）→ 内联工具 + gate |
-| `im.ttalk.agent.agui.genui` | **可选插件**：Open Generative UI —— 模型直接生成沙箱 UI，参数翻译成 activity 事件（移植自 CopilotKit） |
 | `im.ttalk.agent.agui.a2ui` | **可选插件**：A2UI —— 声明式生成式 UI，模型按 catalog 拼组件树（不执行任意代码） |
 | `im.ttalk.agent.agui.mcp` | **可选插件**：MCP 接入 —— server 的工具进工具表；带 UI 资源的（MCP Apps）额外出 activity |
 
-**零 web 依赖**（`design-principles.md` §2）：订阅是回调，本模块不认识
-Request / Response / SSE 帧。示例见 [`examples/copilotkit/`](../../examples/copilotkit/)：
+**零 web 服务端依赖**（`design-principles.md` §2）：订阅是回调，本模块不做 HTTP
+服务端——不引 ring / http-kit，不认识 Request / Response、不产 SSE 响应帧、不管
+路由与 CORS。那些全在 [`examples/copilotkit/`](../../examples/copilotkit/)：
+
+> **一处要说清的例外**：`agui.mcp` 是**出站**客户端（JSON-RPC over Streamable
+> HTTP），它认 SSE——但只在读 server 响应体这一侧（`parse-sse-body`），传输走
+> JDK 自带的 `java.net.http`（**零新增依赖**），且 `:transport` 可注入，测试用
+> 纯函数、不起服务。
 
 | 文件 | 干什么 |
 |---|---|
 | `agui_example.clj` | 六场景端到端，**离线可跑**（桩 provider + 假 SSE 连接） |
 | `agui_live_test.clj` | 同样六场景，**真实 MiniMax 端点**（需 `MINIMAX_API_KEY`） |
 | `http_kit_routes.clj` | 真路由：四条 CopilotKit v2 端点 + `/suggest` + SSE（`id:` 放 `:seq` = `Last-Event-ID`） |
+| `genui.clj` | **可选插件**：Open Generative UI（`generateSandboxedUi`）——见下节「为什么它不在本模块里」 |
 | `mcp_server_example.clj` | 最小 MCP server（Streamable HTTP），验 `agui.mcp` 客户端那一半 |
 
 ## 用
@@ -96,7 +102,8 @@ Request / Response / SSE 帧。示例见 [`examples/copilotkit/`](../../examples
 {:type :run/error       :error}                 ;; 终态
 {:type :run/resync      :messages}              ;; 落后太多时补的 ChatMemory 快照
 
-;; 下面两条只有装了 agui.genui 插件才会出现（核心路径不发）
+;; 下面两条只有装了 activity 类插件才会出现（核心路径不发）
+;; ——`agui.a2ui`（本模块）或 `examples/copilotkit/genui.clj`
 {:type :activity/snapshot :message-id :activity-type :content}
 {:type :activity/delta    :message-id :activity-type :patch}   ;; JSON Patch
 ```
@@ -121,15 +128,25 @@ Request / Response / SSE 帧。示例见 [`examples/copilotkit/`](../../examples
    把人的决定放在**下一次 run 的 `resume[]`** 里送回来。`/info` 里报
    `humanInTheLoop.interrupts`，标准客户端据此才知道我们支持。
 
-## 可选插件：Open Generative UI
+## Open Generative UI：为什么它不在本模块里
 
-移植自 CopilotKit 的 `open-generative-ui-middleware.ts`。模型调
-`generateSandboxedUi` 生成一块 HTML/CSS/JS，后台**不执行**它——把参数翻译成
-`ACTIVITY_SNAPSHOT` + 一串 `ACTIVITY_DELTA`（JSON Patch），前端在沙箱 iframe
-里边收边渲染。**默认不装**，两个挂点：
+`generateSandboxedUi` 那套东西住在
+[`examples/copilotkit/genui.clj`](../../examples/copilotkit/genui.clj)（`copilotkit.genui`），
+**不是本模块的一部分**（2026-09-03 移出）。
+
+理由是照着上游自己的分层切的：AG-UI 协议层（`@ag-ui/core`）只认
+`ACTIVITY_SNAPSHOT` / `ACTIVITY_DELTA` 这对**通用**事件；而工具名
+`generateSandboxedUi`、活动类型 `open-generative-ui`、那套 JSON Patch 形状，全是
+CopilotKit **Runtime 的一个可选中间件**自己的约定
+（`packages/runtime/src/v2/runtime/open-generative-ui-middleware.ts`，在上游是
+`agent.use(...)` 挂上去的，与 MCP Apps 并列）。
+
+所以：**通用的那半留在模块里**——`agui.codec` 认 activity 事件、`/info` 有
+`openGenerativeUIEnabled` 这个位、`agui.event` 有 `:transform` 这个挂点；
+**约定的那半是一份示例**，照抄改写即可（`design-principles.md` §2）。
 
 ```clojure
-(require '[im.ttalk.agent.agui.genui :as genui]
+(require '[copilotkit.genui :as genui]          ;; 需要 examples 在 classpath（-M:copilotkit）
          '[im.ttalk.agent.agui.runtime :as rt]
          '[im.ttalk.agent.agui.tools :as tools])
 
@@ -138,6 +155,29 @@ Request / Response / SSE 帧。示例见 [`examples/copilotkit/`](../../examples
 ;; 再把 `/info` 的 openGenerativeUIEnabled 报 true（codec/run-info 的
 ;; :open-generative-ui? 选项），前端才会注册它那半边的 renderer
 ```
+
+> **A2UI 与 MCP 留在模块里**：A2UI 有自己的外部规范（`a2ui.clj` 里的 catalog id
+> 指向 `a2ui.org/specification/v0_9/...`）、MCP 是跨框架的工具接入协议，两者都不绑
+> 某一个前端 runtime 的中间件实现。这条线以后要再切，判据同上：**协议认不认**。
+>
+> 结构上它们与 genui 同形——**叶子插件**：只依赖 cheshire / clojure.string /
+> timbre / JDK，模块内没有任何 ns require 它们，接入只走两个通用挂点
+> （`with-tool(s)` 产 agent 配置、`event-transform` 产中立事件，连 `agui.event`
+> 都不 require）。所以哪天要移出，成本与 genui 相同。
+
+## 两个插件能力位（`/info`）
+
+`codec/run-info` 报两位，**都是线上字段，值由调用方给**：
+
+| 位 | 谁读 | 不报的后果 |
+|---|---|---|
+| `openGenerativeUIEnabled` | `agent-registry.ts` → `CopilotKitProvider` | 前端不注册沙箱 UI 的 renderer |
+| `a2uiEnabled` + `a2ui {enabled}` | 同上（`a2uiInfo?.enabled ?? a2uiEnabled ?? false`） | `a2uiActive` 只剩「前端自己传了 catalog」这一条路 |
+
+A2UI 那位**发扁平位也发对象**：对象是上游新的真相源，扁平位是老客户端的兼容位。
+对象里**不带 `agents`**——那是「A2UI 只对某几个 agent 生效」的按 agent 限定，
+而我们的 a2ui 是 runtime 级的 `:event-transform`，对所有 agent 一视同仁，
+客户端把缺省的 `agents` 正好解释成「对每个 agent 都生效」。
 
 `/threads*` 是**只读面**：线程列表来自会话注册表、消息来自 ChatMemory、事件来自
 环形缓冲——没有第二套存储。两条边界：会话空闲 30 分钟被驱逐后就不在列表里
