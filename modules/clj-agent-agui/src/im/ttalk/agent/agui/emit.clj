@@ -14,7 +14,8 @@
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model.message :as msg]
-            [im.ttalk.agent.model.response :as response]))
+            [im.ttalk.agent.model.response :as response]
+            [im.ttalk.agent.pause :as pause]))
 
 (set! *warn-on-reflection* true)
 
@@ -33,9 +34,18 @@
                    (seq (:writes m)) (assoc :writes (:writes m))))))
 
 (defn- emit-state!
-  "状态槽快照。`:conversation-id` 是循环自己钉上去的路由键，不算业务状态。"
+  "状态槽快照。两类东西不发：
+
+   1. **框架键**（`ctx/framework-keys`）——`:conversation-id` 是循环自己钉的路由键，
+      `:tool/call-id` 是工具调用侧钉的，都不算业务状态；
+   2. **不可 EDN 往返的值**——ToolContext 本来就允许装活对象（`pause/strip-unserializable`
+      存在的全部理由就是「混进 `:chat-client` 这类活对象是正常的」）。把它整块发出去，
+      到 JSON 编码那一步会当场抛，而那时已经在 SSE 流中间了。这里滤掉比在传输层炸掉好。"
   [em context]
-  (let [state (dissoc context :conversation-id)]
+  (let [state (into {} (remove (fn [[k v]]
+                                 (or (contains? ctx/framework-keys k)
+                                     (not (pause/edn-safe? v)))))
+                    context)]
     (when (seq state)
       (event/emit! em :state/snapshot {:state state}))))
 
@@ -68,7 +78,9 @@
    :iteration
    (fn [req chain]
      (emit-tool-results! em (:messages req))
-     (event/begin-message! em (str (:run-id em) "-m" (:index req)))
+     ;; 消息 id 按 **lane** 分道：lane 共用父 run 的 run-id，拿 run-id 打头会让两条
+     ;; 并发 lane 的第 0 轮撞成同一个 message-id（契约 4）。
+     (event/begin-message! em (str (or (event/lane-id em) (:run-id em)) "-m" (:index req)))
      (flt/fmap (chain req)
                (fn [res]
                  (when-let [msgs (or (:messages res) (:direct-messages res)
