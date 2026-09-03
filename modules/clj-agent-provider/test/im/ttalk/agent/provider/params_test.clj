@@ -2,7 +2,8 @@
   "build-params 提示词控制 / 缓存集成单测（Anthropic + OpenAI 兼容）"
   (:require [clojure.test :refer [deftest testing is]]
             [im.ttalk.agent.provider.anthropic :as anthropic]
-            [im.ttalk.agent.provider.common.openai-compat :as compat]))
+            [im.ttalk.agent.provider.common.openai-compat :as compat]
+            [im.ttalk.agent.provider.schema.anthropic :as schema-anthropic]))
 
 ;; build-params 在 anthropic 命名空间是私有的，用 var 取出
 (def anthropic-build-params #'anthropic/build-params)
@@ -193,3 +194,45 @@
     (let [p (compat/build-params {:model "gpt-4"} [{:role "user" :content "hi"}] [])]
       (is (not (contains? p :modalities)))
       (is (not (contains? p :audio))))))
+
+;;; ============================================================
+;;; 工具去重（2026-09-03 真机验证暴露的老 bug）
+;;; ============================================================
+
+(def ^:private merge-tools #'anthropic/merge-tools)
+
+(deftest anthropic-tools-deduped-test
+  (testing "config 里的 tools 与本次调用的 schema 是同一批时，只发一份"
+    ;; chat-model/build-call-config 把本次调用的 tools **同时** assoc 进 config
+    ;; 并作为第三个参数传下来，所以这两个来源拿到的是同一批工具。
+    (let [schemas [{:name "get-weather" :description "查天气"
+                    :input_schema {:type "object" :properties {:city {:type "string"}}}}]
+          p (anthropic-build-params {:model "m" :max-tokens 16 :tools schemas}
+                                    [] schemas)]
+      (is (= 1 (count (:tools p))) "不是两份")
+      (is (= "get-weather" (:name (first (:tools p)))))))
+
+  (testing "内联工具的 :parameters 形态两边都归一化成 :input_schema"
+    ;; 这正是踩雷的形状：AG-UI 前端 action 的 schema 是 :parameters；
+    ;; config 那份此前不过归一化，直接发出去被判「function parameters is empty」
+    (let [inline [{:name "confirm-dialog" :description "弹确认框"
+                   :parameters {:type "object" :properties {:title {:type "string"}}}}]
+          normalized (schema-anthropic/tools->schemas inline)
+          p (anthropic-build-params {:model "m" :max-tokens 16 :tools inline}
+                                    [] normalized)]
+      (is (= 1 (count (:tools p))))
+      (is (contains? (first (:tools p)) :input_schema))
+      (is (not (contains? (first (:tools p)) :parameters)))))
+
+  (testing "config 里预置的 wire 工具（web_search）与本次调用的 schema 并存"
+    (let [wire [{:type "web_search_20250305" :name "web_search"}]
+          schemas [{:name "get-weather" :description "查天气"
+                    :input_schema {:type "object" :properties {}}}]
+          p (anthropic-build-params {:model "m" :max-tokens 16 :tools wire} [] schemas)]
+      (is (= ["web_search" "get-weather"] (mapv :name (:tools p))))
+      (is (= "web_search_20250305" (:type (first (:tools p)))) "wire 工具原样透传")))
+
+  (testing "merge-tools 直接单测：同名只留一份，无名的照收"
+    (is (= 1 (count (merge-tools [{:name "a" :input_schema {}}] [{:name "a" :input_schema {}}]))))
+    (is (= 2 (count (merge-tools [{:name "a" :input_schema {}}] [{:name "b" :input_schema {}}]))))
+    (is (= 2 (count (merge-tools [{:type "web_search_20250305"}] [{:name "b" :input_schema {}}]))))))

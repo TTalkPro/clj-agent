@@ -336,6 +336,31 @@
     :none {:type "none"}
     tc))
 
+(defn- merge-tools
+  "把 config 里**预置的 wire 工具**（`web_search` 一类）与本次调用下发的 schema
+   合成一份，**按 `:name` 去重**，且两边都过一遍归一化。
+
+   **为什么要去重**（2026-09-03 真机验证时暴露的老 bug）：
+   `chat-model/build-call-config` 把本次调用的 tools **同时**
+   (a) `assoc` 进 config、(b) 作为第三个参数传给 `call-llm`。于是这里两个来源
+   拿到的是**同一批工具**——不去重就是每个工具发两遍。
+
+   一直没人发现，是因为 `deftool` 产出的 schema 自带 `:input_schema`，两份都是
+   合法 wire 形态，服务端照收（只是白烧 token、且模型看见重复工具）。直到内联
+   工具出现——AG-UI 前端 action 的 schema 是 `:parameters` 形态，config 里那份
+   **没经过归一化**，MiniMax 当场 400「invalid params, function parameters is
+   empty (2013)」。
+
+   OpenAI 兼容那条路只读第三个参数（`common/openai_compat` 的 build-params），
+   从来没有这个问题——本函数是把 Anthropic 这条路拉回同一个语义。"
+  [config-tools tool-schemas]
+  (reduce (fn [acc t]
+            (if (and (:name t) (some #(= (:name %) (:name t)) acc))
+              acc
+              (conj acc t)))
+          (vec (schema/tools->schemas (vec config-tools)))
+          tool-schemas))
+
 (defn- build-params
   "构建 Anthropic API 请求参数
 
@@ -356,7 +381,7 @@
   [{:keys [model max-tokens system-prompt tool-choice tools
            temperature top-p top-k stop metadata thinking service-tier container
            cache-strategy cache-ttl]} messages tool-schemas]
-  (let [all-tools (into (vec tools) tool-schemas)
+  (let [all-tools (merge-tools tools tool-schemas)
         max-tokens (or max-tokens 4096)
         params (cond-> {:model model
                         :max_tokens max-tokens
