@@ -146,3 +146,182 @@
               :reasoning/ended :message/ended]
              (mapv :type @out)))
       (is (= 2 (count (filter #(= :reasoning/started (:type %)) @out)))))))
+
+;;; ============================================================
+;;; 子 agent lane（docs/subagent-event-attribution-design.md §3.3）
+;;; ============================================================
+
+(defn- run-emitter
+  "带取号器与出口的 run 发射器。返回 {:em :out :n}——`:n` 是**取号水位**，
+   「被吞掉的事件不占号」这条断言全靠它。"
+  []
+  (let [out (atom [])
+        n   (atom -1)]
+    {:em (event/emitter {:run-id "r1" :conversation-id "c1"
+                         :next-seq #(swap! n inc)
+                         :sink #(swap! out conj %)
+                         :now (constantly 1000)})
+     :out out
+     :n n}))
+
+(defn- types-of [out] (mapv :type @out))
+
+(deftest lane-tags-every-event-test
+  (testing "lane 发出的每条事件都带归属；父 run 自己的不带"
+    (let [{:keys [em out]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/emit! em :run/started {})
+      (event/start-subagent! lane {:name "research_agent" :task "查一下"})
+      (event/begin-message! lane "sa-1-m0")
+      (event/emit-token! lane :token "事实一")
+      (event/finish-subagent! lane {:outcome :success})
+      (let [[parent & lane-evs] @out]
+        (is (nil? (:subagent-run-id parent)) "run 的发射器无 tag")
+        (is (every? #(= "sa-1" (:subagent-run-id %)) lane-evs))
+        (is (every? #(= "r1" (:run-id %)) @out) "lane 仍属于父 run")
+        (is (every? #(= "c1" (:conversation-id %)) @out)))
+      (is (= [:run/started :subagent/started :message/started :message/delta
+              :message/ended :subagent/finished]
+             (types-of out)))
+      (is (= "research_agent" (:name (second @out))))
+      (is (= "查一下" (:task (second @out)))))))
+
+(deftest lane-shares-session-seq-test
+  (testing "契约 1：父 run 与两条 lane 交错发事件，:seq 仍单调无洞、无重号"
+    (let [{:keys [em out]} (run-emitter)
+          a (event/subagent-emitter em {:subagent-run-id "sa-a"})
+          b (event/subagent-emitter em {:subagent-run-id "sa-b"})]
+      (event/emit! em :run/started {})
+      (event/start-subagent! a {:name "a"})
+      (event/start-subagent! b {:name "b"})
+      (event/begin-message! a "sa-a-m0")
+      (event/begin-message! b "sa-b-m0")
+      (event/emit-token! a :token "a1")
+      (event/emit-token! b :token "b1")
+      (event/emit-token! a :token "a2")
+      (event/finish-subagent! a {:outcome :success})
+      (event/finish-subagent! b {:outcome :success})
+      (event/finish! em :run/finished {:text "done"})
+      (is (= (range (count @out)) (map :seq @out)))
+      (is (event/terminal? (last @out)) "终态仍是最后一条")
+      (is (= 1 (count (filter event/terminal? @out))) "lane 的收尾不算 run 终态"))))
+
+(deftest lane-silenced-after-run-terminal-test
+  (testing "契约 2：父 run 终态之后，lane 的事件被整条吞掉，且**不占号**"
+    (let [{:keys [em out n]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/emit! em :run/started {})
+      (event/finish! em :run/finished {:text "父 run 先跑完了"})
+      (let [water @n
+            tail  (count @out)]
+        (event/start-subagent! lane {:name "迟到的子 agent"})
+        (event/begin-message! lane "sa-1-m0")
+        (event/emit-token! lane :token "没人听得见")
+        (event/finish-subagent! lane {:outcome :success})
+        (is (= tail (count @out)) "一条都没漏出去")
+        (is (= water @n) "被吞掉的事件不占号——在 sink 里丢会留下永远补不回来的 seq 洞")
+        (is (= 4 (event/silenced-count lane))
+            "started + message/started + message/delta + finished，逐条计数。
+             收尾时补关的 message/ended 不在里面——记账也在 deliver! 里，
+             被吞掉的事件从没进过开集合，close-open! 于是无事可补")
+        (is (zero? (event/drops lane)) "silenced 与 drops 是两码事")
+        (is (= :run/finished (:type (last @out))))))))
+
+(deftest lane-isolation-test
+  (testing "契约 4：一条 lane 一个发射器实例，交错的 token 不进同一条消息"
+    (let [{:keys [em out]} (run-emitter)
+          a (event/subagent-emitter em {:subagent-run-id "sa-a"})
+          b (event/subagent-emitter em {:subagent-run-id "sa-b"})]
+      (event/begin-message! a "sa-a-m0")
+      (event/begin-message! b "sa-b-m0")
+      (event/emit-token! a :token "甲一")
+      (event/emit-token! b :token "乙一")
+      (event/emit-token! a :token "甲二")
+      (event/end-message! a)
+      (event/end-message! b)
+      (let [by-lane (group-by :subagent-run-id @out)]
+        (is (= #{"sa-a" "sa-b"} (set (keys by-lane))))
+        (is (= [:message/started :message/delta :message/delta :message/ended]
+               (mapv :type (by-lane "sa-a"))))
+        (is (= [:message/started :message/delta :message/ended]
+               (mapv :type (by-lane "sa-b"))))
+        (is (apply = "sa-a-m0" (map :message-id (by-lane "sa-a"))))
+        (is (apply = "sa-b-m0" (map :message-id (by-lane "sa-b"))))))))
+
+(deftest lane-nesting-test
+  (testing "嵌套 lane 带上父 lane 的 id"
+    (let [{:keys [em out]} (run-emitter)
+          outer (event/subagent-emitter em {:subagent-run-id "sa-1"})
+          inner (event/subagent-emitter outer {:subagent-run-id "sa-2"})]
+      (event/start-subagent! outer {:name "analyst"})
+      (event/start-subagent! inner {:name "researcher"})
+      (let [[o i] @out]
+        (is (nil? (:parent-subagent-run-id o)))
+        (is (= "sa-1" (:parent-subagent-run-id i)))
+        (is (= "sa-2" (:subagent-run-id i))))))
+
+  (testing "外层 lane 收口后，内层也闭嘴——守卫要递归查祖先，只看一级会漏在终态之后"
+    (let [{:keys [em out n]} (run-emitter)
+          outer (event/subagent-emitter em {:subagent-run-id "sa-1"})
+          inner (event/subagent-emitter outer {:subagent-run-id "sa-2"})]
+      (event/finish-subagent! outer {:outcome :success})
+      (let [tail (count @out) water @n]
+        (event/start-subagent! inner {:name "迟到的孙子"})
+        (is (= tail (count @out)))
+        (is (= water @n)))))
+
+  (testing "父 run 终态后，隔了一层的内层 lane 同样闭嘴"
+    (let [{:keys [em out]} (run-emitter)
+          outer (event/subagent-emitter em {:subagent-run-id "sa-1"})
+          inner (event/subagent-emitter outer {:subagent-run-id "sa-2"})]
+      (event/finish! em :run/finished {})
+      (let [tail (count @out)]
+        (event/emit! inner :subagent/started {:name "x"})
+        (is (= tail (count @out)) "外层 lane 还没收口，但 run 收了——祖先链上任意一个终态都算")))))
+
+(deftest finish-subagent-test
+  (testing "lane 收尾：补关自己开着的块，发一条收尾事件，幂等"
+    (let [{:keys [em out]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/begin-message! lane "sa-1-m0")
+      (event/emit-token! lane :token "半句")
+      (event/emit! lane :tool/started {:tool-call-id "tc1" :name "search"})
+      (event/finish-subagent! lane {:outcome :success})
+      (event/finish-subagent! lane {:outcome :killed})
+      (is (= [:message/started :message/delta :tool/started
+              :message/ended :tool/ended :tool/result :subagent/finished]
+             (types-of out)))
+      (is (= :success (:outcome (last @out))))
+      (is (false? (event/terminal? (last @out)))
+          "lane 的收尾不是 run 的终态——它必须过 transform，才受父 run 守卫的管")
+      (is (re-find #"子 agent" (:content (first (filter #(= :tool/result (:type %)) @out))))
+          "合成的工具结果说的是子 agent 没跑完，不是 run 没跑完")))
+
+  (testing "失败走 :subagent/error，带 canonical error"
+    (let [{:keys [em out]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/finish-subagent! lane {:error {:class :provider-error :message "boom"}})
+      (is (= [:subagent/error] (types-of out)))
+      (is (= :provider-error (get-in (last @out) [:error :class])))
+      (is (= "sa-1" (:subagent-run-id (last @out))))))
+
+  (testing "kill / timeout 走 :outcome，不伪装成成功"
+    (let [{:keys [em out]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/finish-subagent! lane {:outcome :killed})
+      (is (= :killed (:outcome (last @out)))))))
+
+(deftest lane-emitter-never-throws-test
+  (testing "§6.3 照旧：lane 的 sink 抛异常被兜住，且不吃号"
+    (let [n (atom -1)
+          calls (atom 0)
+          em (event/emitter {:run-id "r1" :conversation-id "c1"
+                             :next-seq #(swap! n inc)
+                             :sink (fn [_] (swap! calls inc) (throw (ex-info "炸" {})))
+                             :now (constantly 0)})
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (is (some? (event/start-subagent! lane {:name "x"})))
+      (event/finish-subagent! lane {:outcome :success})
+      (is (= 2 @calls))
+      (is (= 2 (event/drops lane)))
+      (is (= 1 @n)))))

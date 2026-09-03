@@ -52,9 +52,14 @@
    返回一个 map（内部状态在 atom 里）。**停止意图挂在这里而不是会话上**：
    `stop!` 与 supersede 改的都是**被停的那个 run** 自己的 holder，否则新 run 一
    重置共享标志，被替换掉的旧 run 收尾时就会把自己标成 error——CopilotKit 的
-   `RunFinalizeControl` 修的正是这个（§2.1 第 4 条）。"
-  [{:keys [run-id conversation-id next-seq sink now transform]}]
+   `RunFinalizeControl` 修的正是这个（§2.1 第 4 条）。
+
+   - :tag              可选。**merge 进本发射器发出的每一条事件**（`m` 优先）。
+                       子 agent lane 的归属字段就是这么打上去的，见
+                       `subagent-emitter`；run 自己的发射器不带 tag。"
+  [{:keys [run-id conversation-id next-seq sink now transform tag]}]
   {:run-id run-id
+   :tag tag
    :conversation-id conversation-id
    :next-seq next-seq
    :sink sink
@@ -82,6 +87,16 @@
   "本 run 是否已经产出过任何文本（流式 token 或整块补发都算）。"
   [em] (:any-text? @(:state em)))
 (defn drops [em] (:drops @(:state em)))
+
+(defn silenced?
+  "本发射器是否该闭嘴了——自己已有终态，或**任一祖先**（父 lane / 父 run）已有终态。
+
+   只有 lane 会有祖先（`:parent`）。递归而不是只看直接父级：两层委派下，run 收口时
+   内层 lane 的直接父级（外层 lane）可能还没收口，只看一级就会让内层的事件漏在
+   `RUN_FINISHED` 之后——契约 2「终态是该 run 的最后一条」当场破。"
+  [em]
+  (boolean (or (terminal-of em)
+               (when-let [p (:parent em)] (silenced? p)))))
 
 (defn- track!
   "按事件类型维护开集合。纯内部记账，不产生事件。"
@@ -137,6 +152,7 @@
                      :run-id (:run-id em)
                      :conversation-id (:conversation-id em)
                      :ts ((:now em))}
+                    (:tag em)          ;; lane 归属（run 的发射器无 tag，merge 空 map）
                     m)]
     (reduce (fn [_ ev] (deliver! em ev)) nil (expand em base))))
 
@@ -247,9 +263,10 @@
         (emit! em :tool/ended {:tool-call-id tid}))
       (emit! em :tool/result
              {:tool-call-id tid
-              :content (if stopped?
-                         "工具调用未完成：run 已被停止"
-                         "工具调用未完成：run 在结束前没有产出结果")
+              :content (let [noun (if (:tag em) "子 agent" "run")]
+                         (if stopped?
+                           (str "工具调用未完成：" noun " 已被停止")
+                           (str "工具调用未完成：" noun " 在结束前没有产出结果")))
               :synthetic true
               :error {:class (if stopped? :cancelled :provider-error)
                       :message (if stopped? "stop_requested" "missing_terminal_event")}}))))
@@ -262,3 +279,87 @@
   (when-not (terminal-of em)
     (close-open! em (not= :run/paused type))
     (emit! em type m)))
+
+;;; ============================================================
+;;; 子 agent lane
+;;; ============================================================
+;;;
+;;; 一条 lane = 一个子 agent 的一次运行（docs/subagent-event-attribution-design.md）。
+;;; 它**寄生在父 run 的事件流里**：共用会话取号器与 sink，但自带一份状态。
+;;;
+;;; 三条契约怎么继续成立：
+;;;   1. `:seq` 无洞 —— 共用 `:next-seq`（会话锁在 runtime 那侧）；
+;;;   2. 恰好一个终态且在最后 —— lane **永不发 `:run/*`**，且父 run 一旦终态，
+;;;      lane 的事件在 **`:transform` 里**（`deliver!` 取号之前）被整条吞掉。
+;;;      **不能在 sink 里丢**：那时号已经取过，会留下一个永远补不回来的 seq 洞；
+;;;   3. 永不抛 —— 沿用同一条 `deliver!` 路径。
+;;;
+;;; 第四条是 lane 自己的：**一条 lane 一个发射器实例**。10 路并发共用一个实例会
+;;; 共用 `:current-message`，token 于是交错进同一条消息（上游实测过这个现象）。
+
+(defn subagent-emitter
+  "给 `parent`（run 的发射器，或另一条 lane）派生一条 lane 的发射器。
+
+   `:transform` 槽被终态守卫占用，所以 lane **不接插件**——插件 transform 是按 run
+   现造的有状态对象，多条 lane 共用一个实例，它记的「这一轮见过哪些 tool-call」会被
+   交错的 lane 污染。"
+  [parent {:keys [subagent-run-id]}]
+  (let [silenced (atom 0)
+        parent-tag (get-in parent [:tag :subagent-run-id])]
+    (assoc (emitter
+            {:run-id          (:run-id parent)          ;; lane 仍属于父 run
+             :conversation-id (:conversation-id parent)
+             :next-seq        (:next-seq parent)        ;; 契约 1
+             :sink            (:sink parent)
+             :now             (:now parent)
+             :transform       (fn [ev]
+                                (if (silenced? parent)
+                                  (do (swap! silenced inc) [])
+                                  [ev]))
+             :tag             (cond-> {:subagent-run-id subagent-run-id}
+                                parent-tag (assoc :parent-subagent-run-id parent-tag))})
+           :parent parent
+           :silenced silenced)))
+
+(defn lane-id
+  "本发射器的 lane id；run 自己的发射器为 nil。消息 id 要靠它分道（契约 4）。"
+  [em] (get-in em [:tag :subagent-run-id]))
+
+(defn silenced-count
+  "本 lane 因父 run（或祖先 lane）已终态而被吞掉的事件数。
+
+   与 `drops`（sink 抛异常）分开计：一个是「出口坏了」，一个是「说话的时机过了」，
+   排查时是两码事。"
+  [em] (some-> (:silenced em) deref))
+
+(defn start-subagent!
+  "lane 的开场。`:subagent-run-id` 由 tag 自动带上，这里只补 lane 特有的字段。
+
+   `parent-tool-call-id` 由委派工具从 ToolContext 的 `:tool/call-id` 取
+   （`react/invoke-one` 钉的）。同一批里几个委派并发时，这是唯一能把 lane 挂回
+   正确那张工具卡片的依据——从「开着的工具」里猜，多路并发下必然挂错。
+   协议里它是可选字段，取不到就空着。"
+  [em {:keys [name task parent-tool-call-id]}]
+  (emit! em :subagent/started
+         (cond-> {}
+           name                (assoc :name name)
+           task                (assoc :task task)
+           parent-tool-call-id (assoc :parent-tool-call-id parent-tool-call-id))))
+
+(defn finish-subagent!
+  "lane 收尾的**唯一出口**，幂等：补关 lane 自己开着的块，再发一条收尾事件。
+
+   `m` = `{:outcome :success | :killed | :timeout}` 或 `{:error <canonical error>}`。
+   有 `:error` 走 `:subagent/error`，否则走 `:subagent/finished`。
+
+   **这两个类型都不进 `terminal-types`**：那个集合是 run 的终态，`expand` 靠它决定
+   「终态不过 transform」。lane 的收尾必须过 transform——它得受父 run 终态守卫的管，
+   否则父 run 收口之后还能补出一条 `SUBAGENT_FINISHED`。这里的幂等靠自己标记。"
+  [em {:keys [outcome error]}]
+  (when-not (terminal-of em)
+    (close-open! em true)
+    (if error
+      (emit! em :subagent/error {:error error})
+      (emit! em :subagent/finished {:outcome (or outcome :success)}))
+    (swap! (:state em) assoc :terminal (if error :subagent/error :subagent/finished))
+    nil))
