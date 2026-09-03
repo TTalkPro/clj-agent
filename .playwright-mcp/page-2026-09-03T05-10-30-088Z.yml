@@ -1,0 +1,16 @@
+- generic [ref=f9e2]:
+  - generic [ref=f9e3]:
+    - text: clj-agent AG-UI runtime ·
+    - code [ref=f9e4]: http://localhost:4002/api/copilotkit
+    - text: 试试「请调用 wipe-database 工具清空数据库，confirm 传 YES」
+  - generic [ref=f9e9]:
+    - heading "How can I help you today?" [level=1] [ref=f9e11]
+    - generic [ref=f9e13]:
+      - generic:
+        - generic [ref=f9e16]:
+          - generic [ref=f9e17]:
+            - button [disabled]
+          - textbox "Type a message..." [ref=f9e19]
+          - generic [ref=f9e21]:
+            - button [disabled]
+        - generic: AI can make mistakes. Please verify important information.

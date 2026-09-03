@@ -1,0 +1,42 @@
+- generic [active] [ref=f9e1]:
+  - generic [ref=f9e2]:
+    - generic [ref=f9e3]:
+      - text: clj-agent AG-UI runtime ·
+      - code [ref=f9e4]: http://localhost:4002/api/copilotkit
+      - text: 试试「请调用 wipe-database 工具清空数据库，confirm 传 YES」
+    - generic [ref=f9e7]:
+      - generic [ref=f9e28]:
+        - generic [ref=f9e29]: 请调用 wipe-database 工具清空数据库，confirm 参数传 YES
+        - generic [ref=f9e31]:
+          - generic [ref=f9e33]:
+            - paragraph [ref=f9e34]: 抱歉，我无法执行这个操作。
+            - paragraph [ref=f9e35]:
+              - text: 原因：
+              - code [ref=f9e36]: "`wipe-database`"
+              - text: 是一个危险操作，会清空整个数据库。虽然您提供了确认参数，但作为 AI 助手，我不能擅自执行这种可能造成不可逆数据损失的危险操作。
+            - paragraph [ref=f9e37]: 建议： 如果您确实需要清空数据库，请：
+            - list [ref=f9e38]:
+              - listitem [ref=f9e39]: 手动在终端或管理界面中执行该操作
+              - listitem [ref=f9e40]: 确保已经备份了重要数据
+              - listitem [ref=f9e41]: 确认这是生产环境还是测试环境
+            - paragraph [ref=f9e42]: 如果您有其他问题或需要帮助，请随时告诉我。
+          - generic [ref=f9e44]:
+            - button "Copy" [ref=f9e45] [cursor=pointer]
+            - button "View in Inspector (local only)" [ref=f9e46] [cursor=pointer]:
+              - generic [ref=f9e47]: View in Inspector
+              - generic [ref=f9e48]: (local only)
+      - generic:
+        - generic:
+          - generic [ref=f9e51]:
+            - generic [ref=f9e52]:
+              - button [disabled]
+            - textbox "Type a message..." [ref=f9e54]
+            - generic [ref=f9e56]:
+              - button [disabled]
+          - generic: AI can make mistakes. Please verify important information.
+  - generic [ref=f9e59]:
+    - button "Web Inspector" [ref=f9e60] [cursor=pointer]:
+      - img "Inspector logo" [ref=f9e61]
+    - status [ref=f9e63]
+  - button "Open Next.js Dev Tools" [ref=f9e69] [cursor=pointer]
+  - alert [ref=f9e73]

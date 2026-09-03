@@ -1,0 +1,29 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+            "clojars" {:url "https://repo.clojars.org/"}}
+
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        ;; 内部依赖 —— core（事件里的 canonical error / 中立消息 / 取消令牌）
+        im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
+        ;; 内部依赖 —— client（simple-agent / memory / pause：runtime 驱动的就是它）
+        im.ttalk/clj-agent-client {:local/root "../clj-agent-client"}
+
+        ;; JSON —— 只用在 codec 的两处「AG-UI 要求内嵌 JSON 字符串」的字段
+        ;; （TOOL_CALL_ARGS.delta）。协议知识本就该和编解码待在一起。
+        cheshire/cheshire {:mvn/version "5.12.0"}
+
+        ;; 日志
+        com.taoensso/timbre {:mvn/version "6.3.0"}}
+
+ ;; 注意：**零 web 依赖**（design-principles §2）。SSE 帧 / 路由 / CORS / 鉴权
+ ;; 一律在 examples/copilotkit/，不进本模块。
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]
+        :extra-deps {nrepl/nrepl {:mvn/version "1.0.0"}
+                     cider/cider-nrepl {:mvn/version "0.30.0"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}
