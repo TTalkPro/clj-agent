@@ -358,25 +358,38 @@
    （`interrupts`：`RUN_FINISHED outcome=interrupt` + 收 `resume[]`）。
    **`approveWithEdits` 不报**——改参数再执行我们还没实现，不谎报。"
   ([agent-ids] (run-info agent-ids nil))
-  ([agent-ids {:keys [version descriptions capabilities open-generative-ui? suggestions?]}]
-   {:version (or version "clj-agent-agui/0.3")
-    :mode "sse"
-    :agents (into {}
-                  (map (fn [id]
-                         [id {:name id
-                              :className "CljAgent"
-                              :description (get descriptions id "")
-                              :capabilities (or capabilities
-                                                {:humanInTheLoop {:supported true
-                                                                  :approvals true
-                                                                  :interrupts true}})}]))
-                  agent-ids)
-    :audioFileTranscriptionEnabled false
-    ;; 报 true 客户端才会走 `/suggest` 那条无状态路；报 false（或不报）它就把
-    ;; `copilotkitSuggest` 塞进 `/run` 的 tools 里自己凑合——那条路会把会话卡死
-    ;; （设计文档 §9.10 第 5 条）
-    :suggestions (boolean suggestions?)
-    ;; 装了 `agui.genui` 插件才报 true——前端据此才会渲染沙箱 UI（并注册它那半边
-    ;; 的 renderer）。不装就是 false，这条与「不谎报能力位」同源
-    :openGenerativeUIEnabled (boolean open-generative-ui?)
-    :telemetryDisabled true}))
+  ([agent-ids {:keys [version descriptions capabilities open-generative-ui? a2ui?
+                      suggestions?]}]
+   (cond->
+    {:version (or version "clj-agent-agui/0.3")
+     :mode "sse"
+     :agents (into {}
+                   (map (fn [id]
+                          [id {:name id
+                               :className "CljAgent"
+                               :description (get descriptions id "")
+                               :capabilities (or capabilities
+                                                 {:humanInTheLoop {:supported true
+                                                                   :approvals true
+                                                                   :interrupts true}})}]))
+                   agent-ids)
+     :audioFileTranscriptionEnabled false
+     ;; 报 true 客户端才会走 `/suggest` 那条无状态路；报 false（或不报）它就把
+     ;; `copilotkitSuggest` 塞进 `/run` 的 tools 里自己凑合——那条路会把会话卡死
+     ;; （设计文档 §9.10 第 5 条）
+     :suggestions (boolean suggestions?)
+     ;; 装了 Open Generative UI 插件（`examples/copilotkit/genui.clj`）才报 true——
+     ;; 前端据此才会渲染沙箱 UI（并注册它那半边的 renderer）。不装就是 false，
+     ;; 这条与「不谎报能力位」同源
+     :openGenerativeUIEnabled (boolean open-generative-ui?)
+     ;; A2UI 同理（插件是本模块的 `agui.a2ui`）。**扁平位与对象都要发**：客户端读的是
+     ;; `a2uiInfo?.enabled ?? a2uiEnabled ?? false`（`agent-registry.ts:1351`）——
+     ;; 扁平那个是给老客户端的兼容位，对象那个才是新的真相源
+     :a2uiEnabled (boolean a2ui?)
+     :telemetryDisabled true}
+
+     ;; 对象只在开着时发，与上游一致。**不带 `agents`**——那是「A2UI 只对某几个
+     ;; agent 生效」的按 agent 限定（上游 #5369），而我们的 a2ui 是 runtime 级的
+     ;; `:event-transform`，对所有 agent 一视同仁；客户端把缺省的 `agents` 解释成
+     ;; 「对每个 agent 都生效」（`agent-registry.ts:249`），正是这个意思
+     a2ui? (assoc :a2ui {:enabled true}))))

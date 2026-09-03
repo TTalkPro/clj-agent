@@ -155,7 +155,30 @@
           "改参数再执行还没实现")
       (is (nil? (:inspectorMetadata info)))
       (is (nil? (:intelligence info)))
-      (is (false? (:suggestions info))))))
+      (is (false? (:suggestions info))))
+
+    (testing "插件能力位缺省全 false，且不发 a2ui 对象"
+      (is (false? (:openGenerativeUIEnabled info)))
+      (is (false? (:a2uiEnabled info)))
+      (is (nil? (:a2ui info))))))
+
+(deftest plugin-capability-flags-test
+  (testing "A2UI 开着时**扁平位与对象都发**——客户端读的是
+            `a2uiInfo?.enabled ?? a2uiEnabled ?? false`（agent-registry.ts:1351），
+            对象是新的真相源，扁平位是老客户端的兼容位"
+    (let [info (codec/run-info ["default"] {:a2ui? true})]
+      (is (true? (:a2uiEnabled info)))
+      (is (= {:enabled true} (:a2ui info)))
+      (is (nil? (get-in info [:a2ui :agents]))
+          "不带 agents = 对每个 agent 都生效（agent-registry.ts:249）——
+           我们的 a2ui 是 runtime 级的 event-transform，本来就没有按 agent 限定")))
+
+  (testing "两个插件位互不影响：装一个不会把另一个也报成 true"
+    (is (false? (:a2uiEnabled (codec/run-info ["default"] {:open-generative-ui? true}))))
+    (is (false? (:openGenerativeUIEnabled (codec/run-info ["default"] {:a2ui? true}))))
+    (let [both (codec/run-info ["default"] {:a2ui? true :open-generative-ui? true})]
+      (is (true? (:a2uiEnabled both)))
+      (is (true? (:openGenerativeUIEnabled both))))))
 
 (deftest reasoning-is-a-first-class-message-test
   (testing "思考块走 AG-UI 的 reasoning 消息，不再是 CUSTOM"
