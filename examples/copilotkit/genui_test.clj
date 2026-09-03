@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.agui.genui-test
+(ns copilotkit.genui-test
   "Open Generative UI 插件。
 
    断言逐条对着 CopilotKit 的
@@ -6,8 +6,8 @@
    写——patch 的 `op` / `path` / `value` 形状猜错了前端**不会报错**，只会静默
    少渲染一块（与 codec 那份测试同源的理由）。"
   (:require [clojure.test :refer [deftest is testing]]
+            [copilotkit.genui :as genui]
             [im.ttalk.agent.agui.codec :as codec]
-            [im.ttalk.agent.agui.genui :as genui]
             [im.ttalk.agent.agui.runtime :as rt]
             [im.ttalk.agent.agui.support :as support]))
 

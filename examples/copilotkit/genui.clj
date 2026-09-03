@@ -1,4 +1,4 @@
-(ns im.ttalk.agent.agui.genui
+(ns copilotkit.genui
   "Open Generative UI —— 模型直接生成一块**沙箱 UI**（HTML/CSS/JS），边生成边渲染。
 
    移植自 CopilotKit 的
@@ -6,6 +6,20 @@
    （工具名 `generateSandboxedUi`、活动类型 `open-generative-ui`、
    `ACTIVITY_SNAPSHOT` / `ACTIVITY_DELTA` 的 JSON Patch 形状全部对齐，
    前端那半边——`OpenGenerativeUIRenderer` + websandbox iframe——原样可用）。
+
+   ## 它在 examples 而不在 `clj-agent-agui` 模块里
+
+   Open Generative UI **不是 AG-UI 的核心能力**，是 CopilotKit Runtime 的一个
+   可选中间件——上游自己的分层也是这样：协议层（`@ag-ui/core`）只认
+   `ACTIVITY_SNAPSHOT` / `ACTIVITY_DELTA` 这对**通用**事件，`generateSandboxedUi`
+   这个工具名、`open-generative-ui` 这个活动类型、以及那套 JSON Patch 形状，全都
+   是中间件（`packages/runtime/src/v2/runtime/open-generative-ui-middleware.ts`）
+   自己的约定。
+
+   我们照同一条线切：**通用的那半留在模块里**（`agui.codec` 认
+   `:activity/snapshot` / `:activity/delta`，`/info` 有 `openGenerativeUIEnabled`
+   这个位），**约定的那半在这里**。所以它是一份可以照抄改写的示例，不是库的一部分
+   ——换个工具名、换套 patch 形状，复制这个文件改就是了（design-principles §2）。
 
    ## 它是**可选插件**，不是新机制
 
@@ -19,6 +33,7 @@
    ```clojure
    (rt/runtime {:agent-fn (tools/agent-fn (genui/with-tool spec))
                 :event-transform (genui/event-transform)})
+   ;; 需要 `examples` 在 classpath 上：`clojure -M:copilotkit …`（见根 deps.edn）
    ```
 
    ## 后台干的事

@@ -1,6 +1,15 @@
 #kaocha/v1
+;; :examples —— examples/ 下**可离线跑**的测试。今天只有 genui（Open Generative UI
+;; 插件，2026-09-03 从 clj-agent-agui 模块移出：它是 CopilotKit Runtime 的一个可选
+;; 中间件约定，不是 AG-UI 的核心能力）。
+;;
+;; `:ns-patterns` 必须钉死到具体 ns：同目录下的 `copilotkit.agui-live-test` 也叫
+;; `*-test`，缺省模式会把它一并收进来，那是要 MINIMAX_API_KEY 打真实端点的。
 {:tests [{:id :unit
           :test-paths ["modules/clj-agent-provider/test"
                        "modules/clj-agent-client/test"
                        "modules/clj-agent-core/test"
-                       "modules/clj-agent-agui/test"]}]}
+                       "modules/clj-agent-agui/test"]}
+         {:id :examples
+          :test-paths ["examples"]
+          :ns-patterns ["copilotkit\\.genui-test"]}]}

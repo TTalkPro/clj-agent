@@ -107,7 +107,8 @@
    - `:event-transform`    `(fn [{:keys [run-id conversation-id]}] (fn [event] events))`，
                           可选。**事件流插件的挂点**（见 `agui.event/emitter` 的
                           `:transform`）：每个 run 现造一个有状态的 transform。
-                          `agui.genui/event-transform` 是现成的一个"
+                          `agui.a2ui/event-transform`（本模块）与
+                          `copilotkit.genui/event-transform`（examples）各是现成的一个"
   [{:keys [agent-fn] :as opts}]
   (when-not (fn? agent-fn)
     (throw (ex-info "runtime 需要 :agent-fn (fn [{:keys [conversation-id tools]}] agent)" {})))

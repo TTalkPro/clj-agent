@@ -44,7 +44,7 @@
    - :sink            (fn [event])——事件出口（runtime 提供：入缓冲 + 扇出）
    - :now             (fn [] ms)，可注入（测试）
    - :transform       (fn [event]) → **事件序列**，可选。**插件的挂点**：可以改写、
-                      吞掉、或在一条事件前后插入别的事件（`agui.genui` 就靠它把
+                      吞掉、或在一条事件前后插入别的事件（`copilotkit.genui` 就靠它把
                       工具调用翻译成 activity 事件）。每个产出各自取号，所以
                       契约 1 不受影响；**终态事件不过 transform**（契约 2 因此
                       仍由构造保证）；transform 抛异常 = 原样放行并记一条 warn

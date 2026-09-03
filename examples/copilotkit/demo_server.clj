@@ -37,9 +37,9 @@
 
    路由与 SSE 编码在 `http_kit_routes.clj`（web 层不进库，design-principles §2）。"
   (:require [clojure.string :as str]
+            [copilotkit.genui :as genui]
             [copilotkit.http-kit-routes :as routes]
             [im.ttalk.agent.agui.a2ui :as a2ui]
-            [im.ttalk.agent.agui.genui :as genui]
             [im.ttalk.agent.agui.mcp :as mcp]
             [im.ttalk.agent.agui.runtime :as rt]
             [im.ttalk.agent.memory :as memory]
@@ -51,7 +51,7 @@
                     (System/getenv "MINIMAX_AUTH_TOKEN")))
 
 (def genui?
-  "Open Generative UI 插件（`agui.genui`）——**默认不装**。
+  "Open Generative UI 插件（`copilotkit.genui`，本目录下）——**默认不装**。
 
        CLJ_AGENT_GENUI=1 MINIMAX_API_KEY=… clojure -M:copilotkit -e …
 

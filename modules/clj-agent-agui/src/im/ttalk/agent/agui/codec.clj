@@ -148,7 +148,8 @@
 
     ;; activity 消息：AG-UI 里「不是聊天文本、但要在对话流里占一块」的东西
     ;; （生成式 UI、进度卡片…）。快照建消息，delta 是 JSON Patch。
-    ;; 产出方见 `agui.genui`（可选插件），核心路径不发这两条。
+    ;; 产出方是 activity 类插件（`agui.a2ui`，或 examples 里的 `copilotkit.genui`），
+    ;; 核心路径不发这两条。
     ;; `:replace true` = 这条快照整块换掉上一条（A2UI 就靠它，每次发完整的一份，
     ;; 于是根本不需要 delta）。缺省 false：genui 那条路是 snapshot + 一串 delta
     :activity/snapshot (cond-> {:type "ACTIVITY_SNAPSHOT" :messageId message-id

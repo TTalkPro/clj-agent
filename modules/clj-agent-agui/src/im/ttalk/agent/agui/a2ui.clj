@@ -4,7 +4,7 @@
    移植自 `@ag-ui/a2ui-middleware`（CopilotKit 在 `agent-utils.ts` 里与
    Open Generative UI 挂在同一个位置）。两者的分工值得先说清楚：
 
-   | | `agui.genui`（Open Generative UI） | 本 ns（A2UI） |
+   | | `copilotkit.genui`（Open Generative UI，在 examples 里） | 本 ns（A2UI） |
    |---|---|---|
    | 模型生成什么 | 一整块 HTML/CSS/JS | **组件树**（只能用 catalog 里有的组件） |
    | 谁来渲染 | 沙箱 iframe 执行模型写的代码 | 前端按自己的组件库渲染 |
