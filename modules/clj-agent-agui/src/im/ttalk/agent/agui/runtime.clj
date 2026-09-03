@@ -27,6 +27,7 @@
    ```"
   (:require [im.ttalk.agent.agui.emit :as emit]
             [im.ttalk.agent.agui.event :as event]
+            [im.ttalk.agent.agui.subagent :as subagent]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as streaming]
@@ -38,6 +39,7 @@
 
 (def ^:private defaults
   {:on-concurrent     :reject     ;; | :supersede
+   :subagent-events?  false
    :buffer-size       512
    :idle-ttl-ms       (* 30 60 1000)
    :supersede-wait-ms 5000
@@ -94,6 +96,14 @@
    - `:idle-ttl-ms`       空闲会话驱逐（缺省 30min；有 run / 有订阅者 / 暂停中的不驱逐）
    - `:supersede-wait-ms` supersede 时等旧 run 收尾的上限（缺省 5s）
    - `:now`               `(fn [] ms)`，可注入（测试）
+   - `:subagent-events?`  子 agent lane 的事件（缺省 **false**）。开了之后
+                          `:agent-fn` 会多收到一个 `:subagent-observer`，把它交给
+                          `delegate-tool` 的 `:observer`，委派期间的 token / 工具调用
+                          就带着 `subagentRunId` 进事件流
+                          （docs/subagent-event-attribution-design.md）。
+                          **缺省关不是保守**：`@ag-ui/client` ≤ 0.0.57 在 HTTP
+                          transport 里校验事件的 discriminated union，一条
+                          `SUBAGENT_STARTED` 掐断整条流，客户端侧救不回来。
    - `:event-transform`    `(fn [{:keys [run-id conversation-id]}] (fn [event] events))`，
                           可选。**事件流插件的挂点**（见 `agui.event/emitter` 的
                           `:transform`）：每个 run 现造一个有状态的 transform。
@@ -233,7 +243,12 @@
                            :transform (when-let [f (:event-transform rt)]
                                         (f {:run-id run-id :conversation-id conv-id}))})
         done (CompletableFuture.)
-        a (-> ((:agent-fn rt) {:conversation-id conv-id :tools (vec tools)})
+        a (-> ((:agent-fn rt) {:conversation-id conv-id
+                               :tools (vec tools)
+                               ;; 开关关着就是 nil——`delegate-tool` 于是走老路径。
+                               ;; 「不塞就什么都不会发生」是这条链路每一跳的性质
+                               :subagent-observer (when (get-in rt [:cfg :subagent-events?])
+                                                    (subagent/observer-factory em))})
               (assoc :conversation-id conv-id :state-atom (:state-atom entry))
               (emit/attach em))
         invoke-opts (merge opts {:on-token (emit/token-fn em)
