@@ -43,20 +43,27 @@
    - :next-seq        (fn [] long)——会话级取号器（契约 1）
    - :sink            (fn [event])——事件出口（runtime 提供：入缓冲 + 扇出）
    - :now             (fn [] ms)，可注入（测试）
+   - :transform       (fn [event]) → **事件序列**，可选。**插件的挂点**：可以改写、
+                      吞掉、或在一条事件前后插入别的事件（`agui.genui` 就靠它把
+                      工具调用翻译成 activity 事件）。每个产出各自取号，所以
+                      契约 1 不受影响；**终态事件不过 transform**（契约 2 因此
+                      仍由构造保证）；transform 抛异常 = 原样放行并记一条 warn
 
    返回一个 map（内部状态在 atom 里）。**停止意图挂在这里而不是会话上**：
    `stop!` 与 supersede 改的都是**被停的那个 run** 自己的 holder，否则新 run 一
    重置共享标志，被替换掉的旧 run 收尾时就会把自己标成 error——CopilotKit 的
    `RunFinalizeControl` 修的正是这个（§2.1 第 4 条）。"
-  [{:keys [run-id conversation-id next-seq sink now]}]
+  [{:keys [run-id conversation-id next-seq sink now transform]}]
   {:run-id run-id
    :conversation-id conversation-id
    :next-seq next-seq
    :sink sink
+   :transform transform
    :now (or now #(System/currentTimeMillis))
    :state (atom {:open-messages {}    ;; message-id -> {:delta? bool}
                  :open-tools    {}    ;; tool-call-id -> {:ended? bool :result? bool}
                  :current-message nil
+                 :current-reasoning nil  ;; 开着的思考块（独立 message-id）
                  :terminal nil
                  :any-text? false
                  :drops 0})
@@ -81,8 +88,10 @@
   [state {:keys [type message-id tool-call-id]}]
   (case type
     :message/started (update state :open-messages assoc message-id {:delta? false})
-    (:message/delta :message/thinking)
-    (assoc-in state [:open-messages message-id :delta?] true)
+    ;; **思维 delta 不进正文消息的开集合**：AG-UI 里思考是独立的 reasoning
+    ;; 消息（自己的 message-id），混进来会让 close-open! 给它补一条
+    ;; `:message/ended`，前端于是收到一条从没开过的正文消息的结束
+    :message/delta   (assoc-in state [:open-messages message-id :delta?] true)
     :message/ended   (update state :open-messages dissoc message-id)
     :tool/started    (update state :open-tools assoc tool-call-id {:ended? false :result? false})
     :tool/ended      (cond-> state
@@ -91,26 +100,45 @@
     :tool/result     (update state :open-tools dissoc tool-call-id)
     state))
 
-(defn emit!
-  "发一个事件。返回发出的事件（sink 抛异常时仍返回，只计一次 drop）。
-
-   **永不抛**：这是 §6.3 立的不变量，有测试钉住。"
-  [em type m]
-  (let [ev (merge {:type type
-                   :run-id (:run-id em)
-                   :conversation-id (:conversation-id em)
-                   :seq ((:next-seq em))
-                   :ts ((:now em))}
-                  m)]
+(defn- deliver!
+  "取号 → 记账 → 出口。**一个事件一个号**，transform 插进来的也一样。"
+  [em ev]
+  (let [ev (assoc ev :seq ((:next-seq em)) :ts (or (:ts ev) ((:now em))))]
     (swap! (:state em) (fn [st]
                          (cond-> (track! st ev)
-                           (terminal? ev) (assoc :terminal type))))
+                           (terminal? ev) (assoc :terminal (:type ev)))))
     (try
       ((:sink em) ev)
       (catch Throwable t
         (swap! (:state em) update :drops inc)
         (log/warn "agui 事件 sink 抛异常（已兜住，run 不受影响）:" (.getMessage t))))
     ev))
+
+(defn- expand
+  "过 `:transform`（若有）。**终态不过**——契约 2「恰好一个终态且在最后」是靠
+   `finish!` 的构造保证的，让插件有机会吞掉或改写它，这条保证就没了。"
+  [em ev]
+  (let [t (:transform em)]
+    (if (or (nil? t) (terminal? ev))
+      [ev]
+      (try
+        (vec (t ev))
+        (catch Throwable e
+          (log/warn "agui 事件 transform 抛异常（已兜住，事件原样放行）:" (.getMessage e))
+          [ev])))))
+
+(defn emit!
+  "发一个事件。返回**最后一条真正发出的**事件（transform 把它吞了则返回 nil；
+   sink 抛异常时仍返回，只计一次 drop）。
+
+   **永不抛**：这是 §6.3 立的不变量，有测试钉住。"
+  [em type m]
+  (let [base (merge {:type type
+                     :run-id (:run-id em)
+                     :conversation-id (:conversation-id em)
+                     :ts ((:now em))}
+                    m)]
+    (reduce (fn [_ ev] (deliver! em ev)) nil (expand em base))))
 
 ;;; ---- 文本消息：自动开合 ----
 
@@ -123,24 +151,54 @@
 
 (defn current-message [em] (:current-message @(:state em)))
 
+;;; ---- 思考块：独立的一条消息，自动开合 ----
+
+(defn- reasoning-id
+  "思考块的 message-id：正文那条的 id 加后缀。
+
+   **必须与正文消息不同 id**——AG-UI 里思考是一条 `role: \"reasoning\"` 的独立
+   消息（前端有专门的折叠面板渲染它）。共用 id 会让同一个 id 上既有正文消息又有
+   思考消息，客户端只认先到的那种。"
+  [mid]
+  (str mid "-reasoning"))
+
+(defn end-reasoning!
+  "关掉开着的思考块（若有）。**正文 token 一到就得关**：模型「想完了开始说」，
+   AG-UI 侧就是思考消息收口、正文消息开始。"
+  [em]
+  (when-let [rid (:current-reasoning @(:state em))]
+    (swap! (:state em) assoc :current-reasoning nil)
+    (emit! em :reasoning/ended {:message-id rid})))
+
 (defn emit-token!
   "增量 token。`kind` = `:token`（正文）或 `:reasoning-token`（思维）。
-   首个 token 自动补 `:message/started`。"
+
+   两条独立的消息，各自开合：正文首个 token 补 `:message/started`，思维首个
+   token 补 `:reasoning/started`；**互相到达时把对方收口**（一轮里可以来回切换，
+   模型边想边说是常态）。"
   [em kind text]
   (when (and (string? text) (seq text))
     (let [mid (current-message em)]
       (when mid
-        (when-not (contains? (:open-messages @(:state em)) mid)
-          (emit! em :message/started {:message-id mid :role :assistant}))
-        (when (= :token kind) (swap! (:state em) assoc :any-text? true))
-        (emit! em (if (= :reasoning-token kind) :message/thinking :message/delta)
-               {:message-id mid :text text})))))
+        (if (= :reasoning-token kind)
+          (let [rid (reasoning-id mid)]
+            (when-not (= rid (:current-reasoning @(:state em)))
+              (swap! (:state em) assoc :current-reasoning rid)
+              (emit! em :reasoning/started {:message-id rid}))
+            (emit! em :message/thinking {:message-id rid :text text}))
+          (do
+            (end-reasoning! em)
+            (when-not (contains? (:open-messages @(:state em)) mid)
+              (emit! em :message/started {:message-id mid :role :assistant}))
+            (swap! (:state em) assoc :any-text? true)
+            (emit! em :message/delta {:message-id mid :text text})))))))
 
 (defn end-message!
   "关掉当前消息（若开着）。`full-text` 非空且该消息**一个 token 都没出过**时，
    补一条整块 delta——非流式 run 的最终答案就是这么进事件流的。"
   ([em] (end-message! em nil))
   ([em full-text]
+   (end-reasoning! em)                 ;; 这一轮说完了，思考块必然也结束了
    (let [{:keys [current-message open-messages]} @(:state em)
          mid current-message]
      (when mid
@@ -179,6 +237,7 @@
    还悬着**（等人审批 / 等前端执行），给它编一个「未完成」的结果是撒谎，
    而且下一个 run 真结果回来时前端会看到同一个 id 出现两次结果。"
   [em close-tools?]
+  (end-reasoning! em)
   (let [{:keys [open-messages open-tools]} @(:state em)
         stopped? (stop-requested? em)]
     (doseq [mid (keys open-messages)]

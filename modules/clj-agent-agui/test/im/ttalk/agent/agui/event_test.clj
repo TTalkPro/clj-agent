@@ -106,3 +106,43 @@
     (let [[em out] (test-emitter)]
       (event/ensure-text! em "final" "return-direct 的结果")
       (is (= [:message/started :message/delta :message/ended] (map :type @out))))))
+
+(deftest reasoning-block-opens-and-closes-test
+  (testing "思维 token 是**独立的一条消息**，与正文各自开合"
+    (let [[em out] (test-emitter)]
+      (event/begin-message! em "m0")
+      (event/emit-token! em :reasoning-token "先想")
+      (event/emit-token! em :reasoning-token "一下")
+      (event/emit-token! em :token "答案是")
+      (event/end-message! em)
+      (is (= [:reasoning/started :message/thinking :message/thinking
+              :reasoning/ended :message/started :message/delta :message/ended]
+             (mapv :type @out))
+          "正文 token 一到，思考块当场收口")
+      (is (= "m0-reasoning" (:message-id (first @out))))
+      (is (apply = "m0-reasoning" (map :message-id (take 4 @out)))
+          "思考块自己一个 id——与正文共用 id 会让客户端只认先到的那种消息")
+      (is (apply = "m0" (map :message-id (drop 4 @out))))))
+
+  (testing "只想不说：终态收尾时思考块也要关"
+    (let [[em out] (test-emitter)]
+      (event/begin-message! em "m0")
+      (event/emit-token! em :reasoning-token "想")
+      (event/finish! em :run/finished {})
+      (is (= [:reasoning/started :message/thinking :reasoning/ended :run/finished]
+             (mapv :type @out)))
+      (is (false? (event/text-emitted? em)) "思维 token 不算正文")))
+
+  (testing "想→说→又想：来回切换，块与块之间不粘连"
+    (let [[em out] (test-emitter)]
+      (event/begin-message! em "m0")
+      (event/emit-token! em :reasoning-token "想A")
+      (event/emit-token! em :token "说A")
+      (event/emit-token! em :reasoning-token "想B")
+      (event/end-message! em)
+      (is (= [:reasoning/started :message/thinking :reasoning/ended
+              :message/started :message/delta
+              :reasoning/started :message/thinking
+              :reasoning/ended :message/ended]
+             (mapv :type @out)))
+      (is (= 2 (count (filter #(= :reasoning/started (:type %)) @out)))))))

@@ -44,13 +44,33 @@
            [(:type r) (:toolCallId r) (:role r) (:content r)]))))
 
 (deftest paused-and-state-test
-  (let [p (codec/->agui (assoc base :type :run/paused
-                               :reason "需要审批"
-                               :pending-tool {:name "refund" :args {:id "A"}
-                                              :tool-call {:id "tc9"}}))]
-    (is (= "CUSTOM" (:type p)))
-    (is (= "cljagent.run.paused" (:name p)))
-    (is (= "tc9" (get-in p [:value :pendingTool :toolCallId]))))
+  (testing "暂停走 AG-UI 的 interrupt 协议：RUN_FINISHED + outcome"
+    (let [p (codec/->agui (assoc base :type :run/paused
+                                 :reason "需要审批"
+                                 :pending-tool {:name "refund" :args {:id "A"}
+                                                :tool-call {:id "tc9"}}))
+          itr (first (get-in p [:outcome :interrupts]))]
+      (is (= "RUN_FINISHED" (:type p)))
+      (is (= "interrupt" (get-in p [:outcome :type])))
+      (is (= "需要审批" (:reason itr)) "reason 必填且是字符串")
+      (is (= "tc9" (:toolCallId itr)) "挂回那张工具卡片")
+      (is (= "tc9" (:id itr)) "interrupt id 取 tool-call id——resume 凭它对上")
+      (is (= "refund" (get-in itr [:metadata :pendingTool :name])))
+      (is (= ["approved" "rejected"] (get-in itr [:responseSchema :properties :decision :enum])))))
+  (testing "reason 是关键字也要发成字符串（协议要求）"
+    (is (= "approval-required"
+           (-> (codec/->agui (assoc base :type :run/paused :reason :approval-required))
+               (get-in [:outcome :interrupts 0 :reason])))))
+  (testing "没有 pending 工具的暂停：id 退回 run-id，不发 toolCallId"
+    (let [itr (-> (codec/->agui (assoc base :type :run/paused))
+                  (get-in [:outcome :interrupts 0]))]
+      (is (= "r1-interrupt" (:id itr)))
+      (is (nil? (:toolCallId itr)))
+      (is (= "paused" (:reason itr)))))
+  (testing "interrupt-id 对暂停事件与 awaiting 返回值同解——路由靠它校验 resume"
+    (let [aw {:run-id "r1" :pending-tool {:name "refund" :tool-call {:id "tc9"}}}]
+      (is (= "tc9" (codec/interrupt-id aw)))
+      (is (= "r1-interrupt" (codec/interrupt-id {:run-id "r1"})))))
   (is (= {:type "STATE_SNAPSHOT" :snapshot {:cart 2}}
          (codec/->agui (assoc base :type :state/snapshot :state {:cart 2})))))
 
@@ -74,12 +94,12 @@
     (is (= ["user" "assistant"] (mapv :role (:messages out))))))
 
 (deftest paused-gets-a-terminal-test
-  (testing ":run/paused 发两条：CUSTOM 告诉前端停在哪，RUN_FINISHED 把 run 收口"
+  (testing ":run/paused 一条就够：RUN_FINISHED 收口，outcome 说清是停不是完"
     (let [evs (codec/->agui-events (assoc base :type :run/paused :reason "需要审批"))]
-      (is (= ["CUSTOM" "RUN_FINISHED"] (mapv :type evs)))
-      (is (= "paused" (get-in (second evs) [:result :status])))
-      (is (codec/terminal? (second evs)))
-      (is (not (codec/terminal? (first evs))))))
+      (is (= ["RUN_FINISHED"] (mapv :type evs)))
+      (is (codec/terminal? (first evs)) "流可以关——少了终态客户端会一直吊着")
+      (is (= "interrupt" (get-in (first evs) [:outcome :type]))
+          "没有 outcome 的 RUN_FINISHED 在标准客户端眼里 = 正常跑完了")))
   (testing "AG-UI 的 run 必须有终态——少了它客户端会一直吊着"
     (is (codec/terminal? (codec/->agui (assoc base :type :run/finished))))
     (is (codec/terminal? (codec/->agui (assoc base :type :run/cancelled))))
@@ -108,7 +128,16 @@
       (is (= "t1" (:conversation-id in)))
       (is (= "第二句" (:message in)))
       (is (= 1 (count (:agui-tools in))))
-      (is (= {:cart 1} (:state in))))))
+      (is (= [] (:resume in)) "没带 resume 就是空，不是 nil")
+      (is (= {:cart 1} (:state in)))))
+  (testing "interrupt 协议的答复在请求体的 resume[] 里"
+    (let [in (codec/parse-run-input
+              {:threadId "t1" :runId "r2"
+               :messages [{:role "user" :content "同意"}]
+               :resume [{:interruptId "tc9" :status "resolved"
+                         :payload {:decision "approved"}}]})]
+      (is (= [{:interruptId "tc9" :status "resolved" :payload {:decision "approved"}}]
+             (:resume in))))))
 
 (deftest run-info-test
   (let [info (codec/run-info ["default" "support"] {:descriptions {"support" "客服"}})]
@@ -118,7 +147,75 @@
       (is (= "default" (get-in info [:agents "default" :name])))
       (is (= "客服" (get-in info [:agents "support" :description]))))
     (is (= "sse" (:mode info)))
+    (testing "报 interrupt 能力位——标准客户端据此走 resume[]，不然它不知道我们支持"
+      (is (true? (get-in info [:agents "default" :capabilities :humanInTheLoop :interrupts])))
+      (is (true? (get-in info [:agents "default" :capabilities :humanInTheLoop :approvals]))))
     (testing "不谎报能力位"
+      (is (nil? (get-in info [:agents "default" :capabilities :humanInTheLoop :approveWithEdits]))
+          "改参数再执行还没实现")
       (is (nil? (:inspectorMetadata info)))
       (is (nil? (:intelligence info)))
       (is (false? (:suggestions info))))))
+
+(deftest reasoning-is-a-first-class-message-test
+  (testing "思考块走 AG-UI 的 reasoning 消息，不再是 CUSTOM"
+    (let [start (codec/->agui-events (assoc base :type :reasoning/started :message-id "m1-reasoning"))
+          delta (codec/->agui (assoc base :type :message/thinking
+                                     :message-id "m1-reasoning" :text "让我想想"))
+          end (codec/->agui-events (assoc base :type :reasoning/ended :message-id "m1-reasoning"))]
+      (is (= [{:type "REASONING_START" :messageId "m1-reasoning"}
+              {:type "REASONING_MESSAGE_START" :messageId "m1-reasoning" :role "reasoning"}]
+             start)
+          "开：外层括号 + 那条 reasoning 消息")
+      (is (= {:type "REASONING_MESSAGE_CONTENT" :messageId "m1-reasoning" :delta "让我想想"}
+             delta))
+      (is (= [{:type "REASONING_MESSAGE_END" :messageId "m1-reasoning"}
+              {:type "REASONING_END" :messageId "m1-reasoning"}]
+             end)
+          "合：与开对称")
+      (is (not-any? #(= "CUSTOM" (:type %)) (concat start [delta] end))
+          "THINKING_* 在 0.0.59 已 deprecated，CUSTOM 更是绕路")
+      (is (not-any? codec/terminal? (concat start [delta] end))))))
+
+(deftest agui-messages-inbound-test
+  (testing "入站消息解析（无状态 run 用；/run 的历史仍取服务端权威）"
+    (let [out (codec/agui->messages
+               [{:role "system" :content "你是助手"}
+                {:role "user" :content "北京天气"}
+                {:role "assistant" :content "查一下"
+                 :toolCalls [{:id "t1" :type "function"
+                              :function {:name "get_weather" :arguments "{\"city\":\"北京\"}"}}]}
+                {:role "tool" :toolCallId "t1" :content "晴"}
+                {:role "assistant" :content "北京晴"}])]
+      (is (= [:system :user :assistant :tool :assistant] (mapv :role out)))
+      (is (= "t1" (:id (first (:tool-calls (nth out 2))))))
+      (is (= {:city "北京"} (:args (first (:tool-calls (nth out 2)))))
+          "arguments 是 JSON 串，要解开")
+      (is (= "t1" (:tool-call-id (nth out 3))))))
+
+  (testing "认不出的角色整条丢掉，不喂脏数据给模型"
+    (is (= [:user] (mapv :role (codec/agui->messages
+                                [{:role "user" :content "hi"}
+                                 {:role "cpk-extension" :content "?"}])))))
+
+  (testing "与出站互为反面"
+    (let [ms [(msg/user "你好") (msg/assistant "在")]]
+      (is (= ms (codec/agui->messages (codec/messages->agui ms)))))))
+
+(deftest suggestions-flag-test
+  (is (false? (:suggestions (codec/run-info ["default"])))
+      "不实现 /suggest 就别报——报了客户端会去打一条 404")
+  (is (true? (:suggestions (codec/run-info ["default"] {:suggestions? true})))))
+
+(deftest thread-messages-shape-test
+  (testing "线程列表那套 toolCalls 是**扁的**，与事件流那套不是一个形状"
+    (let [ms [(msg/user "你好")
+              (msg/assistant-tool-calls [(msg/tool-call "tc1" "get_weather" {:city "北京"})] "查一下")
+              (msg/tool-result "tc1" "get_weather" "晴")]
+          out (codec/messages->thread-messages ms)]
+      (is (= ["user" "assistant" "tool"] (mapv :role out)))
+      (is (= {:id "tc1" :name "get_weather" :args {:city "北京"}}
+             (first (:toolCalls (second out))))
+          "扁的 {id,name,args}——事件流那套是 {id,type,function:{name,arguments}}")
+      (is (= "tc1" (:toolCallId (nth out 2))))
+      (is (nil? (:toolCalls (first out))) "没有工具调用就不发这个键"))))

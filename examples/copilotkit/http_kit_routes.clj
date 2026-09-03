@@ -13,6 +13,8 @@
    transcribe 是它的产品功能，缺席即降级）：
 
      GET  {base}/info                       → 有哪些 agent（agents 是**字典**）
+     POST {base}/agent/:id/suggest          → 无状态建议 run（可选，见 handle-suggest）
+     GET  {base}/threads …                  → 线程只读面（可选，见 handle-threads）
      POST {base}/agent/:id/run              → 起 run，SSE 回事件流
      POST {base}/agent/:id/connect          → 只订阅（重连/旁观），SSE
      POST {base}/agent/:id/stop/:threadId   → 停（**threadId 在路径里，没有请求体**）
@@ -30,6 +32,8 @@
             [im.ttalk.agent.agui.codec :as codec]
             [im.ttalk.agent.agui.runtime :as rt]
             [im.ttalk.agent.agui.tools :as agui-tools]
+            [im.ttalk.agent.memory :as memory]
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :as tool]
             [org.httpkit.server :as hk]))
 
@@ -88,6 +92,19 @@
                                       :on-close (fn [_] (hk/close channel))}))
         (hk/on-close channel (fn [_] (when-let [u @unsub] (u))))))))
 
+(defn- sse-frames
+  "把**已经算好**的几条 AG-UI 事件当成一条 SSE 流发完就关。
+
+   给「不是 run 的 run」用（MCP UI 的代理调用）：客户端那边仍走
+   `HttpAgent`，所以形状还得是一条以终态收口的事件流。"
+  [agui-events]
+  (fn [request]
+    (hk/with-channel request channel
+      (hk/send! channel {:status 200 :headers (merge cors-headers sse-headers)} false)
+      (doseq [[i ev] (map-indexed vector agui-events)]
+        (hk/send! channel (sse-frame {:seq i} ev) false))
+      (hk/close channel))))
+
 (defn- last-event-id
   "浏览器 EventSource 自动重连时带的头；没有就退回请求体里的 since。"
   [request body]
@@ -119,6 +136,34 @@
       "approved"
       "rejected")))
 
+(defn- resume-decision
+  "AG-UI `resume[]` 条目 → resume 决策。
+
+   `status` 是协议的一等字段（`\"resolved\"` / `\"cancelled\"`），**先看它**：
+   取消就是拒绝，没有歧义。`resolved` 才去看载荷——前端可能什么都不带
+   （「点了同意」本身就是全部信息），也可能带 `{decision: ...}`（我们在
+   `responseSchema` 里就是这么要的）。"
+  [{:keys [status payload]}]
+  (cond
+    (= "cancelled" status)                    "rejected"
+    (map? payload)                            (if-let [d (or (:decision payload)
+                                                             (get payload "decision"))]
+                                                (decision-of d)
+                                                "approved")
+    (some? payload)                           (decision-of payload)
+    :else                                     "approved"))
+
+(defn- matching-resume
+  "本次请求里、针对**当前这条**暂停的 resume 条目。
+
+   校验 `interruptId`：客户端可能带着一条过期的答复重放（换页签、重连、
+   用户在旧卡片上点了按钮）。对不上就当没有——按新消息起 run，而不是拿旧决定
+   去恢复一个已经不是它的暂停。"
+  [resume pending]
+  (when pending
+    (let [id (codec/interrupt-id pending)]
+      (first (filter #(= id (str (:interruptId %))) resume)))))
+
 (defn handle-run
   "POST {base}/agent/:id/run
 
@@ -127,6 +172,12 @@
    1. **历史取服务端权威**（设计文档 §7.3）：前端把它那份完整 messages 发上来，
       我们只取最后一条 user 消息。memory filter 在循环内落库，heal-dangling /
       暂停恢复 / timeline 都依赖服务端历史——认客户端历史等于同时推翻这四样。
+   1.5 **审批答复走请求体的 `resume[]`**（interrupt 协议）：上一条 run 以
+      `RUN_FINISHED outcome=interrupt` 收口，人点了按钮，客户端把
+      `{interruptId, status, payload}` 放在**下一次 run 的请求体**里带回来。
+      协议里没有审批端点，就是这一条，所以它排在最前面判。
+      （tool-call 型 interrupt 被 resolve 时，客户端**同时**会补一条 tool
+      消息；先认 `resume` 才不会把它误当成前端工具的结果。）
    2. **前端工具的结果是以「新的一轮」回来的**（AG-UI 的 client-side tool 就是
       这么设计的）。所以这里要认出「会话正在等 resume，且这次带的是那个工具的
       结果」，转成 `resume-run! :reply`，而不是又起一个新 run。
@@ -140,11 +191,21 @@
       建议按钮，从不回结果。会话于是停在那儿等，用户下一句话全被挡住
       （联调时当场卡死：输入框敲了字，发不出去）。所以新用户消息到达、而挂起的
       正是**这次请求带上来的前端工具**时，`:discard-pause? true` 丢掉它继续。"
-  [runtime server-tool-names request]
+  [runtime server-tool-names {:keys [input-transform mcp-proxy]} request]
   (let [body (read-body request)
-        {:keys [conversation-id message agui-tools]} (codec/parse-run-input body)
+        ;; **MCP UI 的代理调用不是一次 run**：前端那块 MCP App 界面（跑在 iframe
+        ;; 里）要调 server 时，把请求塞在 `forwardedProps.__proxiedMCPRequest` 里
+        ;; 走 `/run` 这条路发上来。这时候不能起 agent——照上游的做法，回一对
+        ;; `RUN_STARTED` / `RUN_FINISHED{result}` 就完了。
+        proxied (get-in body [:forwardedProps :__proxiedMCPRequest])
+        {:keys [conversation-id message agui-tools resume]}
+        (cond-> (codec/parse-run-input body)
+          ;; 入站插件的挂点（对称于 `:event-transform`）：`agui.a2ui` 用它把
+          ;; `forwardedProps.a2uiAction`（用户在生成出来的界面上点了什么）接进本轮输入
+          input-transform (input-transform body))
         pending (rt/awaiting runtime conversation-id)
         pending-name (get-in pending [:pending-tool :name])
+        resume-entry (matching-resume resume pending)
         tool-result (when pending
                       (->> (:messages body)
                            (filter #(= "tool" (:role %)))
@@ -156,8 +217,27 @@
         ;; 挂起的是本次带上来的前端工具、而客户端这次并没有回结果 → 它不会回了
         stale-frontend-pause? (and pending
                                    (nil? tool-result)
+                                   (nil? resume-entry)
                                    (contains? frontend-names pending-name))
         result (cond
+                 ;; 带了 resume 却对不上当前这条 interrupt（过期重放：换页签、重连、
+                 ;; 在旧卡片上点了按钮）。**什么都不起**，下面回 409——落进 start-run!
+                 ;; 会拿旧决定去恢复一个已经不是它的暂停。
+                 (and (seq resume) (nil? resume-entry))
+                 {:status :interrupt-mismatch}
+
+                 ;; interrupt 协议的答复：`resume[]` 是一等字段，压过一切推断
+                 (and resume-entry (contains? server-tool-names pending-name))
+                 (rt/resume-run! runtime conversation-id
+                                 (resume-decision resume-entry)
+                                 (when (map? (:payload resume-entry)) (:payload resume-entry)))
+
+                 ;; 前端工具被 resolve：载荷**即**结果（ask-user 语义）
+                 resume-entry
+                 (rt/resume-run! runtime conversation-id "reply"
+                                 {:message (str (or (:payload resume-entry)
+                                                    (:content tool-result)))})
+
                  ;; 审批：挂起的是**服务端**工具 → 载荷是决策，工具还要真去执行
                  (and pending tool-result (contains? server-tool-names pending-name))
                  (rt/resume-run! runtime conversation-id
@@ -172,13 +252,107 @@
                  (rt/start-run! runtime conversation-id message
                                 {:tools (mapv agui-tools/frontend-tool real-frontend-tools)
                                  :discard-pause? stale-frontend-pause?}))]
-    (if (= :busy (:status result))
+    (cond
+      (and proxied mcp-proxy)
+      ((sse-frames [{:type "RUN_STARTED" :threadId conversation-id :runId (:runId body)}
+                    {:type "RUN_FINISHED" :threadId conversation-id :runId (:runId body)
+                     :result (mcp-proxy proxied)}])
+       request)
+
+      (= :busy (:status result))
       {:status 409 :headers cors-headers
        :body (json/generate-string {:error "thread_busy" :runId (:run-id result)})}
+
+      ;; **明说**，别落进下面那个订阅——那会开一条永远不来事件的流（客户端吊在那儿）
+      (= :interrupt-mismatch (:status result))
+      {:status 409 :headers cors-headers
+       :body (json/generate-string
+              (if pending
+                {:error "interrupt_mismatch" :interruptId (codec/interrupt-id pending)}
+                {:error "no_pending_interrupt"}))}
+
+      :else
       ;; **用返回的 `:since` 订阅，不是 nil**：run 已经起跑并发了 `RUN_STARTED`，
       ;; 这里才轮到我们订阅。传 nil = 只收新事件 = 把 `RUN_STARTED` 漏掉，
       ;; 前端第一件事就是 `AGUIError: First event must be 'RUN_STARTED'`。
       ((sse-response runtime conversation-id (:since result) {:close-on-terminal? true}) request))))
+
+(defn- sse-detached
+  "把一次**没有会话**的 run 接到 SSE 上（`/suggest` 用）。
+
+   与 `sse-response` 的差别正是这条路的全部特点：不订阅会话（没有会话），
+   事件从 run 自己的发射器直接来，终态即关流。"
+  [start!]
+  (fn [request]
+    (hk/with-channel request channel
+      (hk/send! channel {:status 200 :headers (merge cors-headers sse-headers)} false)
+      (start! (fn [ev]
+                (doseq [agui (codec/->agui-events ev)]
+                  (hk/send! channel (sse-frame ev agui) false)
+                  (when (codec/terminal? agui) (hk/close channel))))))))
+
+(defn- ack-tool
+  "客户端在建议 run 里声明的工具 → 内联工具。
+
+   **不能用 `agui-tools/frontend-tool`**：那个会让 gate 把 run 暂停下来等前端
+   回结果，而建议工具（`copilotkitSuggest`）**从来不回结果**——前端只读
+   `TOOL_CALL_ARGS` 把建议渲染成按钮（§9.10 第 5 条那个会话卡死就是这么来的）。
+   所以这里给一个空回执的 handler + **`:return-direct`**：工具结果即最终答案，
+   不再回灌 LLM。少了它模型会为「ok」这个结果再跑一轮（实测多花了一整轮
+   reasoning + 29 块正文 token），而那一轮的产出没有任何人读——建议的载体是
+   `TOOL_CALL_ARGS`，不是模型的话。"
+  [{:keys [name description parameters]}]
+  (cond-> {:name (clojure.core/name name)
+           :return-direct true
+           :handler (fn [_args _ctx] "")}
+    description (assoc :description description)
+    parameters  (assoc :parameters parameters)))
+
+(defn handle-suggest
+  "POST {base}/agent/:id/suggest —— **无状态**建议 run（「猜用户下一句想说什么」）。
+
+   这条路与 `/run` 的每一处不同都是刻意的（对齐 CopilotKit 的 `handle-suggest`）：
+
+   | | `/run` | `/suggest` |
+   |---|---|---|
+   | 历史 | **服务端权威**，只取最后一条 user 消息 | **客户端权威**——没有服务端线程，它发上来的就是全部上下文 |
+   | 会话 | 进注册表：缓冲、订阅、stop / resume | **不进**（`rt/run-detached!`）——一次性的建议不该留下一堆废会话 |
+   | 落库 | memory filter 循环内落库 | 不落：临时 store，跑完就没了 |
+   | 工具 | 服务端工具 + 前端工具（会暂停） | 只有客户端这次声明的，**都不执行**（见 `ack-tool`） |
+   | 插件 | 挂（genui / a2ui …） | **不挂**：工具选择已被强制，插件注入的工具是白费；MCP 之类还会多打一次网络往返 |
+
+   为什么值得单开一条：不实现它，前端就把 `copilotkitSuggest` 塞进 `/run` 的
+   `tools` 里绕过去——那正是「输入框敲了字发不出去」的来源（§9.10 第 5 条）。"
+  [agent-spec request]
+  (let [body (read-body request)
+        msgs (codec/agui->messages (:messages body))
+        history (vec (butlast msgs))
+        last-msg (last msgs)
+        tools (mapv ack-tool (:tools body))
+        store (memory/in-memory-store)]     ;; 临时的：跑完就没人引用了
+    (when (seq history) (memory/mem-add store "suggest" history))
+    (if (nil? last-msg)
+      {:status 400 :headers cors-headers
+       :body (json/generate-string {:error "no_messages"})}
+      ((sse-detached
+        (fn [on-event]
+          (rt/run-detached!
+           {:agent (agent/create-agent
+                    (-> agent-spec
+                        ;; 不留痕：临时 store、不给 pause-store、不要 on-pause
+                        (dissoc :pause-store :on-pause)
+                        (assoc :memory store
+                               :conversation-id "suggest"
+                               :tools tools)))
+            :message (:content last-msg)
+            :on-event on-event
+            ;; 只有一个工具时，中立的 `:required` 就等于上游那句「强制调
+            ;; copilotkitSuggest」。第二轮 LLM 由 `ack-tool` 的 `:return-direct`
+            ;; 挡掉，不是靠 `:max-iterations`——后者只限制**工具轮**的次数，
+            ;; 工具跑完那次「总结一下」的 LLM 调用照发（实测）
+            :opts {:tool-choice (if (seq tools) :required :auto)
+                   :max-iterations 1}})))
+       request))))
 
 (defn handle-connect
   "POST {base}/agent/:id/connect —— 只订阅，不起 run（重连 / 第二个页签旁观）。"
@@ -201,7 +375,10 @@
   "GET {base}/pending —— 当前有哪些会话卡在等审批。
 
    也不属于 AG-UI。真做审批台的话这就是它的数据源：`rt/conversations` +
-   `rt/awaiting` 两个调用而已。"
+   `rt/awaiting` 两个调用而已。
+
+   `interruptId` 与事件流里那条 interrupt 是同一个（`codec/interrupt-id`），
+   审批台拿它就能凭 `/approve` 或走 `resume[]` 答复。"
   [runtime]
   (json-response
    {:pending (into []
@@ -209,6 +386,7 @@
                            (when-let [aw (rt/awaiting runtime cid)]
                              {:threadId cid
                               :runId (:run-id aw)
+                              :interruptId (codec/interrupt-id aw)
                               :reason (:reason aw)
                               :pendingTool (get-in aw [:pending-tool :name])})))
                    (rt/conversations runtime))}))
@@ -216,29 +394,126 @@
 (defn handle-approve
   "POST {base}/agent/:id/approve  {threadId, decision, payload}
 
-   **这条不属于 AG-UI**——人工审批是**你的应用**的事，协议里没有它。放在这里是
-   为了把 HITL 跑完整：前端收到 `CUSTOM/cljagent.run.paused` 后渲染审批条，
-   点「同意」打这个端点，再 `/connect` 接着看续跑（续跑是新的 run）。"
+   **这条不属于 AG-UI**——协议里的答复路径是下一次 run 的 `resume[]`（见
+   `handle-run`），聊天页上的审批按钮走那条就够了。留着这个端点是为了**带外
+   审批**：审批台、Slack 按钮、运维脚本——它们手上只有 conversation-id，不发
+   聊天消息，也不该被迫伪造一次 run。打完再 `/connect` 接着看续跑（新的 run）。"
   [runtime request]
   (let [{:keys [threadId decision payload]} (read-body request)
         result (rt/resume-run! runtime threadId (or decision "approved") payload)]
     (json-response {:status (name (:status result))
                     :runId (:run-id result)})))
 
+(defn- iso-now [ms]
+  (.toString (java.time.Instant/ofEpochMilli (long (or ms (System/currentTimeMillis))))))
+
+(defn- thread-record
+  "会话 → 线程记录（上游 `LocalThreadEndpointRecord` 的形状）。
+
+   `organizationId` / `createdById` 是 Intelligence（云产品）的字段，本地模式下
+   上游也只是填个占位——照填，少了客户端解析会缺字段。"
+  [runtime meta-atom agent-id conv-id]
+  (let [st (rt/run-status runtime conv-id)
+        m (get @meta-atom conv-id)]
+    {:id conv-id
+     :name (:name m)                     ;; 没起过名就是 null，前端会自己显示摘要
+     :agentId agent-id
+     :organizationId "local"
+     :createdById "local"
+     :archived (boolean (:archived m))
+     :createdAt (iso-now (or (:created-at m) (:last-active st)))
+     :updatedAt (iso-now (:last-active st))}))
+
+(defn handle-threads
+  "`/threads*` —— **把已有的东西暴露出来**，不是新建一套存储：
+
+   | 端点 | 数据从哪来 |
+   |---|---|
+   | `GET /threads` | runtime 的**会话注册表** |
+   | `GET /threads/:id/messages` | **ChatMemory**（服务端权威的那份历史） |
+   | `GET /threads/:id/events` | 会话的**环形缓冲**（有界、不落库，见 `rt/buffered-events`） |
+   | `GET /threads/:id/state` | 缓冲里最后一条 `:state/snapshot` |
+   | `POST /threads/clear` / `DELETE /threads/:id` | 摘会话 + 清 ChatMemory |
+   | `POST /threads/:id`（改名）/ `…/archive` | 进程内的一小张元数据表 |
+
+   **两条要如实说的边界**：会话空闲 30 分钟会被驱逐（`:idle-ttl-ms`），
+   驱逐后它就不在列表里了——历史还在 ChatMemory，但我们的 `ChatMemory` 协议
+   没有「列出所有会话」，所以列不出来；名字与归档标记只活在**进程内**，
+   重启即失（真做要给 ChatMemory 加一张线程表，那是另一件事）。"
+  [runtime memory meta-atom agent-id path request]
+  (let [seg (fn [re] (some-> (re-find re path) second java.net.URLDecoder/decode))
+        method (:request-method request)
+        thread-id (or (seg #"/threads/([^/]+)/(?:messages|events|state|archive)$")
+                      (seg #"/threads/([^/]+)$"))]
+    (cond
+      (re-find #"/threads/subscribe$" path)
+      ;; 实时订阅是 Intelligence（云产品）的东西，我们没有——**如实 404**，
+      ;; 客户端会降级成轮询，比假装成功强
+      {:status 404 :headers cors-headers :body "threads/subscribe not supported"}
+
+      (re-find #"/threads/clear$" path)
+      (do (doseq [cid (rt/conversations runtime)]
+            (rt/forget! runtime cid)
+            (when memory (memory/mem-clear memory cid)))
+          (reset! meta-atom {})
+          {:status 204 :headers cors-headers})
+
+      (re-find #"/threads/[^/]+/messages$" path)
+      (json-response {:messages (codec/messages->thread-messages
+                                 (if memory (memory/mem-get memory thread-id) []))})
+
+      (re-find #"/threads/[^/]+/events$" path)
+      (json-response {:events (codec/events->agui (rt/buffered-events runtime thread-id))})
+
+      (re-find #"/threads/[^/]+/state$" path)
+      (json-response {:state (some->> (rt/buffered-events runtime thread-id)
+                                      (filter #(= :state/snapshot (:type %)))
+                                      last
+                                      :state)})
+
+      (re-find #"/threads/[^/]+/archive$" path)
+      (do (swap! meta-atom assoc-in [thread-id :archived] true)
+          (json-response {:threadId thread-id :archived true}))
+
+      (and thread-id (= :delete method))
+      (do (rt/forget! runtime thread-id)
+          (when memory (memory/mem-clear memory thread-id))
+          (swap! meta-atom dissoc thread-id)
+          (json-response {:threadId thread-id :deleted true}))
+
+      (and thread-id (= :post method))
+      (let [{:keys [name]} (read-body request)]
+        (swap! meta-atom assoc-in [thread-id :name] name)
+        (json-response (thread-record runtime meta-atom agent-id thread-id)))
+
+      :else
+      (json-response {:threads (mapv #(thread-record runtime meta-atom agent-id %)
+                                     (rt/conversations runtime))
+                      :nextCursor nil}))))
+
 (defn handler
-  [runtime agent-ids base-path server-tool-names]
+  [runtime agent-ids base-path server-tool-names & [opts]]
   (fn [request]
     (let [path (subs (:uri request) (min (count base-path) (count (:uri request))))]
       (cond
         (= :options (:request-method request))
         {:status 204 :headers cors-headers}
 
-        (re-find #"/info$" path)    (json-response (codec/run-info agent-ids))
-        (re-find #"/run$" path)     (handle-run runtime server-tool-names request)
+        (re-find #"/info$" path)    (json-response (codec/run-info agent-ids opts))
+        (re-find #"/run$" path)     (handle-run runtime server-tool-names opts request)
+        (re-find #"/suggest$" path) (if-let [spec (:agent-spec opts)]
+                                      (handle-suggest spec request)
+                                      {:status 404 :headers cors-headers
+                                       :body "suggest not enabled"})
         (re-find #"/connect$" path) (handle-connect runtime request)
         ;; 不属于 AG-UI：应用自己的审批端点（见 handle-approve）
         (re-find #"/approve$" path) (handle-approve runtime request)
         (re-find #"/pending$" path)  (handle-pending runtime)
+        ;; 线程只读面：把已有的东西暴露出来（见 handle-threads）
+        (re-find #"/threads" path)
+        (if-let [meta-atom (:thread-meta opts)]
+          (handle-threads runtime (:memory opts) meta-atom (first agent-ids) path request)
+          {:status 404 :headers cors-headers :body "threads not enabled"})
         ;; threadId 是路径段：/agent/:id/stop/:threadId
         (re-find #"/stop(/|$)" path)
         (handle-stop runtime request
@@ -256,17 +531,31 @@
 
    agent id 用 `\"default\"`：CopilotKit 前端不指定 agent 时就找这个名字
    （`@copilotkit/shared` 的 `DEFAULT_AGENT_ID`）。"
-  ([port agent-spec] (start! port agent-spec "/api/copilotkit"))
-  ([port agent-spec base-path]
-   (let [runtime (rt/runtime {:agent-fn (agui-tools/agent-fn agent-spec)
-                              ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled）
-                              :on-concurrent :supersede})
+  ([port agent-spec] (start! port agent-spec "/api/copilotkit" nil))
+  ([port agent-spec base-path] (start! port agent-spec base-path nil))
+  ([port agent-spec base-path {:keys [event-transform input-transform open-generative-ui?
+                                      suggestions? mcp-proxy threads?]}]
+   (let [runtime (rt/runtime (cond-> {:agent-fn (agui-tools/agent-fn agent-spec)
+                                      ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled）
+                                      :on-concurrent :supersede}
+                               ;; 事件流插件（如 agui.genui）；不传就完全不存在
+                               event-transform (assoc :event-transform event-transform)))
          ;; 服务端工具名：用来把「前端同名声明」认成**渲染意图**而不是新工具
          server-tool-names (into #{}
                                  (comp (filter var?)
                                        (map #(:name (tool/get-schema %))))
                                  (:tools agent-spec))]
-     {:server (hk/run-server (handler runtime ["default"] base-path server-tool-names)
+     {:server (hk/run-server (handler runtime ["default"] base-path server-tool-names
+                                      {:open-generative-ui? open-generative-ui?
+                                       :input-transform input-transform
+                                       :mcp-proxy mcp-proxy
+                                       ;; 线程只读面：历史在 ChatMemory，名字/归档
+                                       ;; 标记在这张**进程内**的小表里
+                                       :thread-meta (when threads? (atom {}))
+                                       :memory (:memory agent-spec)
+                                       :suggestions? suggestions?
+                                       ;; `/suggest` 要现建一次性 agent，所以整份配置得留着
+                                       :agent-spec (when suggestions? agent-spec)})
                              {:port port})
       :runtime runtime})))
 

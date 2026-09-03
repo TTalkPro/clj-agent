@@ -127,6 +127,15 @@
 
 (defn- of-type [conn t] (filterv #(= t (:type %)) (agui-events conn)))
 
+;; 暂停走 AG-UI 的 interrupt 协议：终态那条 `RUN_FINISHED` 自带
+;; `outcome:{type:"interrupt", interrupts:[...]}`。「跑完了」与「停下等人」是
+;; **同一种事件的两种 outcome**，所以断言要分开看，不能只数 RUN_FINISHED。
+(defn- interrupts-of [conn]
+  (into [] (mapcat #(get-in % [:outcome :interrupts])) (of-type conn "RUN_FINISHED")))
+
+(defn- finished-ok [conn]
+  (filterv #(not= "interrupt" (get-in % [:outcome :type])) (of-type conn "RUN_FINISHED")))
+
 ;;; ============================================================
 ;;; runtime
 ;;; ============================================================
@@ -213,14 +222,17 @@
                          {:text "已经清空了"}])
         conn (fake-connection r "c1")]
     (rt/start-run! r "c1" "清库")
-    (check (wait-for #(seq (of-type conn "CUSTOM"))) "暂停事件到达")
-    (let [paused (first (filter #(= "cljagent.run.paused" (:name %)) (of-type conn "CUSTOM")))]
-      (check (= "wipe-database" (get-in paused [:value :pendingTool :name])) "带 pendingTool")
+    (check (wait-for #(seq (interrupts-of conn))) "interrupt 到达")
+    (let [itr (first (interrupts-of conn))]
+      (check (= "wipe-database" (get-in itr [:metadata :pendingTool :name])) "带 pendingTool")
+      (check (= "tc-9" (:toolCallId itr)) "挂回那张工具卡片")
+      (check (= (:toolCallId itr) (:id itr)) "resume 凭这个 id 对上")
       (check (empty? @executed) "工具还没执行"))
     (check (= :awaiting-resume (:state (rt/run-status r "c1"))) "会话在等 resume")
-    ;; ↓ 这在真部署里是**另一个 HTTP 请求**：它手上只有 conversation-id
+    ;; ↓ 这在真部署里是**下一次 run 的 `resume[]`**（或带外的 /approve）：
+    ;;   它手上只有 conversation-id
     (rt/resume-run! r "c1" "approved")
-    (check (wait-for #(seq (of-type conn "RUN_FINISHED"))) "续跑完成")
+    (check (wait-for #(seq (finished-ok conn))) "续跑完成（这条 RUN_FINISHED 才是真跑完）")
     (check (= ["wiped:YES"] @executed) "批准后工具真的执行了")
     (let [run-ids (distinct (keep :runId (agui-events conn)))]
       (check (= 2 (count run-ids)) "暂停是 run 的终态，续跑是新的 run"))
@@ -243,12 +255,12 @@
         parsed (codec/parse-run-input agui-input)]
     (rt/start-run! r (:conversation-id parsed) (:message parsed)
                    {:tools (mapv agui-tools/frontend-tool (:agui-tools parsed))})
-    (check (wait-for #(seq (of-type conn "CUSTOM"))) "模型发出前端工具调用 → 暂停")
+    (check (wait-for #(seq (interrupts-of conn))) "模型发出前端工具调用 → 暂停")
     (check (= "fe-1" (:toolCallId (first (of-type conn "TOOL_CALL_START"))))
            "前端拿到 TOOL_CALL_START，自己去执行")
     ;; 前端执行完，把结果作为 :reply 送回来（载荷即工具结果）
     (rt/resume-run! r "c1" "reply" {:message (json/generate-string {:clicked "ok"})})
-    (check (wait-for #(seq (of-type conn "RUN_FINISHED"))) "续跑完成")
+    (check (wait-for #(seq (finished-ok conn))) "续跑完成")
     (check (= {:clicked "ok"} (some-> (first (of-type conn "TOOL_CALL_RESULT"))
                                       :content (json/parse-string true)))
            "前端的结果作为工具结果回灌给模型")

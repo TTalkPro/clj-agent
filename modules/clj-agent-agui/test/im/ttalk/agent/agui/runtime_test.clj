@@ -15,10 +15,23 @@
   "工具里的闸门：测试 deliver 之前它不返回。取消的时序因此是确定的，不靠 sleep 猜。"
   (atom nil))
 
+(def ^:private gate-timeout-ms
+  "闸门的兜底超时——**只防死锁，不参与时序**。
+
+   曾经是 5000ms，聚合跑（近 500 个测试同一个 JVM）时间歇性红：整套跑起来
+   之后，从「run 起跑」到测试线程执行到 `stop!` 那一行，偶尔会被拖过 5 秒；
+   闸门于是自己超时放行，工具跑完、循环续跑、run 正常结束——`stop!` 拿到的
+   是个已经没了的 run，返回 false，终态成了 `:run/finished`。
+
+   这正是 §9.8 第 5 条那个教训换个位置又长了一次：**阈值在负载高的机器上必然
+   翻车**。这里的阈值躲不掉（不设超时就是「测试挂了要等到天荒地老」），
+   但可以把它放到远离真实时序的地方。"
+  60000)
+
 (deftool slow-mark
   "卡在闸门上，放行后打个记号（用来验证「取消不杀正在跑的工具」）"
   [[label :string "记号"]]
-  (when-let [g @tool-gate] (deref g 5000 nil))
+  (when-let [g @tool-gate] (deref g gate-timeout-ms nil))
   (swap! side-effects conj label)
   (str "已标记 " label))
 
@@ -147,11 +160,19 @@
       ;; 工具卡在闸门上：stop 一定落在「工具正在跑」这个窗口里
       (is (true? (rt/stop! r "c1")) "登记成功")
       (is (false? (rt/stop! r "c1")) "重复 stop 是 no-op")
-      (is (true? (:stopping? (rt/run-status r "c1"))) "「正在停止…」——还没停稳")
+      ;; **这里不能断言「一定还在停的过程中」**：取消的语义是「放弃等待 +
+      ;; 协作式中断」（§4.8），run 完全可能在这两行之间就收口了——工具还卡在
+      ;; 闸门上，但循环已经不等它了。原来写死 `(true? :stopping?)`，聚合跑时
+      ;; 间歇性红，红的是**断言**不是实现。要么还在停，要么已经停稳，都对。
+      (let [st (rt/run-status r "c1")]
+        (is (or (:stopping? st) (= :idle (:state st)))
+            "「正在停止…」或已经停稳——取消不等工具，两者都合法"))
       (deliver @tool-gate true)
       (is (sup/wait-for #(sup/terminal-event ((:events c)))))
       (is (= :run/cancelled (:type (sup/terminal-event ((:events c))))))
-      (is (= ["A"] @side-effects) "取消 = 放弃等待，不是杀线程")
+      ;; 同理：run 的终态可能**早于**工具跑完，所以这条要等，不能直接读
+      (is (sup/wait-for #(= ["A"] @side-effects)) "取消 = 放弃等待，不是杀线程"
+          )
       (rt/shutdown! r)))
 
   (testing "stop! 带 run-id 只停那一个，不误伤别的"
@@ -267,3 +288,40 @@
       (is (= ["c1"] (rt/conversations r)))
       (is (pos? (:seq st))))
     (rt/shutdown! r)))
+
+(deftest run-detached-leaves-no-trace-test
+  (testing "不留痕的 run：事件照出，但注册表里什么都没多"
+    (let [r (sup/runtime {:provider (sup/provider [{:text "你可以问问天气"}])})
+          out (atom [])
+          done (rt/run-detached!
+                {:agent ((:agent-fn r) {:conversation-id "throwaway" :tools []})
+                 :message "猜猜用户下一句想说什么"
+                 :on-event #(swap! out conj %)})]
+      (is (some? (deref done 5000 nil)) "跑完了")
+      (is (= :run/started (:type (first @out))))
+      (is (= :run/finished (:type (last @out))) "终态照旧良构")
+      (is (= "你可以问问天气" (sup/text-of @out)))
+      (is (= (range (count @out)) (map :seq @out)) "seq 从 0 起，自己一套号")
+      (is (empty? (rt/conversations r)) "**没有会话进注册表**——这正是它与 start-run! 的分野")
+      (is (nil? (rt/run-status r "throwaway")))
+      (rt/shutdown! r))))
+
+(deftest thread-read-surface-test
+  (testing "线程只读面要的两个出口：事件缓冲 + 摘会话"
+    (let [r (sup/runtime {:provider (sup/provider [{:text "你好"}])})
+          c (sup/collector)]
+      (rt/subscribe r "c1" {:on-event (:on-event c)})
+      (rt/start-run! r "c1" "hi")
+      (is (sup/wait-for #(sup/terminal-event ((:events c)))))
+      (testing "buffered-events 就是那份环形缓冲（有界、不落库）"
+        (let [evs (rt/buffered-events r "c1")]
+          (is (= (mapv :type ((:events c))) (mapv :type evs)))
+          (is (= :run/finished (:type (last evs))))))
+      (is (nil? (rt/buffered-events r "不存在的会话")))
+      (testing "last-active 露出来，线程列表要按它排"
+        (is (number? (:last-active (rt/run-status r "c1")))))
+      (testing "forget! 摘会话（**不动 ChatMemory**——历史归历史）"
+        (rt/forget! r "c1")
+        (is (empty? (rt/conversations r)))
+        (is (nil? (rt/run-status r "c1"))))
+      (rt/shutdown! r))))

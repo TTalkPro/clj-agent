@@ -93,13 +93,18 @@
    - `:buffer-size`       会话事件环形缓冲条数（缺省 512）
    - `:idle-ttl-ms`       空闲会话驱逐（缺省 30min；有 run / 有订阅者 / 暂停中的不驱逐）
    - `:supersede-wait-ms` supersede 时等旧 run 收尾的上限（缺省 5s）
-   - `:now`               `(fn [] ms)`，可注入（测试）"
+   - `:now`               `(fn [] ms)`，可注入（测试）
+   - `:event-transform`    `(fn [{:keys [run-id conversation-id]}] (fn [event] events))`，
+                          可选。**事件流插件的挂点**（见 `agui.event/emitter` 的
+                          `:transform`）：每个 run 现造一个有状态的 transform。
+                          `agui.genui/event-transform` 是现成的一个"
   [{:keys [agent-fn] :as opts}]
   (when-not (fn? agent-fn)
     (throw (ex-info "runtime 需要 :agent-fn (fn [{:keys [conversation-id tools]}] agent)" {})))
   (let [cfg (merge defaults opts)]
     {:agent-fn agent-fn
      :cfg cfg
+     :event-transform (:event-transform opts)
      :now (or (:now opts) #(System/currentTimeMillis))
      :conversations (atom {})
      :closed? (atom false)}))
@@ -222,7 +227,11 @@
                            :conversation-id conv-id
                            :next-seq (next-seq-fn entry)
                            :sink (make-sink entry)
-                           :now (:now rt)})
+                           :now (:now rt)
+                           ;; 插件的 transform 是**有状态的**（要记住这一轮见过哪些
+                           ;; tool-call），所以按 run 现造一个，不是全局共享一个
+                           :transform (when-let [f (:event-transform rt)]
+                                        (f {:run-id run-id :conversation-id conv-id}))})
         done (CompletableFuture.)
         a (-> ((:agent-fn rt) {:conversation-id conv-id :tools (vec tools)})
               (assoc :conversation-id conv-id :state-atom (:state-atom entry))
@@ -329,6 +338,48 @@
                            :discard-pause? discard-pause?
                            :opts (dissoc opts :tools :discard-pause?)}))))
 
+(defn run-detached!
+  "在一个**临时发射器**上跑一次 agent 调用——**不进注册表**：没有会话条目、
+   没有环形缓冲、没有订阅表、没有 stop / resume / 暂停。
+
+   为什么要有这条：CopilotKit 的 `/suggest`（「猜用户下一句想说什么」）是一次
+   **不留痕**的 run。它刻意不走 runner——runner 会按 threadId 写线程表，于是
+   一次一次性的建议把一堆废线程留在那儿。这里同样：事件直接给 `on-event`，
+   跑完就没了。
+
+   `agent` 由调用方给（**它决定这次用哪份配置、落不落 memory**——策略不该埋在
+   库里）。返回 `CompletableFuture`，完成值是 agent 的结果。
+
+   - `:message`         这一轮的用户输入
+   - `:on-event`        (fn [中立事件])
+   - `:opts`            透传给 `chat-async`（`:tool-choice` / `:max-iterations` …）
+   - `:run-id`          可选，缺省现生成"
+  [{:keys [agent message on-event opts run-id now]}]
+  (let [run-id (or run-id (str (UUID/randomUUID)))
+        n (atom -1)
+        token (streaming/make-cancel-token)
+        em (event/emitter {:run-id run-id
+                           :conversation-id (:conversation-id agent)
+                           :next-seq #(swap! n inc)
+                           :sink (or on-event (fn [_]))
+                           :now now})
+        a (emit/attach agent em)
+        done (CompletableFuture.)
+        finish! (fn [result throwable]
+                  (let [t (terminal-type em result throwable)]
+                    (when (= :run/finished t)
+                      (event/ensure-text! em (str run-id "-final") (:text result)))
+                    (event/finish! em t (terminal-payload t result throwable)))
+                  (.complete done (or result {})))]
+    (event/emit! em :run/started {:kind :suggest :input {:message message}})
+    (try
+      (-> (agent/chat-async a message (merge opts {:on-token (emit/token-fn em)
+                                                  :cancel-token token}))
+          (flt/fmap   (fn [result] (finish! result nil) result))
+          (flt/fcatch (fn [t] (finish! nil t) nil)))
+      (catch Throwable t (finish! nil t)))
+    done))
+
 (defn awaiting
   "会话是否在等 resume（暂停中）。返回 `{:run-id :reason :pending-tool}` 或 nil。"
   [rt conv-id]
@@ -390,7 +441,26 @@
        :stopping? (boolean (some-> r :emitter event/stop-requested?))
        :pending-tool (:pending-tool aw)
        :seq @(:seq entry)
+       :last-active @(:last-active entry)
        :subscribers (count @(:subs entry))})))
+
+(defn buffered-events
+  "会话环形缓冲里**现存**的事件（只读）。
+
+   注意这是**有界**的（`:buffer-size`，缺省 512 条）且**不落库**——它是为断线
+   续传服务的，不是事件日志。想要完整历史找 ChatMemory（§8.2「不做 durable
+   execution」）。`/threads/:id/events` 这类只读端点照实返回它现有的部分。"
+  [rt conv-id]
+  (some-> (entry-peek rt conv-id) :buffer deref :events vec))
+
+(defn forget!
+  "把一个会话从注册表里摘掉（**不动 ChatMemory**——历史归历史）。
+
+   在跑的 run 先停掉：不停的话它收尾时还会往一个没人再读的缓冲里写。"
+  [rt conv-id]
+  (stop! rt conv-id)
+  (swap! (:conversations rt) dissoc conv-id)
+  nil)
 
 (defn conversations [rt] (vec (keys @(:conversations rt))))
 

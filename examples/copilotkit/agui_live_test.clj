@@ -109,8 +109,13 @@
 (defn- of-type [conn t] (filterv #(= t (:type %)) (events conn)))
 (defn- text-of [conn] (apply str (map :delta (of-type conn "TEXT_MESSAGE_CONTENT"))))
 (defn- done? [conn] (seq (concat (of-type conn "RUN_FINISHED") (of-type conn "RUN_ERROR"))))
-(defn- paused? [conn]
-  (seq (filter #(= "cljagent.run.paused" (:name %)) (of-type conn "CUSTOM"))))
+;; 暂停走 AG-UI 的 interrupt 协议：终态那条 `RUN_FINISHED` 自带
+;; `outcome:{type:"interrupt", interrupts:[...]}`。
+(defn- interrupts-of [conn]
+  (into [] (mapcat #(get-in % [:outcome :interrupts])) (of-type conn "RUN_FINISHED")))
+(defn- paused? [conn] (seq (interrupts-of conn)))
+(defn- finished-ok [conn]
+  (filterv #(not= "interrupt" (get-in % [:outcome :type])) (of-type conn "RUN_FINISHED")))
 
 ;;; ============================================================
 ;;; 场景
@@ -207,14 +212,15 @@
       (rt/start-run! r "live-5" "你并没有真正执行退款。请立刻调用 refund-order 工具，order-id 是 ORD-2026。"))
     (check (wait-for #(paused? c)) "暂停事件到达"
            (when-not (paused? c) (str "模型两次都没调工具，答了：" (pr-str (text-of c)))))
-    (let [p (first (filter #(= "cljagent.run.paused" (:name %)) (of-type c "CUSTOM")))]
-      (check (= "refund-order" (get-in p [:value :pendingTool :name])) "带 pendingTool")
+    (let [itr (first (interrupts-of c))]
+      (check (= "refund-order" (get-in itr [:metadata :pendingTool :name])) "带 pendingTool")
+      (check (some? (:toolCallId itr)) "挂回那张工具卡片")
       (check (empty? @executed) "工具还没执行"))
     (check (= :awaiting-resume (:state (rt/run-status r "live-5"))) "会话在等 resume")
     (let [before (count (of-type c "TEXT_MESSAGE_CONTENT"))]
       ;; ↓ 真部署里这是**另一个 HTTP 请求**：它手上只有 conversation-id
       (rt/resume-run! r "live-5" "approved")
-      (check (wait-for #(seq (of-type c "RUN_FINISHED"))) "续跑完成")
+      (check (wait-for #(seq (finished-ok c))) "续跑完成")
       (check (some #(= :refund (first %)) @executed) "批准后工具真的执行了" (pr-str @executed))
       (check (>= (- (count (of-type c "TEXT_MESSAGE_CONTENT")) before) 2)
              "审批之后那段是**流式**的（框架侧唯一那处改动换来的）"
@@ -247,7 +253,7 @@
            "前端拿到 TOOL_CALL_START，自己去执行")
     ;; 前端执行完，把结果作为 :reply 送回来（载荷即工具结果）
     (rt/resume-run! r "live-6" "reply" {:message (json/generate-string {:clicked "ok"})})
-    (check (wait-for #(seq (of-type c "RUN_FINISHED"))) "续跑完成")
+    (check (wait-for #(seq (finished-ok c))) "续跑完成")
     (check (= {:clicked "ok"} (some-> (first (of-type c "TOOL_CALL_RESULT"))
                                       :content (json/parse-string true)))
            "前端的结果作为工具结果回灌给模型")

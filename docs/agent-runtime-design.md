@@ -239,7 +239,9 @@ CopilotKit 叫 thread，我们**不跟**——Clojure 代码里 thread 已经是
 {:type :run/started      :input {:message "..."} :conversation-id "c1"}
 {:type :message/started  :message-id "m1" :role :assistant}
 {:type :message/delta    :message-id "m1" :text "北"}          ; ← on-token :token
-{:type :message/thinking :message-id "m1" :text "…"}           ; ← on-token :reasoning-token
+{:type :reasoning/started :message-id "m1-reasoning"}          ; 思考块开（独立消息）
+{:type :message/thinking :message-id "m1-reasoning" :text "…"} ; ← on-token :reasoning-token
+{:type :reasoning/ended  :message-id "m1-reasoning"}          ; 思考块合
 {:type :message/ended    :message-id "m1"}
 {:type :tool/started     :tool-call-id "tc1" :name "get_weather"}
 {:type :tool/args        :tool-call-id "tc1" :args {:city "北京"}}
@@ -459,11 +461,11 @@ CopilotKit v2 前端只用四条路由（其余 threads/memories/suggest/transcr
 |---|---|
 | `:run/started` / `:run/finished` / `:run/error` | `RUN_STARTED` / `RUN_FINISHED` / `RUN_ERROR` |
 | `:message/started` `:delta` `:ended` | `TEXT_MESSAGE_START` `TEXT_MESSAGE_CONTENT` `TEXT_MESSAGE_END` |
-| `:message/thinking` | `THINKING_TEXT_MESSAGE_CONTENT`（无对应则降级为 `CUSTOM`） |
+| `:reasoning/started` `:message/thinking` `:reasoning/ended` | `REASONING_START`+`REASONING_MESSAGE_START` / `REASONING_MESSAGE_CONTENT` / `REASONING_MESSAGE_END`+`REASONING_END`。**思考是一条独立的 `role:"reasoning"` 消息**（自己的 message-id），前端有折叠面板原生渲染；`THINKING_*` 在 0.0.59 已 deprecated |
 | `:tool/started` `:args` `:ended` `:result` | `TOOL_CALL_START` `TOOL_CALL_ARGS` `TOOL_CALL_END` `TOOL_CALL_RESULT` |
 | `:state/snapshot` | `STATE_SNAPSHOT` |
 | `:run/cancelled` | `RUN_FINISHED`（带 reason）——AG-UI 没有 cancelled |
-| **`:run/paused`** | **无对应**。两条路：`CUSTOM` 事件（前端自定义渲染），或建模成一个「等待前端返回结果的 tool call」（CopilotKit 的 HITL 惯用法）。**待拍板（§9.4）** |
+| **`:run/paused`** | `RUN_FINISHED` + `outcome:{type:"interrupt", interrupts:[{id, reason, toolCallId, responseSchema, metadata}]}`（AG-UI interrupt 协议）。答复走**下一次 run** 的 `RunAgentInput.resume[]`，不是新端点。`/info` 报 `capabilities.humanInTheLoop.interrupts` |
 
 ### 5.3 落在哪：新建 `clj-agent-agui` 模块（用户拍板 2026-09-03）
 
@@ -796,7 +798,7 @@ sqlite-runner 那套（`agent_runs` + `run_state` 表）是 durable execution �
 | # | 问题 | 定了什么 |
 |---|---|---|
 | 1 | 暂停中的会话收到新 `start-run!` | **(a) 拒绝**，返回 `{:status :awaiting-resume :pending-tool …}`。刻意不沿用 `simple-agent` 的 `cancel-pending!`（新 turn 静默丢弃未 resume 的暂停）——web 场景下「用户没点审批就又发了一句」应当显式暴露 |
-| 2 | `:run/paused` 怎么映射到 AG-UI | **(a) `CUSTOM` + 补一条 `RUN_FINISHED`**（`cljagent.run.paused` 带 `pendingTool`；终态那条是联调加的，见 §9.10）。(b) 那条「建模成待前端返回结果的 tool call」的路，**前端工具已经在走了**（§7.2）——两条路各自成立，不必把审批暂停也硬塞进 tool-call 形状。**联调实测**：stock CopilotKit 前端把暂停渲染成一张停在 `inProgress` 的工具卡片，语义上正好对；要有审批按钮则前端自己给 `CUSTOM` 写个 renderer |
+| 2 | `:run/paused` 怎么映射到 AG-UI | **(c) AG-UI 的 interrupt 协议**（2026-09-03 改定，原定 (a) `CUSTOM` + 补一条 `RUN_FINISHED`）：`RUN_FINISHED` + `outcome:{type:"interrupt", interrupts:[…]}`——收口与告知合成**一条**事件。改的理由见 §9.11：`@ag-ui/core` 0.0.59 起 interrupt 是一等协议，CopilotKit 的 `useInterrupt` 明写着 `CUSTOM` 那条是 **legacy** 分支。(b) 那条「建模成待前端返回结果的 tool call」的路，**前端工具仍在走**（§7.2）——审批不必硬塞进 tool-call 形状，它现在以 `interrupt.toolCallId` 挂回同一张工具卡片，比塞进去更准 |
 | 3 | §6.1 的 opts 怎么进 `resume` | **(a) 新增 4-arity** `[agent decision payload opts]`。payload 是**用户答复**的载荷，传输选项混进去是两件事挤一个槽 |
 
 ### 9.6 测试清单
@@ -872,18 +874,22 @@ CopilotKit 的 suggestions 也自动工作了（它把 `copilotkitSuggest` 当�
 | 1 | 前端拿 `/info` 后去请求 `/agent/0/run` | `agents` 必须是**以 id 为键的字典**，我们发的是数组——客户端 `Object.entries` 把下标当成了 agent id | `codec/run-info` |
 | 2 | `/stop` 404 | threadId 是**路径段** `/stop/:threadId`，不是请求体 | 路由示例 |
 | 3 | `AGUIError: First event must be 'RUN_STARTED'` | **起 run 与订阅之间有真空**：run 立刻起跑并发出 `:run/started`，HTTP 层却要等 `start-run!` 返回才能 `subscribe`，那一条就漏了 | `start-run!` 增返回 `:since`（起跑前的水位），订阅时带上——**这正是会话级 `:seq` 的用处** |
-| 4 | 工具卡片永远停在 `inProgress`，HTTP 请求不结束 | 暂停的 run 在 AG-UI 侧**没有终态**，流也不关。AG-UI 的一条 run 必须以终态收口 | `codec/->agui-events`（`:run/paused` → `CUSTOM` + `RUN_FINISHED`）；`/run` 终态即关流，**`/connect` 不关**（它跨 run） |
+| 4 | 工具卡片永远停在 `inProgress`，HTTP 请求不结束 | 暂停的 run 在 AG-UI 侧**没有终态**，流也不关。AG-UI 的一条 run 必须以终态收口 | `codec/->agui-events`（`:run/paused` 补一条 `RUN_FINISHED`；§9.11 之后这两条合成了一条带 `outcome` 的终态）；`/run` 终态即关流，**`/connect` 不关**（它跨 run） |
 | 5 | 输入框敲了字发不出去，会话卡死 | CopilotKit 的 suggestions 把 `copilotkitSuggest` 当前端工具塞进 `tools`，**只读 `TOOL_CALL_ARGS`、从不回结果**——会话于是永远停在 `:awaiting-resume`，挡住后续所有消息 | `start-run!` 增 `:discard-pause?`（**缺省仍是拒绝**，§4.4 的取舍不变；要丢就显式说）。前端工具的暂停由路由侧判定「这次没带结果 → 它不会回了」 |
 
 第 3、5 两条是**运行时 API 的真实缺口**（各加了一个返回值 / 一个选项），
 第 1、2、4 是协议对接细节，全在示例与 codec 里。
 
-**顺带产出的两条「不属于 AG-UI」的端点**（人工审批是**你的应用**的事，协议里
-没有它）：`POST …/approve`（`{threadId, decision, payload}` → `resume-run!`）与
-`GET …/pending`（待审批列表 = `conversations` + `awaiting` 两个调用）。
+**顺带产出的两条「不属于 AG-UI」的端点**：`POST …/approve`
+（`{threadId, decision, payload}` → `resume-run!`）与 `GET …/pending`
+（待审批列表 = `conversations` + `awaiting` 两个调用）。当时以为「人工审批是
+你的应用的事，协议里没有它」——**§9.11 更正了前半句**：协议里有 `resume[]`。
+这两条留下来做**带外审批**（审批台 / Slack 按钮 / 运维脚本：手上只有
+conversation-id，不发聊天消息，也不该被迫伪造一次 run）。
 
-**没做**：给 `CUSTOM/cljagent.run.paused` 写前端 renderer（那是前端工程的活）。
-所以 stock demo 上「同意」按钮是用 curl 打 `/approve` 代替的。
+**没做**：给暂停写前端 renderer（那是前端工程的活）。所以当时 stock demo 上
+「同意」按钮是用 curl 打 `/approve` 代替的——§9.11 之后这一条也不必了：
+`useInterrupt` / `useHumanInTheLoop` 是现成的。
 
 ---
 
@@ -920,6 +926,284 @@ CopilotKit 的 suggestions 也自动工作了（它把 `copilotkitSuggest` 当�
 **教训**：一个「多留一条通道」的便利（config 回读 tools）和一个「多接受一种来源」
 的宽容（build-params 合并两处），各自看都无害；**合起来就是同一份数据走两条路**，
 而且只有在两条路的归一化程度不同时才暴露。
+
+---
+
+### 9.11 改用 AG-UI 的 interrupt 协议（2026-09-03，晚于 §9.10）
+
+**结论先说**：`:run/paused` 不再发 `CUSTOM/cljagent.run.paused`，改成
+
+```json
+{"type":"RUN_FINISHED","threadId":"…","runId":"…",
+ "outcome":{"type":"interrupt",
+            "interrupts":[{"id":"tc9","reason":"approval-required",
+                           "toolCallId":"tc9",
+                           "responseSchema":{"type":"object",
+                                             "properties":{"decision":{"type":"string",
+                                                                       "enum":["approved","rejected"]}},
+                                             "required":["decision"]},
+                           "metadata":{"pendingTool":{"name":"wipe-database","args":{…}}}}]}}
+```
+
+答复走**下一次 run 的请求体**：`RunAgentInput.resume = [{interruptId, status, payload}]`。
+`/info` 每个 agent 报 `capabilities.humanInTheLoop = {supported, approvals, interrupts}`。
+
+**为什么原来没走这条**：§5.2 列待拍板项时只摆了两条路（`CUSTOM` / 建模成 tool
+call），`outcome:"interrupt"` **根本没进候选**——不是权衡后否掉的，是没看见。
+联调对的那个 demo 自己 pin 的是 `@ag-ui/client 0.0.51`，**那个版本里没有
+interrupt 协议**（`interruptId` 出现 0 次），demo 也没用 `useInterrupt` /
+`useHumanInTheLoop`。于是「联调跑通了」这件事恰好绕过了缺口。
+
+**为什么现在要改**：真正跑的前端不是 0.0.51——demo 依赖的 `@copilotkit/core` /
+`react-core` 是 workspace 包，pin 的是 `@ag-ui/core 0.0.59`，那里 interrupt 是
+一等协议（`RunFinishedInterruptOutcomeSchema` / `ResumeEntrySchema` /
+`HumanInTheLoopCapabilitiesSchema.interrupts`）。而 `use-interrupt.tsx` 里写得
+很直白：
+
+> `legacy` carries the custom-event payload; `standard` carries the AG-UI
+> `outcome:"interrupt"` interrupts array.
+
+我们那套 `CUSTOM` 正好落在人家**显式标成 legacy** 的分支上。四条实际代价：
+
+| | 走 `CUSTOM` | 走 interrupt |
+|---|---|---|
+| 渲染 | 前端自己写 renderer（所以 §9.10 那条「没做」） | `useInterrupt` / `useHumanInTheLoop` 接管 |
+| 答复 | 自造 `/approve` 端点 | 下一轮 `/run` 带 `resume[]`，零新端点 |
+| 白丢的字段 | 无 | `interruptId`（并发审批对得上）、`responseSchema`（前端自动渲审批控件）、`expiresAt`、`editedArgs` |
+| 语义 | `RUN_FINISHED{result:{status:"paused"}}`——`result` 是自由字段，标准客户端看 `outcome` 缺省 **= success**，它以为这轮正常结束了 | 明确是 interrupt |
+
+最后一行是真问题，不只是风格问题。
+
+**改动落点**（框架侧两处、示例侧一处）：
+
+| 在哪 | 改了什么 |
+|---|---|
+| `codec/->agui` | `:run/paused` → `RUN_FINISHED` + `outcome`；新增公开的 `codec/interrupt-id`（暂停事件与 `runtime/awaiting` 同形，两侧算出同一个 id） |
+| `codec/->agui-events` | 不再一对多（终态与告知合成一条），函数留着——留住下一个一对多场景的口子 |
+| `codec/parse-run-input` | 多解析一个 `resume` |
+| `codec/run-info` | 每个 agent 加 `capabilities.humanInTheLoop`；**`approveWithEdits` 不报**（改参数再执行还没实现） |
+| `examples/copilotkit/http_kit_routes.clj` | `handle-run` 认 `resume[]`，且**排在所有推断之前**（tool-call 型 interrupt 被 resolve 时客户端会同时补一条 tool 消息，先认 `resume` 才不会误当成前端工具结果）；`interruptId` 对不上就当没有（过期重放）；`/pending` 多带 `interruptId` |
+
+**没动**：`:run/cancelled` 仍是 `RUN_FINISHED` + `result.status`——标准 outcome
+只有 `success` / `interrupt` 两种，没有 cancelled 可对。
+（`:message/thinking` 当时也留着走 `CUSTOM`，**已在 §9.13 改掉**。）
+
+---
+
+### 9.12 移植 CopilotKit 的 Open Generative UI（可选插件）
+
+上游是 `packages/runtime/src/v2/runtime/open-generative-ui-middleware.ts`：模型调
+`generateSandboxedUi` 生成一块 HTML/CSS/JS，运行时**不执行**它，把参数翻译成
+`ACTIVITY_SNAPSHOT` + 一串 `ACTIVITY_DELTA`（JSON Patch），前端在沙箱 iframe 里
+边收边渲染。落成 `modules/clj-agent-agui/src/…/agui/genui.clj`，**默认不装**。
+
+**为此新增的唯一运行时 API**：`event/emitter` 的 `:transform` +
+`runtime` 的 `:event-transform`（每 run 现造一个有状态的 transform）。
+它是**通用的事件流插件挂点**——可以改写、吞掉、或在一条事件前后插事件：
+
+| 契约 | 为什么仍成立 |
+|---|---|
+| `:seq` 单调无洞 | 号是**发射时**分配的，transform 产出几条就取几个号 |
+| 恰好一个终态、且在最后 | **终态不过 transform**（`event/expand` 里挡掉）——让插件有机会吞掉终态，这条保证就没了 |
+| 发射器永不抛 | transform 抛异常 = 原样放行 + 一条 warn，与 sink 抛异常同款兜法 |
+
+**与上游的一处真实差异**：那边吃的是**流式 tool-call 参数**（`TOOL_CALL_ARGS`
+一片片来，用 clarinet 增量解析），而我们不增量流式工具参数（§10 第 4 条），
+`:tool/args` 一次给出完整参数。所以扫描器（自己写的，约 100 行，不引依赖——
+要的不是「解析出一个值」而是「字符串还没结束但已经攒了这么多」这个出口）同样是
+增量的，只是今天**一口喂完**：事件的形状与顺序与上游逐条一致，「边生成边长
+出来」要等参数流式落地。那天到了，`genui.clj` 一个字都不用改。
+
+顺带修的一处：参数按约定顺序**重新序列化**后再喂扫描器。模型的原始 key 顺序在
+provider 解析 JSON 时就丢了，而这个特性的提示词恰恰要求按顺序生成
+（`initialHeight` → `css` → `html` → …）——按约定重排比听天由命诚实。
+
+三个「猜错了前端不报错、只会静默少渲染」的形状（全部有测试钉住，断言逐条对着
+上游的 e2e 测试写）：snapshot 必须**先于**任何 delta 且只发一条（惰性发射，
+`initialHeight` 迟到就改发 delta）；`add` 操作**必须带 `value`**（模型常给
+`jsFunctions: null`，发一条没有 value 的 patch 会让前端把**整批**判非法丢掉）；
+`html` 是**数组**不是字符串（`/html` 先建空数组，之后 `/html/-` 一块块追加）。
+
+---
+
+### 9.13 思考块改走 `REASONING_*`（2026-09-03）
+
+原来 `:message/thinking` 编码成 `CUSTOM/cljagent.thinking`，理由是「AG-UI 的
+`THINKING_*` 不是所有前端都认」。查下来这个判断只对了一半：`THINKING_*` 确实
+在 0.0.59 全部 deprecated（1.0 移除），但取代它的 `REASONING_*` 是一等公民，而且
+**CopilotKit 前端有原生的折叠面板渲染它**（`CopilotChatMessageView` 的
+`CopilotChatReasoningMessage`）。发 `CUSTOM` = 把现成的渲染让掉了。
+
+改动不止 codec 一行——思考在 AG-UI 里是**一条独立的消息**（`role: "reasoning"`），
+而我们原来把思维 token 挂在**正文消息的 id** 上：
+
+| 改哪 | 改成什么 |
+|---|---|
+| `event.clj` | 新增 `:reasoning/started` / `:reasoning/ended` 两个中立事件与 `end-reasoning!`；思考块的 id 是正文 id 加 `-reasoning` 后缀。**正文 token 一到就把思考块收口**，反之亦然（一轮里来回切换是常态）；`end-message!` 与 `close-open!` 都补一次收口 |
+| `event.clj` 的 `track!` | `:message/thinking` **不再进正文消息的开集合**——否则 `close-open!` 会给一条从没开过的正文消息补 `:message/ended` |
+| `codec.clj` | 开合各展开成**一对**：`REASONING_START` + `REASONING_MESSAGE_START` / `REASONING_MESSAGE_END` + `REASONING_END`；中间是 `REASONING_MESSAGE_CONTENT`。这正是 §9.11 里说的「留着 `->agui-events` 的一对多口子」派上用场 |
+
+一条容易忽略的约束：**思考块的 message-id 必须与正文不同**。共用 id 的话，同一个
+id 上既有 `TEXT_MESSAGE_START` 又有 `REASONING_MESSAGE_START`，客户端只认先到的
+那一种，另一半静默消失。
+
+---
+
+### 9.14 A2UI 插件（2026-09-03）
+
+第二条生成式 UI 的路，移植自 `@ag-ui/a2ui-middleware`。落成
+`agui/a2ui.clj`，与 `genui` 同一个插件形状（`with-tool` + `event-transform`），
+另加一个**入站**挂点。
+
+**两条路的分工**（上游把它们挂在 `agent-utils.ts` 的同一个位置，是并列关系不是
+替代关系）：genui 让模型写 HTML/CSS/JS，自由但要沙箱执行；A2UI 让模型按
+**catalog 白名单**拼组件树，前端用自己的组件库渲染，**不执行任意代码**。
+
+**wire 形状**（一条快照，不需要 delta）：
+
+```json
+{"type":"ACTIVITY_SNAPSHOT","messageId":"a2ui-surface-<toolCallId>",
+ "activityType":"a2ui-surface","replace":true,
+ "content":{"a2ui_operations":[
+   {"version":"v0.9","createSurface":{"surfaceId":"s1","catalogId":"…basic/catalog.json"}},
+   {"version":"v0.9","updateComponents":{"surfaceId":"s1","components":[…]}},
+   {"version":"v0.9","updateDataModel":{"surfaceId":"s1","path":"/","value":{…}}}]}}
+```
+
+三条 op 的顺序是协议要求的（建面 → 给组件 → 灌数据）；`replace: true` 是
+「整块换掉」——**所以 A2UI 根本不需要 delta**，与 genui 那条 snapshot + 一串
+delta 的路正好相反。codec 的 `:activity/snapshot` 因此多认一个 `:replace`。
+
+**catalog 是这条路的要害**：它既是给模型的词汇表，也是「模型编不出前端没注册的
+组件」的保证。缺省内置 A2UI v0.9 基础 catalog 的 18 个组件（**生成的**：由
+`@a2ui/web_core` 的 `catalogs/basic/catalog.json` 摘出组件名 + 属性 + 描述 +
+枚举 + 必填，丢掉 `$ref` 那些给校验器看的东西）。要用自己的组件库就传
+`:catalog`——传错了不会报错，只会渲染空白。
+
+**新增的入站挂点** `:input-transform`（`routes/start!`，对称于 `:event-transform`）：
+用户在生成出来的界面上点按钮，前端发 `forwardedProps.a2uiAction`。
+
+**与上游的两处差异**：
+
+| # | 上游 | 我们 | 为什么 |
+|---|---|---|---|
+| 1 | 从**流式** tool-call 参数里增量抠出「已经完整的那几个组件」（`extractCompleteItems`），边生成边贴 | 参数一次到齐，**一条快照发完** | 我们不增量流式工具参数（§10 第 4 条）。形状与顺序一致，少的是中间态 |
+| 2 | 用户动作合成成 `log_a2ui_event` 的一次**工具调用 + 工具结果**塞进历史 | 翻成一条**用户消息**（措辞与上游 `formatUserActionResult` 逐字相同） | 历史取服务端权威（§7.3），客户端塞不进消息 |
+
+**没做**：组件校验与 retry 生命周期（上游的 `recovery` / `status: "retrying"`）——
+那是「模型拼错了自动重试」的产品逻辑，得先有真实前端反馈才知道值不值得。
+
+---
+
+### 9.15 `/suggest`：无状态建议端点（2026-09-03）
+
+**为什么值得单开一条路**：不实现它，前端就把 `copilotkitSuggest` 塞进 `/run` 的
+`tools` 里自己凑合——那正是 §9.10 第 5 条「输入框敲了字发不出去」的来源。
+客户端只有在 `/info` 报 `suggestions: true` 时才走这条路（`suggestion-engine.ts`
+的 `useStateless`），所以那个能力位也一起改成可配。
+
+这条路与 `/run` 的每一处不同都是刻意的（对齐上游 `handle-suggest`）：
+
+| | `/run` | `/suggest` |
+|---|---|---|
+| 历史 | **服务端权威**，只取最后一条 user 消息（§7.3） | **客户端权威**——没有服务端线程，它发上来的就是全部上下文 |
+| 会话 | 进注册表：缓冲、订阅、stop / resume | **不进**——一次性的建议不该留下一堆废会话 |
+| 落库 | memory filter 循环内落库 | 临时 store，跑完就没了 |
+| 工具 | 服务端工具 + 前端工具（会暂停） | 只有客户端这次声明的，都不执行 |
+| 插件 | 挂 | **不挂**：工具选择已被强制，注入的工具是白费 |
+
+**库侧新增两样**：
+
+- `runtime/run-detached!`——在临时发射器上跑一次 agent 调用，事件直接给
+  `on-event`，不进注册表。上游那句「the runner's event pipeline minus
+  persistence」在我们这儿就是这个函数；
+- `codec/agui->messages`——入站消息解析（`message->agui` 的反面）。主路径用不着
+  （历史取服务端权威），**只有无状态 run 用得着**。
+
+**一处只有真机才照得出来的事**：`:max-iterations 1` 拦不住第二轮 LLM。它限制的是
+**工具轮**的次数，工具跑完之后那次「总结一下」的调用照发——实测白花了一整轮
+reasoning + 29 块正文 token，而那轮产出没有任何人读（建议的载体是
+`TOOL_CALL_ARGS`，不是模型的话）。挡它的正确姿势是工具的 **`:return-direct`**：
+工具结果即最终答案，不再回灌 LLM。
+
+**一个容易踩的坑**：建议工具**不能**用 `agui-tools/frontend-tool` 建。那个会让
+gate 把 run 暂停下来等前端回结果，而 `copilotkitSuggest` **从来不回结果**——
+会话于是永远停在 `:awaiting-resume`。这正是 §9.10 第 5 条那个 bug 的同一个根，
+换个位置又长出来一次。
+
+---
+
+### 9.16 MCP 接入（2026-09-03）
+
+上游是两个中间件（`agent-utils.ts`）：`MCPMiddleware` 把 MCP server 的工具接进
+工具表，`MCPAppsMiddleware` 处理**带 UI 资源**的工具。落成 `agui/mcp.clj` 一个 ns。
+
+**客户端不引依赖**：JSON-RPC 2.0 over Streamable HTTP，传输走 JDK 自带的
+`java.net.http`。而且 `:transport` 是可注入的 `(fn [payload] response)`——
+单测拿一个纯函数就把「握手 → 列工具 → 调工具 → 出 activity」整条链跑完了，
+不起服务也不上网。真传输那一半另起一个最小 MCP server 验
+（`examples/copilotkit/mcp_server_example.clj`）：**只有真打一次 HTTP 才知道**
+`Mcp-Session-Id` 有没有回传、SSE 形态的响应认不认。
+
+**与上游的一处真实差异——谁执行 UI 工具**：上游把 UI 工具注入进 `tools`，但
+agent 框架并不执行它们，所以中间件在 run 收尾时自己扫「没有结果的 tool call」
+再补执行、补 `TOOL_CALL_RESULT`。我们的内联工具本来就由循环执行（`:handler`
+就是 `tools/call`），于是：
+
+- 不需要那套「扫悬空 tool call」的补偿逻辑；
+- 工具结果**在轮内**回灌给模型（上游是 run 末尾才补，模型根本看不到）——
+  对「查完再答」这种用法反而更对；
+- activity 消息由 `event-transform` 在 `:tool/result` 时发。
+
+**三处照抄的协议细节**（猜错了就是不通）：`initialize` 之后**必须**补一条
+`notifications/initialized`；客户端能力里要声明 `io.modelcontextprotocol/ui`
+扩展，否则 server 不把带界面的工具给你；`server-hash` 是 md5 of
+`{type,url,headers}`——**前端不知道 url**，它引用 server 只有 serverId / hash。
+
+**代理通道**：前端那块 MCP App 界面跑在 iframe 里，它要调 server 时把请求塞在
+`forwardedProps.__proxiedMCPRequest` 里走 `/run` 发上来。这时候**不起 agent**，
+回一对 `RUN_STARTED` / `RUN_FINISHED{result}` 就完（路由里的 `sse-frames`）。
+方法有**白名单**（`tools/call` / `resources/read` / `notifications/message` /
+`ping`）——那块界面是 server 给的 HTML，不能让它随便调。
+
+**没做**：SSE 传输（上游支持 `type: "sse"` 的老式双通道；Streamable HTTP 是现在
+的默认，等真碰到只支持老传输的 server 再说）、OAuth 授权流、`resources/subscribe`。
+
+---
+
+### 9.17 `/threads*` 线程只读面（2026-09-03）
+
+上游由 `AgentRunner` 的 `LocalThreadEndpointRunner` 支撑（`listThreads` /
+`getThreadMessages` / `getThreadEvents` / `getThreadState` / `clearThreads`）。
+我们**该有的东西全都有**，只是没按这几条路由暴露过：
+
+| 端点 | 数据从哪来 |
+|---|---|
+| `GET /threads` | 会话注册表（§3.3 那张表） |
+| `GET /threads/:id/messages` | **ChatMemory**——服务端权威的那份历史（§7.3） |
+| `GET /threads/:id/events` | 会话的环形缓冲（`rt/buffered-events`） |
+| `GET /threads/:id/state` | 缓冲里最后一条 `:state/snapshot` |
+| `POST /threads/clear`、`DELETE /threads/:id` | 摘会话 + 清 ChatMemory |
+| `POST /threads/:id`（改名）、`…/archive` | 进程内的一小张元数据表 |
+
+**所以库侧只加了三样只读出口**：`rt/buffered-events`、`rt/forget!`（摘会话，
+**不动 ChatMemory**——历史归历史）、`run-status` 多露一个 `:last-active`。
+外加 `codec/messages->thread-messages`：线程列表那套 `toolCalls` 是**扁的**
+`{id, name, args}`，与事件流那套 OpenAI 风格的
+`{id, type, function:{name, arguments}}` **不是一个形状**（上游也分两套，
+照抄的是 `handleGetThreadMessages` 的本地分支）。
+
+**三条如实说的边界**（宁可让前端少显示，也不假装有）：
+
+1. 会话空闲 30 分钟会被驱逐（`:idle-ttl-ms`），驱逐后它就不在列表里了——
+   历史还在 ChatMemory，但 `ChatMemory` 协议**没有「列出所有会话」**，
+   所以列不出来。真要完整的线程列表，得给 ChatMemory 加一张线程表；
+2. 事件缓冲是**有界**的（缺省 512 条）且不落库——它是为断线续传服务的，不是
+   事件日志（§8.2「不做 durable execution」）。`/events` 照实返回现存的部分；
+3. 线程名与归档标记只活在**进程内**，重启即失。
+
+`/threads/subscribe` **如实 404**：那是 Intelligence（云产品）的实时通道，
+我们没有。客户端收到 404 会降级成轮询——比假装订阅成功然后永远不推送强。
 
 ---
 
