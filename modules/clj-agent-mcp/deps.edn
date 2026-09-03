@@ -1,0 +1,26 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ ;; **零内部依赖**：MCP 是一个独立协议，本模块不认识 agent / chat-client / 事件流。
+ ;; 工具接入产出的是**普通 map**（`{:name :description :parameters :handler}`），
+ ;; 那是 clj-agent 的内联工具约定，不需要 require 任何东西就能满足。
+ ;; 谁要把它接进 agent，谁自己去 conj 进 `:tools`。
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        ;; JSON —— JSON-RPC 2.0 的编解码
+        cheshire/cheshire {:mvn/version "5.12.0"}
+
+        ;; 日志
+        com.taoensso/timbre {:mvn/version "6.3.0"}}
+
+ ;; **零 web 依赖**：HTTP 传输走 JDK 自带的 `java.net.http`（出站客户端）；
+ ;; 服务端那侧只产出**纯函数** `server/handle-message`，把它接到哪个 web 框架上
+ ;; 是调用方的事（design-principles §2）。stdio 两侧都在模块内——它不碰 web。
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}
