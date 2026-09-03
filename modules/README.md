@@ -10,13 +10,18 @@ clj-agent/
 │   ├── clj-agent-core/      # 协议(端口) + chat-client 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
 │   ├── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
-│   └── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议,依赖 core + client
+│   ├── clj-agent-mcp/       # (可选)MCP 协议两侧(client + server),**零内部依赖**
+│   └── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议,依赖 core + client + mcp
 ├── bb.edn                   # 开发任务(bb test / bb jar / bb release …)
 ├── build.clj                # 三模块统一构建发布(tools.build)
 └── deps.edn                 # 根配置(开发/测试一次性加载全部模块)
 ```
 
 依赖方向:**Provider → Core ← Client ← AGUI**(实现与运行时各自依赖抽象,互不依赖;agui 挂在 client 外面,没人依赖它)。应用层在运行时构造一个 provider 注入 agent。
+
+`clj-agent-mcp` 站在这张图**外面**:它谁也不依赖(连 core 都不),因为 MCP 是一个独立协议,
+它产出的工具是**普通 map**——那是 clj-agent 的内联工具约定,不需要 require 任何东西就能满足。
+agui 依赖它,只是为了 MCP Apps 那半边(activity 事件 + UI 代理)。
 
 ---
 
@@ -78,6 +83,31 @@ Request/Response/SSE 帧。真路由在 `examples/copilotkit/`。
 
 **依赖**: `clj-agent-core` + `clj-agent-client`; cheshire, timbre
 (设计与判据见 `docs/agent-runtime-design.md`)
+
+---
+
+### 1.7 clj-agent-mcp — MCP 协议两侧(可选)
+
+**职责**: 按规范 [`2026-07-28`](https://modelcontextprotocol.io/specification/2026-07-28)
+实现 MCP 的 **client 与 server 两侧**,并向下兼容 `initialize` 握手时代的老实现
+(**双时代**)。传输:Streamable HTTP + stdio。
+
+- `im.ttalk.agent.mcp.protocol` - 纯数据:方法名 / `_meta` 键 / 错误码 / 版本 / 信封,**零 I/O**
+- `im.ttalk.agent.mcp.transport` - Streamable HTTP + stdio;`(fn [msg] resp)` 也是合法传输
+- `im.ttalk.agent.mcp.client` - 判时代 + `tools/*` `resources/*` `prompts/*` + 翻页
+- `im.ttalk.agent.mcp.tools` - MCP 工具 → clj-agent 内联工具
+- `im.ttalk.agent.mcp.server` - `handle-message`(纯函数)+ stdio 循环
+
+2026-07-28 是一次**大改版**:删掉 `initialize` 握手、HTTP 不再有会话、版本与能力改成
+**每条请求自带**(`params._meta`)、结果多 `resultType`、roots/sampling/logging 全部
+deprecated。所以这不是升级而是重写——原来那份 legacy 实现在 `agui/mcp.clj` 里,现已
+瘦身为只剩 MCP Apps 的前端约定。
+
+**零 web 服务端依赖**:HTTP 客户端走 JDK 自带的 `java.net.http`;服务端只给纯函数,
+接到哪个 web 框架上是调用方的事(示例见 `examples/mcp/server_example.clj`)。
+
+**依赖**: 无内部依赖; cheshire, timbre
+(设计与判据见 `docs/mcp-module-design.md`)
 
 ---
 

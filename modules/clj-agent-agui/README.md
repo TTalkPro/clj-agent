@@ -32,7 +32,7 @@
 | `im.ttalk.agent.agui.codec` | 中立事件 ⇄ AG-UI 事件、中立消息 → AG-UI 消息、`RunAgentInput` 解析 |
 | `im.ttalk.agent.agui.tools` | AG-UI 前端工具（client-side tool）→ 内联工具 + gate |
 | `im.ttalk.agent.agui.a2ui` | **可选插件**：A2UI —— 声明式生成式 UI，模型按 catalog 拼组件树（不执行任意代码） |
-| `im.ttalk.agent.agui.mcp` | **可选插件**：MCP 接入 —— server 的工具进工具表；带 UI 资源的（MCP Apps）额外出 activity |
+| `im.ttalk.agent.agui.mcp` | **可选插件**：MCP Apps 的**前端那半边** —— 带 UI 的工具出结果时补一条 activity 事件 + UI 代理白名单。协议栈在 [`clj-agent-mcp`](../clj-agent-mcp/) |
 
 **零 web 服务端依赖**（`design-principles.md` §2）：订阅是回调，本模块不做 HTTP
 服务端——不引 ring / http-kit，不认识 Request / Response、不产 SSE 响应帧、不管
@@ -156,9 +156,13 @@ CopilotKit **Runtime 的一个可选中间件**自己的约定
 ;; :open-generative-ui? 选项），前端才会注册它那半边的 renderer
 ```
 
-> **A2UI 与 MCP 留在模块里**：A2UI 有自己的外部规范（`a2ui.clj` 里的 catalog id
-> 指向 `a2ui.org/specification/v0_9/...`）、MCP 是跨框架的工具接入协议，两者都不绑
-> 某一个前端 runtime 的中间件实现。这条线以后要再切，判据同上：**协议认不认**。
+> **A2UI 留在模块里，MCP 已按同一条判据切开**（2026-09-04）：
+> A2UI 有自己的外部规范（`a2ui.clj` 里的 catalog id 指向
+> `a2ui.org/specification/v0_9/...`），不绑某一个前端 runtime 的中间件实现，所以留下。
+> MCP 则**两半都有**：JSON-RPC 信封 / 双时代握手 / 两种传输 / `tools/*` 是**协议**，
+> 已搬进独立模块 [`clj-agent-mcp`](../clj-agent-mcp/)；而 activity 消息、
+> `replace: true`、`forwardedProps.__proxiedMCPRequest` 是 **CopilotKit 前端的约定**，
+> 留在 `agui.mcp`。判据仍是那一条：**协议认不认**。
 >
 > 结构上它们与 genui 同形——**叶子插件**：只依赖 cheshire / clojure.string /
 > timbre / JDK，模块内没有任何 ns require 它们，接入只走两个通用挂点
