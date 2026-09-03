@@ -9,6 +9,9 @@
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
         ;; 内部依赖 —— client（simple-agent / memory / pause：runtime 驱动的就是它）
         im.ttalk/clj-agent-client {:local/root "../clj-agent-client"}
+        ;; 内部依赖 —— mcp（协议栈在那儿；本模块只留 MCP Apps 的前端约定，
+        ;; 见 `agui.mcp` 的 ns docstring）
+        im.ttalk/clj-agent-mcp {:local/root "../clj-agent-mcp"}
 
         ;; JSON —— 只用在 codec 的两处「AG-UI 要求内嵌 JSON 字符串」的字段
         ;; （TOOL_CALL_ARGS.delta）。协议知识本就该和编解码待在一起。
