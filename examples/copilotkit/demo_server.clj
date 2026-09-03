@@ -40,7 +40,8 @@
             [copilotkit.genui :as genui]
             [copilotkit.http-kit-routes :as routes]
             [im.ttalk.agent.agui.a2ui :as a2ui]
-            [im.ttalk.agent.agui.mcp :as mcp]
+            [im.ttalk.agent.agui.mcp :as agui-mcp]
+            [im.ttalk.agent.mcp.tools :as mcp-tools]
             [im.ttalk.agent.agui.runtime :as rt]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.pause :as pause]
@@ -72,7 +73,9 @@
 
        CLJ_AGENT_MCP_URL=http://localhost:4100/mcp
 
-   仓库里有个最小 server 可以直接对：`examples/copilotkit/mcp_server_example.clj`。
+   仓库里有两台可以直接对：`examples/mcp/server_example.clj`（2026-07-28，
+   我们自己的 `mcp.server` 起的）与 `examples/copilotkit/mcp_server_example.clj`
+   （legacy 握手时代，用来验客户端的回退）。连哪台都行——`mcp.client` 自己判时代。
    装上以后：server 的工具进工具表（handler 就是 `tools/call`），带 UI 资源的
    工具（MCP Apps）结果之外还会发一条 activity 消息。"
   (->> (str/split (or (System/getenv "CLJ_AGENT_MCP_URL") "") #",")
@@ -112,7 +115,7 @@
   (cond-> (base-spec)
     genui? genui/with-tool
     a2ui?  a2ui/with-tool
-    (seq mcp-servers) (mcp/with-tools mcp-servers)))
+    (seq mcp-servers) (mcp-tools/with-tools mcp-servers)))
 
 (def suggest?
   "无状态建议端点（`POST …/agent/:id/suggest`）——**默认开**。
@@ -149,11 +152,11 @@
     ;; activity 消息（event-transform）与前端 iframe 的代理通道（mcp-proxy）
     (seq mcp-servers)
     (as-> opts
-          (let [apps (mcp/app-tools (:tools spec))
-                mcp-t (mcp/event-transform {:apps apps :servers mcp-servers})
+          (let [apps (agui-mcp/app-tools (:tools spec))
+                mcp-t (agui-mcp/event-transform {:apps apps :servers mcp-servers})
                 prev (:event-transform opts)]
             (assoc opts
-                   :mcp-proxy #(mcp/proxy-request mcp-servers %)
+                   :mcp-proxy #(agui-mcp/proxy-request mcp-servers %)
                    :event-transform
                    (if prev
                      (fn [run] (let [p (prev run) m (mcp-t run)]

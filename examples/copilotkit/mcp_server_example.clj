@@ -1,11 +1,16 @@
 (ns copilotkit.mcp-server-example
-  "一个**最小的 MCP server**（Streamable HTTP），用来验 `agui.mcp` 的客户端那一半。
+  "一个**最小的 legacy MCP server**（Streamable HTTP，`initialize` 握手 + 会话）。
+
+   **它今天的用处变了**：MCP 协议栈已经搬到 `clj-agent-mcp`，那边自带一台按
+   2026-07-28 实现的 server（`examples/mcp/server_example.clj`）。这台老的留下来，
+   是因为它是**唯一一台真正的 legacy server**——`mcp.client` 的双时代回退
+   （modern 探测被拒 → 退回 `initialize`）只有打它才验得到。
 
    单测用可注入的假传输把「握手 → 列工具 → 调工具」跑完了，但**传输本身测不到**
    ——JSON-RPC 走没走对、会话头有没有回传、SSE 响应认不认，只有真打一次 HTTP
    才知道。所以这里起一个真的：JDK 的 `java.net.http` 打过来，http-kit 接。
 
-   实现的是 MCP 的一个**子集**（够 `agui.mcp` 用，不是完整 server）：
+   实现的是 MCP 的一个**子集**（够验回退用，不是完整 server）：
 
      initialize            → 回协议版本 + serverInfo，并下发 Mcp-Session-Id
      notifications/initialized → 202，无体
