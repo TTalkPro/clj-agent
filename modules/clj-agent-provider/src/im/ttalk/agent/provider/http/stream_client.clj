@@ -19,6 +19,8 @@
   (:require [cheshire.core :as json]
             [clojure.string]
             [taoensso.timbre :as log]
+            [im.ttalk.agent.async :as async]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.http.retry :as retry]
@@ -140,6 +142,67 @@
      :cancel (fn []
                (when (realized? cancel-p) (.cancel ^java.util.concurrent.Flow$Subscription @cancel-p))
                (.cancel cf true))}))
+
+(defn post-stream-deferred
+  "post-stream-async 的**异步**包装：不阻塞，返回 deferred<最终响应>。
+
+   opts 与语义（含 `:retry` 的「未出 token 才重试」、取消返回空响应、
+   `:provider-error` 兜底）与 `post-stream-sync` **逐字相同**——两者共用同一批
+   判据，差别只有两处：等流结束用 `flt/fbind` 而不是 `@future`；重试退避用
+   `async/delayed` 而不是 `Thread/sleep`（异步路径上 sleep 会睡掉传输层
+   executor 的线程）。
+
+   **取消登记的线程**：`streaming/*register-cancel*` 是动态 var，只在调用线程
+   可见。故本函数在**进入时**就把它取出来闭包住，重试 attempt（跑在完成线程上）
+   照样登记得上——同步版靠「整个 loop 都在调用线程」天然成立，异步版必须显式
+   把它带过去。见 docs/async-chat-model-design.md §6.1。"
+  [url {:keys [make-initial-state build-response provider on-token retry] :as opts}]
+  (let [retry-cfg (cond
+                    (true? retry) retry/default-retry-opts
+                    (map? retry)  (merge retry/default-retry-opts retry)
+                    :else         nil)
+        ;; 在调用线程取出登记函数，跨线程照样用得上
+        register! (or streaming/*register-cancel* (fn [_] nil))]
+    (letfn [(settle [n result err tokens-out? cancelled? attempt-fn]
+              (cond
+                @cancelled? (build-response (make-initial-state))
+
+                (realized? err)
+                (let [e @err]
+                  (if (and retry-cfg
+                           (< n (:max-retries retry-cfg))
+                           (:retryable? e)
+                           (not @tokens-out?))
+                    (flt/fbind (async/delayed (retry/compute-backoff n retry-cfg))
+                               (fn [_] (attempt-fn (inc n))))
+                    (errors/throw! e)))
+
+                (realized? result) @result
+
+                :else (errors/throw! (errors/error :provider-error
+                                                   "流式响应未产出结果"
+                                                   {:provider provider}))))
+            (attempt [n]
+              (let [result (promise)
+                    err    (promise)
+                    tokens-out? (atom false)
+                    cancelled?  (atom false)
+                    {:keys [future cancel]}
+                    (post-stream-async
+                      url
+                      (-> opts
+                          (dissoc :make-initial-state :build-response :retry)
+                          (assoc :initial-state (make-initial-state)
+                                 :on-token (when on-token
+                                             (fn [t] (reset! tokens-out? true) (on-token t)))
+                                 :on-complete (fn [state] (deliver result (build-response state)))
+                                 :on-error (fn [e] (deliver err e)))))]
+                (when cancel
+                  (register! (fn [] (reset! cancelled? true) (cancel))))
+                ;; 取消会让 future 抛 CancellationException / onError——宽 catch 后照常进判定
+                (-> (flt/fcatch future (fn [_] nil))
+                    (flt/fbind (fn [_] (settle n result err tokens-out? cancelled? attempt))))))]
+      (attempt 0))))
 
 (defn post-stream-sync
   "post-stream-async 的同步包装：阻塞当前线程直至流结束，返回最终响应（保持同步签名）。

@@ -79,6 +79,12 @@
                        (swap! cache assoc (:k req) (:resp resp))
                        resp)))}))
 
+    **响应侧改写走组合子**：`(flt/fmap (chain req) f)` 而非
+    `(let [r (chain req)] (f r))`——同步值上就是恒等展开（零开销、语义逐字
+    相同），将来链的终端返回 deferred 时同一份源码不用改。配套 `fbind`
+    （f 自身返回链结果／递归重入）与 `fcatch` 宏（错误侧）。契约见
+    docs/filter-chain-design.md §2.6.4。
+
     使用示例:
     (build-chat-client {:chat-model cm
                         :tools [#'t1 #'t2]
@@ -268,6 +274,79 @@
                 fs)))))
 
 ;;; ============================================================
+;;; 链结果组合子：fmap / fbind / fcatch
+;;;
+;;; 契约见 docs/filter-chain-design.md §2.6.4。一句话：filter 的**响应侧**
+;;; 走这三个组合子，不要 `@`——今天它们在同步值上就是恒等展开（零开销、
+;;; 语义逐字不变），将来链的终端返回 deferred 时，同一份 filter 源码不用改。
+;;;
+;;; 为什么不把 `:turn` 拆成 before/after 来「提前适配异步」：async 改的是链的
+;;; **返回类型**，不是 around 的**形状**；before/after 换不来异步兼容，却换掉了
+;;; 递归重入（`(chain req)` 调 N 次）——那是 :turn 链存在的一半理由。见 §2.6。
+;;; ============================================================
+
+(defprotocol IChainResult
+  "链返回值的组合接口——同步值与 deferred 的**公共形状**。
+
+   `extend-protocol` 到具体 deferred 类型即可接入异步库（CompletableFuture /
+   manifold / core.async chan）。**本 ns 不引任何异步依赖**：协议进 core、
+   实现不进（与 rag 的 `IRetriever`、tool-search 的 `IToolIndex` 同一取舍）。"
+  (fmap [x f]
+    "把 f 应用到链的返回值上。
+
+     **形态保持**：同步值进 → 同步值出；deferred 进 → 同类 deferred 出。
+     **不阻塞**：deferred 上只挂延续，绝不 deref。
+     **不吞异常**：f 抛出时同步路径原样抛（与手写 `(let [r (chain req)] …)`
+     逐字相同），异步路径落进 error channel。
+     **组合律**：`(fmap (fmap x f) g)` ≡ `(fmap x (comp g f))`；
+     `(fmap x identity)` ≡ `x`——这条是「今天写的 filter 明天不用改」的形式保证。")
+  (fbind [x f]
+    "同 `fmap`，但 f 自身返回链结果（flatMap）——不产生嵌套 deferred。
+
+     递归重入在异步下的形状：同步的 `loop/recur` 重跑一轮，异步写成 fbind
+     自递归，`chain` 仍是那个 chain（见 §2.6.4）。
+
+     注意 `fbind` 不保证形态保持（这是 flatMap 的定义使然）：同步值上若 f
+     返回 deferred，结果就是 deferred。")
+  (on-error [x handler]
+    "把 handler 挂到 deferred 的 error channel；同步值上无事可做，原样返回
+     ——同步异常在**实参求值**时就抛了，由 `fcatch` 宏的 try 接住。
+
+     handler 返回 deferred 时**不得产生嵌套**（适配层用 compose 而非 map）：
+     同步路径的 `(try … (catch t (handler t)))` 本就原样返回 handler 的结果，
+     异步要与之逐字同义。重试正是这么写的（见 `retry/run-async`）。
+
+     **一般不直接调用，用 `fcatch` 宏**；这里公开只是为了让适配层能实现它。"))
+
+(extend-protocol IChainResult
+  nil
+  (fmap  [_ f] (f nil))
+  (fbind [_ f] (f nil))
+  (on-error [x _] x)
+
+  Object
+  (fmap  [x f] (f x))
+  (fbind [x f] (f x))
+  (on-error [x _] x))
+
+(defmacro fcatch
+  "错误侧组合子：`(fcatch 表达式 handler)`，handler 为 `(fn [throwable] -> 替代结果)`。
+
+   同步路径等价 `(try 表达式 (catch Throwable t (handler t)))`；异步路径把
+   handler 挂到 error channel。两条路径都覆盖「表达式自身同步抛出」——异步链的
+   终端也可能在**返回 deferred 之前**就抛。
+
+   **为什么是宏不是函数**：同步下异常在实参求值时就抛了，函数形态的
+   `(fcatch (chain req) h)` 根本接不住——h 还没拿到控制权。宏把表达式包进 try，
+   才能与 `fmap` 组成同一条 `->` 链：
+
+       (-> (chain req) (fmap post) (fcatch handle))"
+  [expr handler]
+  `(let [h# ~handler]
+     (try (on-error ~expr h#)
+          (catch Throwable t# (h# t#)))))
+
+;;; ============================================================
 ;;; 装配期预编译：CompiledHooks
 ;;; ============================================================
 
@@ -310,13 +389,14 @@
    :tool (fn [req chain]
            (let [name (get-in req [:function :name])]
              (println (str "[ChatClient] 调用工具: " name " 参数: " (pr-str (:args req))))
-             (let [resp (chain req)
-                   r (:result resp)]
-               (println (str "[ChatClient] 工具结果: " name " => "
-                             (if (and (string? r) (> (count r) 100))
-                               (str (subs r 0 100) "...")
-                               (pr-str r))))
-               resp)))))
+             (fmap (chain req)
+                   (fn [resp]
+                     (let [r (:result resp)]
+                       (println (str "[ChatClient] 工具结果: " name " => "
+                                     (if (and (string? r) (> (count r) 100))
+                                       (str (subs r 0 100) "...")
+                                       (pr-str r))))
+                       resp)))))))
 
 ;;; ============================================================
 ;;; 内置 filter: LLM 调用日志（:chat）
@@ -372,14 +452,15 @@
              (emit (str "[Chat] → messages=" (count (req-messages req))
                         " tools=" (count (req-option req :tools))
                         " tool-choice=" (req-option req :tool-choice)))
-             (let [resp (chain req)
-                   r (:response resp)
-                   calls (resp/response-tool-calls r)]
-               (emit (str "[Chat] ← "
-                          (if (seq calls)
-                            (str "tool-calls=" (pr-str (mapv :name calls)))
-                            (str "text=" (clip (resp/response-text r))))))
-               resp)))))
+             (fmap (chain req)
+                   (fn [resp]
+                     (let [r (:response resp)
+                           calls (resp/response-tool-calls r)]
+                       (emit (str "[Chat] ← "
+                                  (if (seq calls)
+                                    (str "tool-calls=" (pr-str (mapv :name calls)))
+                                    (str "text=" (clip (resp/response-text r))))))
+                       resp)))))))
 
 ;;; ============================================================
 ;;; 内置 filter: 敏感词短路（:turn）
@@ -531,20 +612,25 @@
                                          "。请修正后重新回答。"))))]
     (create-filter :validation
      :turn (fn [req chain]
-             (loop [attempt 0, req req]
-               (let [result (chain req)]
-                 (if (not= :completed (:status result))
-                   result                          ;; 暂停/取消/错误：透传
-                   (if-let [problem (validate-fn result)]
-                     (if (>= attempt max-retries)
-                       result                      ;; 耗尽：原样返回
-                       ;; 重入是有真实入口消息的新循环：摘掉可能继承的
-                       ;; :resume? 标记，让下游请求侧 filter 照常工作
-                       (recur (inc attempt)
-                              (-> req
-                                  (dissoc :resume?)
-                                  (assoc :messages [(mk-feedback problem)]))))
-                     result))))))))
+             ;; fbind 自递归而非 loop/recur：终端同步时逐字等价于原来的循环，
+             ;; 终端返回 deferred 时同一份代码变成 flatMap 链（§2.6.4）。
+             ;; 递归深度 ≤ max-retries，不吃栈。
+             (letfn [(step [attempt req]
+                       (fbind (chain req)
+                              (fn [result]
+                                (if (not= :completed (:status result))
+                                  result                    ;; 暂停/取消/错误：透传
+                                  (if-let [problem (validate-fn result)]
+                                    (if (>= attempt max-retries)
+                                      result                ;; 耗尽：原样返回
+                                      ;; 重入是有真实入口消息的新循环：摘掉可能继承的
+                                      ;; :resume? 标记，让下游请求侧 filter 照常工作
+                                      (step (inc attempt)
+                                            (-> req
+                                                (dissoc :resume?)
+                                                (assoc :messages [(mk-feedback problem)]))))
+                                    result)))))]
+               (step 0 req))))))
 
 ;;; ============================================================
 ;;; 内置 filter: token 流变换（:token-xform，流式专用）

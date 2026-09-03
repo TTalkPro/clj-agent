@@ -574,6 +574,49 @@ filters/logging-filter        ;; 调用前后日志（:tool）
 
 四条链的完整契约、硬规则与装配期预编译见 [`docs/filter-chain-design.md`](docs/filter-chain-design.md)。
 
+### 异步入口（Ring / Luminus 异步 handler）
+
+`agent/chat-async` 立刻返回 `CompletableFuture`，整个 turn 跑在虚拟线程上——
+HTTP 工作线程不被一次 LLM 往返占住。配 Ring 3 的三参数异步 handler 正好合缝：
+
+```clojure
+(require '[im.ttalk.agent.async :as async] '[im.ttalk.agent.filter :as flt])
+
+(defn chat-handler [request respond raise]        ;; Ring 3 异步 handler
+  (-> (agent/chat-async (session-agent request) (message-of request))
+      (flt/fmap ->ring-response)                  ;; 响应侧组合子：同步链上这行也成立
+      (async/on-complete respond raise)))         ;; respond/raise 就是 Ring 那对回调
+
+;; reitit 按 arity 自动识别异步；服务器需开异步（ring-jetty {:async? true} / immutant / http-kit）
+["/api/chat" {:post {:handler chat-handler}}]
+```
+
+配套：`react/invoke-async`、`react/resume-async`、`agent/resume-async`（HITL 第二段
+同样不阻塞），`async/join` 阻塞取值、`async/vthread` 自建异步终端。
+异步与同步是**同一份实现**（只差一个「跑法」参数），返回值形状逐字相同。
+
+**写 filter 要注意**：走异步入口时 `(chain req)` 真的返回 deferred，响应侧必须用
+`flt/fmap` / `flt/fbind`（`(let [r (chain req)] …)` 不报错，但拿到的是 future——
+静默错）。同步链上组合子是恒等展开，零开销，所以一律这么写就对了。
+
+**异步到哪一层**：`:turn` / `:iteration` / `:chat` 三条链全链路 deferred；
+`:tool` 终端仍同步（工具是用户代码，阻塞是常态，批次本就在 executor 上跑）。
+provider 侧实现可选协议 `IAsyncLLMProvider`（Anthropic 系与 OpenAI 兼容系已实现）
+就走原生异步 HTTP；没实现的由 `chat-model/call-async*` 用虚拟线程兜底——
+**任何 provider 都能异步**，实现协议只是省掉那根线程。
+
+⚠️ **流式 sink 的线程不保证**：异步入口下 `on-token` 在工作线程上派发（同步入口
+仍是调用线程）。单次流内仍串行，`:token-xform` 不必加锁；但往 UI /
+`ThreadLocal` 写的 sink 要自己切回去。见
+[`docs/token-stream-filter-design.md`](docs/token-stream-filter-design.md) §2.1。
+
+为什么不把钩子拆成 before/after 见
+[`docs/filter-chain-design.md`](docs/filter-chain-design.md) §2.6；异步层的设计
+（可选协议、`retry/run-async`、兜底）见
+[`docs/async-chat-model-design.md`](docs/async-chat-model-design.md)。
+可跑示例（离线、无需 API Key，含 8 会话并发实测 / raise / HITL）：
+`examples/async_luminus_handler_example.clj`。
+
 ### ToolSearch —— 渐进式工具披露（对标 Spring AI `ToolSearchToolCallingAdvisor`）
 
 工具一多，全量 schema 每轮都进 prompt（Spring 实测 28 个工具 ≈ 5K–17K token，

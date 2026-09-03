@@ -1,5 +1,71 @@
 # 待完成任务
 
+> 本文件按「轮次」堆叠：最新一轮在最上面，历史轮次原样保留（含结案说明）。
+
+---
+
+# 【当前轮】异步 ChatModel / Provider 落地（2026-09-03）
+
+> 设计：[`docs/async-chat-model-design.md`](docs/async-chat-model-design.md)（本轮施工单据此展开）。
+> 上游已落地：`:turn` 级异步入口 + 链结果组合子，见
+> [`docs/filter-chain-design.md`](docs/filter-chain-design.md) §2.6–§2.7。
+> 测试基线：406 tests / 1820 assertions → **收尾 416 tests / 1876 assertions / 0 failures**。
+> 状态：**✅ 9 项全部完成**（2026-09-03）。
+>
+> **范围说明**：设计文档 §2 给 P2（react 循环全链路 deferred）设了「有真实高扇出
+> 需求才做」的判据。本轮按明确指示**全做**，判据条目相应改记为「已提前实施」——
+> 判据本身不撤销，它仍是同类决策的参考。
+
+## P0 — 流式：把已经异步的底子让出去 ✅
+
+- [x] **1. `stream_client` 暴露异步出口**：新增 `post-stream-deferred`（不 `@future`，`flt/fbind` 等流结束；退避用 `async/delayed` 不 `Thread/sleep`）。取消登记函数在**进入时**从动态 var 取出闭包住——重试 attempt 跑在完成线程上，那里已看不见绑定帧（同步版靠「整个 loop 在调用线程」天然成立）。
+- [x] **2. provider 流式路径透出**：`openai_compat/call-api-stream-deferred`、`anthropic/call-anthropic-stream-deferred`；`base/call-api-stream-deferred` 转发。
+- [x] **3. `on-token` 线程契约声明**：`docs/token-stream-filter-design.md` 新增 §2.1（三种入口的派发线程表；**单次流内仍串行**、flush 时机与顺序不变，故 `:token-xform` 不必加锁），中英 README 各补一段警示。
+
+## P1 — 协议与 ChatModel ✅
+
+- [x] **4. `IAsyncLLMProvider`**（`core/model.clj`）：`call-llm-async` / `call-llm-stream-async`，无 Object 兜底；文档写明「返回值形状必须与同步版逐字相同」——旧旁路正是栽在这。
+- [x] **5. `retry/run-async`**（`core/retry.clj`）：`fbind` 自递归；`async/delayed`（`CompletableFuture/delayedExecutor`）退避；判据 / 次数 / 退避曲线 / `:on-retry` 与 `run` 共用。顺带把 `delayed` 放进 `core/async.clj` 公开（异步路径「等一会儿」的唯一实现）。
+- [x] **6. `IAsyncChatModel` + 兜底**（`core/chat_model.clj`）：`call-async*` / `stream-call-async*` 探测，`DefaultChatModel` 双实现（provider 无原生异步时内部也走虚拟线程兜底）；`build-call-config` / 重试 / `normalize-response` 与同步分支共用一份。
+- [x] **7. `invoke-chat-async` / `invoke-chat-stream-async`**（`core/chat_client.clj`）：终端返回 deferred；顺带抽出 `chat-model-of` / `token-sink` 供四个入口共用（flush 挪进 fmap 续延，异常不 flush 的语义不变）。
+- [x] **8. provider 实现 + 清理旁路**：`http/client` 加 `request-deferred` / `post-deferred`（**响应 map 形状与同步版逐字相同**，两条路径共用后处理）；`OpenAICompatProvider` 与 `AnthropicProvider` 实现 `IAsyncLLMProvider`；callback 式旁路改成 deferred 直通（同名函数保留，语义换成返回 deferred）。
+
+## P2 — react 循环全链路 deferred ✅
+
+- [x] **9. `run-tool-loop` 同步/异步同源**：迭代体一份（响应侧 `flt/fmap`），注入 `chat-fn`（`sync-chat-call` / `async-chat-call`）× `drive`（`drive-sync` `loop/recur` 保常数栈 / `drive-async` `fbind` 自递归）；`invoke*` / `resume*` 各按跑法选，`resume-approval` 拆出阻塞段 `resume-approval-batch` 进 `run`（校验异常也落 deferred，不同步抛给调用方）。
+
+## 验收 ✅ 全部通过
+
+- [x] 两条路径逐字同义：`invoke-chat` ≡ `invoke-chat-async`（参数 / ChatResponse / replay blocks）、`invoke` ≡ `invoke-async`（状态 / 文本 / memory 落库形状）
+- [x] 兜底可用：`FnChatModel`（`{:chat-fn …}`）与无原生异步的 provider 都拿得到 deferred
+- [x] 重试等价：注入 `sleep-fn` / `rand-fn` 后，尝试次数、退避序列 `[100 200]`、`:on-retry` 观测两条路径完全相同
+- [x] 归一化不跑偏：异步返回的是 `ChatResponse` 且 `:replay-blocks` 在位；provider 收到的 messages/config/tools 与同步逐字相同
+- [x] 取消：`post-stream-deferred` 的取消令牌在调用线程登记，取消后返回空响应不抛错
+- [x] mock：`SyncOnlyProvider` / `AsyncProvider` 两个 record 覆盖「兜底」与「原生异步」两条分支
+- [x] `clojure -M:test` **416 tests / 1876 assertions / 0 failures**（基线 406/1820，新增 10 tests / 56 assertions）
+- [x] `clojure -M scripts/check_docs.clj` 全绿（6 README / 68 ns / 20 份 docs）
+- [x] `examples/async_luminus_handler_example.clj` 全绿（8 会话并发 213ms vs 串行 1600ms）
+- [x] **真实端点 live 验证**：`examples/async_live_test.clj`，`ASYNC_LIVE_PROVIDER` 切换，**两套 `IAsyncLLMProvider` 实现各跑一遍**，各六场景全过：
+      - `minimax`（MiniMax-M2.7 → `AnthropicProvider`）：派发 0.8ms / 整轮 11894ms；流式 2 块；并发总墙钟 5043ms = 最慢 5041ms（串行需 14661ms）
+      - `zhipu`（**glm-5.3-flash** → `OpenAICompatProvider`）：派发 0.7ms / 整轮 14340ms；流式 60 块；模型名回显核对无静默回退；并发总墙钟 7040ms = 最慢 7040ms（串行需 14596ms）
+      - 共同验到：全链路 `{:chat 2 :iteration 2 :turn 1}` 全是 deferred、on-token 确在虚拟线程且非调用线程、工具循环完成、异步流中途取消生效
+
+## 落地中发现的三件事（设计时没预见，被测试逮到）
+
+1. **`on-error` 必须 `exceptionallyCompose` 而不是 `exceptionally`**：重试 handler 返回的是 deferred，用 map 会得到 `deferred<deferred>`。同步 `(try … (catch t (h t)))` 本就原样返回 handler 的结果，异步补 compose 才算逐字同义（契约 C3 的隐含要求）。已写进 `IChainResult/on-error` 文档 + 回归测试。
+2. **一个 `defrecord` 里同一个协议名只能出现一次**：把 `IAsyncLLMProvider` 插在 `ILLMProvider` 方法中间会让**先前那组方法变抽象**（实测 `AbstractMethodError: provider_name`）。故异步协议整块放 record 末尾，两处都钉了注释。
+3. **动态 var 不跨异步边界**：取消令牌登记必须在调用线程把函数取出来闭包住，见 P0-1。
+
+## 相关文档
+
+- [`docs/async-chat-model-design.md`](docs/async-chat-model-design.md)（本轮设计 + 落地记录 + 测试锚点表；§2 的 P2 判据**被越过**一事有专门记录）
+- [`docs/filter-chain-design.md`](docs/filter-chain-design.md) §2.6–§2.7（组合子契约与 `:turn` 级异步入口）
+- [`docs/token-stream-filter-design.md`](docs/token-stream-filter-design.md) §2.1（on-token 线程契约）
+
+---
+
+# 【历史轮】2026-06-10 全量代码审查
+
 > 来源：2026-06-10 全量代码审查（core / provider / 安全 / 架构 四路并行审查，关键结论经 REPL 实测复现）。
 > 测试基线：`clojure -M:test` 182 tests / 707 assertions / 0 failures。
 

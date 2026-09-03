@@ -68,6 +68,7 @@
      [(schema/code-execution-tool)])"
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
@@ -425,33 +426,6 @@
       (errors/throw! (response->error response (:provider-name config :anthropic))))))
 
 ;;; ============================================================
-;;; 异步 API 调用
-;;; ============================================================
-
-(defn call-anthropic-async
-  "异步调用 Anthropic API
-
-   参数：
-   - config:   配置 map
-   - messages: 消息列表
-   - tools:    工具列表
-   - callback: 回调函数 (fn [response] ...)
-
-   返回：
-   nil（结果通过 callback 返回）"
-  [config messages tools callback]
-  (let [tool-schemas (schema/tools->schemas tools)
-        params (build-params config messages tool-schemas)
-        endpoint (resolve-endpoint config)
-        api-url (build-url endpoint)
-        headers (build-headers endpoint (resolve-api-key config))]
-    (http/post-async api-url
-                     callback
-                     :headers headers
-                     :body params
-                     :timeout (or (:timeout config) 120000))))
-
-;;; ============================================================
 ;;; 流式 API 调用
 ;;; ============================================================
 
@@ -488,38 +462,55 @@
        :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
        :provider (:provider-name config :anthropic)})))
 
-(defn call-anthropic-stream-async
-  "异步流式调用 Anthropic API（非阻塞）
+(defn call-anthropic-deferred
+  "调用 Anthropic API（异步，返回 deferred<响应体>）。
 
-   完全异步处理，适合与异步服务器集成。
+   参数与语义同 `call-anthropic`（含限流头附加、canonical error），只是不阻塞。
+   **无重试**：重试在 ChatModel 层（`im.ttalk.agent.retry/run-async`）。
 
-   参数：
-   - config:      配置 map
-   - messages:    消息列表
-   - tools:       工具列表
-   - on-token:    token 回调 (fn [{:keys [token]}] ...)
-   - on-complete: 完成回调 (fn [response] ...)
-   - on-error:    错误回调 (fn [error] ...)（可选）
+   与同步版**共用后处理**：`http/post-deferred` 的响应 map 形状与 `http/post`
+   逐字相同，`:success?` 判定 / `parse-rate-limit` / `response->error` 只有一份
+   （docs/async-chat-model-design.md §0 / §5）。"
+  [config messages tools]
+  (let [tool-schemas (schema/tools->schemas tools)
+        params (build-params config messages tool-schemas)
+        endpoint (resolve-endpoint config)
+        api-url (build-url endpoint)
+        headers (build-headers endpoint (resolve-api-key config))
+        timeout (or (:timeout config) 120000)]
+    (flt/fmap (http/post-deferred api-url
+                                  :headers headers
+                                  :body params
+                                  :timeout timeout)
+              (fn [response]
+                (if (:success? response)
+                  (let [rl (parse-rate-limit (:headers response))]
+                    (cond-> (:body response)
+                      rl (assoc :rate-limit rl)))
+                  (errors/throw! (response->error response (:provider-name config :anthropic))))))))
 
-   返回：
-   {:future CompletableFuture :cancel (fn [])} —— 真增量、非阻塞；
-   cancel 可在客户端断连/停止生成时取消上游（异步服务器整合关键，见 docs/streaming-async-design.md）。"
-  [config messages tools on-token on-complete & [on-error]]
+(defn call-anthropic-stream-deferred
+  "流式调用 Anthropic API（异步，返回 deferred<最终响应>）。
+
+   参数与语义同 `call-anthropic-stream`（含 `:retry` 建链重试与取消），
+   只是不阻塞。⚠️ on-token 在传输层 executor 上派发，不是调用线程。"
+  [config messages tools on-token]
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
-        headers (build-headers endpoint (resolve-api-key config))]
-    (stream-client/post-stream-async
+        headers (build-headers endpoint (resolve-api-key config))
+        timeout (or (:timeout config) 300000)]
+    (stream-client/post-stream-deferred
       api-url
-      {:headers headers :body params :timeout (or (:timeout config) 300000)
+      {:headers headers :body params :timeout timeout
        :parse-fn stream/parse-sse-line
        :process-fn stream/process-event
-       :initial-state (stream/make-initial-state)
+       :make-initial-state stream/make-initial-state
+       :build-response stream/build-response
        :on-token on-token
-       :on-complete (fn [final-state] (on-complete (stream/build-response final-state)))
-       :on-error (or on-error (fn [_] nil))
+       :retry (:retry config)
        :provider (:provider-name config :anthropic)})))
 
 ;;; ============================================================
@@ -577,7 +568,24 @@
       (when (and (sequential? content)
                  (some #(= "thinking" (:type %)) content))
         {:format :anthropic-content
-         :data (vec content)}))))
+         :data (vec content)})))
+
+  ;; 原生异步（可选协议）：wire 转换与同步分支**逐字相同**，只换传输那一层。
+  ;; ChatModel 侧探测到本协议就走这条，探测不到用虚拟线程兜底——两条路径的
+  ;; 返回值形状必须一致（见 IAsyncLLMProvider 文档；旧 callback 旁路就是栽在这）。
+  ;;
+  ;; ⚠️ 一个 defrecord 里**同一个协议名只能出现一次**：重复写会让先前那组方法
+  ;; 变成抽象方法（实测 AbstractMethodError）。故异步协议整块放在最后。
+  proto/IAsyncLLMProvider
+  (call-llm-async [_ config messages tools]
+    (let [{:keys [messages system]} (wire/neutral->wire messages)
+          config (cond-> (merge opts config) system (assoc :system-prompt system))]
+      (call-anthropic-deferred config messages tools)))
+
+  (call-llm-stream-async [_ config messages tools on-token]
+    (let [{:keys [messages system]} (wire/neutral->wire messages)
+          config (cond-> (merge opts config) system (assoc :system-prompt system))]
+      (call-anthropic-stream-deferred config messages tools on-token))))
 
 ;;; ============================================================
 ;;; 工厂函数

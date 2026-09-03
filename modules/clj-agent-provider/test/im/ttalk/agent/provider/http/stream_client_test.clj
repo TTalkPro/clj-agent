@@ -7,6 +7,8 @@
   (:require [clojure.test :refer [deftest testing is]]
             [clojure.string :as str]
             [cheshire.core :as json]
+            [im.ttalk.agent.async :as async]
+            [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.http.stream-client :as sc])
   (:import [com.sun.net.httpserver HttpServer HttpHandler]
            [java.net InetSocketAddress]))
@@ -244,4 +246,113 @@
           ;; 取消生效后，token 数应远小于 20（停在取消点附近）
           (is (< (count @tokens) 20)
               (str "cancel 后不应收满 20 个 token，实际: " (count @tokens))))
+        (finally (.stop server 0))))))
+
+;;; ============================================================
+;;; post-stream-deferred（异步孪生）
+;;;
+;;; 要害：与 post-stream-sync **逐字同义**，只是不阻塞。故每条都拿同步版对照。
+;;; ============================================================
+
+(deftest deferred-does-not-block-test
+  (testing "调用线程立刻拿到未完成的 deferred；流结束后值与同步版相同"
+    (let [lines ["data: {\"v\":1}" "" "data: {\"v\":2}" "" "data: [DONE]"]
+          {:keys [server port]} (start-server (fn [ex] (write-sse-chunks! ex lines 120)))
+          tokens (atom [])]
+      (try
+        (let [t0 (now)
+              d (sc/post-stream-deferred (str "http://127.0.0.1:" port "/x")
+                  {:headers {} :body {:a 1}
+                   :parse-fn parse-data :process-fn accumulate
+                   :make-initial-state (fn [] {})
+                   :build-response identity
+                   :on-token (fn [t] (swap! tokens conj t))
+                   :provider :test})
+              dispatch (- (now) t0)]
+          (is (async/deferred? d))
+          (is (= {:vals [1 2]} (async/join d 5000)))
+          (let [total (- (now) t0)]
+            ;; 阈值放宽到 250ms：首次用 HttpClient 有 JIT/连接建立开销，
+            ;; 卡太死会 flake。要害是「派发远早于流结束」，故同时断言流确实慢。
+            (is (< dispatch 250) (str "派发未被流阻塞，实测 " dispatch "ms"))
+            (is (> total 300) (str "这条流确实要跑一会儿，实测 " total "ms"))
+            (is (< dispatch total)))
+          (is (= 2 (count @tokens))))
+        (finally (.stop server 0))))))
+
+(deftest deferred-matches-sync-test
+  (testing "同一个流：deferred 版与 sync 版的最终响应逐字相同"
+    (let [lines ["data: {\"v\":7}" "" "data: {\"v\":8}" "" "data: [DONE]"]
+          {:keys [server port]} (start-server (fn [ex] (write-sse-chunks! ex lines 0)))
+          opts {:headers {} :body {:a 1}
+                :parse-fn parse-data :process-fn accumulate
+                :make-initial-state (fn [] {})
+                :build-response identity
+                :on-token (fn [_])
+                :provider :test}]
+      (try
+        (let [url (str "http://127.0.0.1:" port "/x")]
+          (is (= (sc/post-stream-sync url opts)
+                 (async/join (sc/post-stream-deferred url opts) 5000))))
+        (finally (.stop server 0))))))
+
+(deftest deferred-error-and-retry-test
+  (testing "非 2xx：canonical error 落 error channel（不是同步抛）"
+    (let [{:keys [server port attempts]} (start-flaky-server 99 503 [])]
+      (try
+        (let [d (sc/post-stream-deferred (str "http://127.0.0.1:" port "/x")
+                  {:headers {} :body {:a 1}
+                   :parse-fn parse-data :process-fn accumulate
+                   :make-initial-state (fn [] {})
+                   :build-response identity
+                   :on-token (fn [_])
+                   :provider :test})]
+          (is (async/deferred? d) "调用点本身不抛")
+          (let [e (try (async/join d 5000) nil (catch clojure.lang.ExceptionInfo ex (ex-data ex)))]
+            (is (true? (:retryable? e)))
+            (is (= 1 @attempts) "未开 :retry 时不重试，与同步版一致")))
+        (finally (.stop server 0)))))
+
+  (testing ":retry 开启：退避重试后成功，token 只流出一次（退避不阻塞线程）"
+    (let [{:keys [server port attempts]}
+          (start-flaky-server 1 503 ["data: {\"v\":1}" "" "data: [DONE]"])
+          tokens (atom [])]
+      (try
+        (let [resp (async/join
+                     (sc/post-stream-deferred (str "http://127.0.0.1:" port "/x")
+                       {:headers {} :body {:a 1}
+                        :parse-fn parse-data :process-fn accumulate
+                        :make-initial-state (fn [] {})
+                        :build-response identity
+                        :on-token (fn [t] (swap! tokens conj t))
+                        :retry {:max-retries 2 :base-delay 1 :max-delay 5}
+                        :provider :test})
+                     5000)]
+          (is (= {:vals [1]} resp))
+          (is (= 2 @attempts) "重试了一次")
+          (is (= 1 (count @tokens)) "token 只流出一次"))
+        (finally (.stop server 0))))))
+
+(deftest deferred-cancel-test
+  (testing "取消令牌在**调用线程**登记，取消后返回空响应、不抛错（同 sync 版）"
+    (let [lines (interleave (map #(str "data: {\"v\":" % "}") (range 20)) (repeat ""))
+          {:keys [server port]}
+          (start-server (fn [ex] (try (write-sse-chunks! ex lines 60)
+                                      (catch Exception _ nil))))
+          tokens (atom [])
+          cancel-fn (atom nil)]
+      (try
+        (let [d (binding [streaming/*register-cancel* (fn [f] (reset! cancel-fn f))]
+                  (sc/post-stream-deferred (str "http://127.0.0.1:" port "/x")
+                    {:headers {} :body {:a 1}
+                     :parse-fn parse-data :process-fn accumulate
+                     :make-initial-state (fn [] {})
+                     :build-response identity
+                     :on-token (fn [t] (swap! tokens conj t))
+                     :provider :test}))]
+          (is (some? @cancel-fn) "登记发生在调用线程上——动态 var 在这里才看得见")
+          (Thread/sleep 200)
+          (@cancel-fn)
+          (is (= {} (async/join d 5000)) "取消返回空响应，不抛错")
+          (is (< (count @tokens) 20)))
         (finally (.stop server 0))))))

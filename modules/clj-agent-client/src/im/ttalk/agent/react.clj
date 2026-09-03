@@ -17,6 +17,7 @@
             [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.tool-registry :as registry]
             [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.async :as async]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.tool :as tool]
             [im.ttalk.agent.model.error :as err]
@@ -488,7 +489,50 @@
    :tool-calls-made records
    :tool-context tctx})
 
-(defn- run-tool-loop
+(defn- sync-chat-call
+  "同步 LLM 调用：流式/非流式分派 + 取消令牌的动态绑定。返回 {:response :context}。"
+  [chat-client delta chat-opts token]
+  (if (:on-token chat-opts)
+    (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
+      (chat-client/invoke-chat-stream chat-client delta chat-opts))
+    (chat-client/invoke-chat chat-client delta chat-opts)))
+
+(defn- async-chat-call
+  "异步 LLM 调用：同 `sync-chat-call`，返回 deferred<{:response :context}>。
+
+   `binding` 只包**发起**（登记取消令牌必须在调用线程完成——动态 var 不跨异步
+   边界；虚拟线程兜底路径靠 `bound-fn*` 传导绑定帧，原生异步 provider 则在返回
+   deferred 之前当场登记）。见 docs/async-chat-model-design.md §6.1。"
+  [chat-client delta chat-opts token]
+  (if (:on-token chat-opts)
+    (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
+      (chat-client/invoke-chat-stream-async chat-client delta chat-opts))
+    (chat-client/invoke-chat-async chat-client delta chat-opts)))
+
+(defn- drive-sync
+  "同步 driver：`loop/recur`——**常数栈**，长循环也不吃栈。"
+  [chain remaining* delta tctx]
+  (loop [delta delta, tctx tctx, index 0]
+    (let [result (chain {:messages delta :context tctx
+                         :index index :remaining @remaining*})]
+      (if (= :continue (:status result))
+        (recur (:messages result) (:context result) (inc index))
+        result))))
+
+(defn- drive-async
+  "异步 driver：`fbind` 自递归。deferred 由别的线程完成时续延不吃栈；即便当场
+   完成（同步 provider 兜底）递归深度也 ≤ max-iterations（缺省 10）。"
+  [chain remaining* delta tctx]
+  (letfn [(step [delta tctx index]
+            (flt/fbind (chain {:messages delta :context tctx
+                               :index index :remaining @remaining*})
+                       (fn [result]
+                         (if (= :continue (:status result))
+                           (step (:messages result) (:context result) (inc index))
+                           result))))]
+    (step delta tctx 0)))
+
+(defn- run-tool-loop*
   "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或暂停。
 
    callbacks 携带观察回调（:on-llm-call/:on-llm-result/:on-tool-result）和元数据
@@ -509,11 +553,19 @@
    `max-iterations` 对 filter 重入仍是硬上限。扣减点在**批次实际执行之后**，
    与改造前 `(recur … (dec remaining) …)` 的时机逐字相同。
 
+   **同步 / 异步同源**（2026-09-03）：迭代体只有一份，两条路径只差两个注入项——
+   `chat-fn`（`invoke-chat` 还是 `invoke-chat-async`）与 `drive`（`loop/recur`
+   还是 `fbind` 自递归）。迭代体的响应侧走 `flt/fmap`，同步下就是恒等展开
+   （逐字等价于改造前），异步下自动变成续延。设计见
+   docs/async-chat-model-design.md §7。
+
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}
-   （暂停两种 phase：审批（工具未执行）与 :env-retry（批已执行、环境类失败））"
-  [chat-client delta remaining records tctx gate chat-opts callbacks policy]
+   （暂停两种 phase：审批（工具未执行）与 :env-retry（批已执行、环境类失败））
+   ——异步 driver 下同形，只是被 deferred 包了一层。"
+  [chat-client delta remaining records tctx gate chat-opts callbacks policy
+   {:keys [chat-fn drive]}]
   (let [token (:cancel-token chat-opts)
         meta (or (:metadata callbacks) {})
         on-tool-result (:on-tool-result callbacks)
@@ -528,12 +580,12 @@
               (do
                 ;; 每次 LLM 调用前触发（观察用，不影响流程）
                 (cb/invoke callbacks :on-llm-call delta meta)
-                (let [{:keys [response context]}
-                      (if (:on-token chat-opts)
-                        (binding [streaming/*register-cancel* (when token (streaming/binding-register token))]
-                          (chat-client/invoke-chat-stream chat-client delta (assoc chat-opts :context tctx)))
-                        (chat-client/invoke-chat chat-client delta (assoc chat-opts :context tctx)))
-                      tctx context
+                ;; 唯一的异步点：LLM 调用。其后整段（工具批次、屏障、收尾判定）
+                ;; 是 fmap 的续延——同步下当场执行，异步下在 LLM 完成时执行。
+                (flt/fmap
+                 (chat-fn chat-client delta (assoc chat-opts :context tctx) token)
+                 (fn [{:keys [response context]}]
+                  (let [tctx context
                       calls (response/response-tool-calls response)]
                   ;; 每次 LLM 返回后触发（观察用，不影响流程）
                   (cb/invoke callbacks :on-llm-result response meta)
@@ -617,14 +669,21 @@
                              :return-direct true}
 
                             :else
-                            {:status :continue :messages messages :context context}))))))))))
+                            {:status :continue :messages messages :context context}))))))))))))
         iteration-chain ((:iteration (flt/filter-hooks chat-client)) iteration-terminal)]
-    (loop [delta delta, tctx tctx, index 0]
-      (let [result (iteration-chain {:messages delta :context tctx
-                                     :index index :remaining @remaining*})]
-        (if (= :continue (:status result))
-          (recur (:messages result) (:context result) (inc index))
-          result)))))
+    (drive iteration-chain remaining* delta tctx)))
+
+(defn- run-tool-loop
+  "工具循环（**同步**）：`invoke-chat` + `loop/recur` driver。行为与加异步孪生之前逐字相同。"
+  [chat-client delta remaining records tctx gate chat-opts callbacks policy]
+  (run-tool-loop* chat-client delta remaining records tctx gate chat-opts callbacks policy
+                  {:chat-fn sync-chat-call :drive drive-sync}))
+
+(defn- run-tool-loop-async
+  "工具循环（**异步**）：`invoke-chat-async` + `fbind` 自递归 driver，返回 deferred。"
+  [chat-client delta remaining records tctx gate chat-opts callbacks policy]
+  (run-tool-loop* chat-client delta remaining records tctx gate chat-opts callbacks policy
+                  {:chat-fn async-chat-call :drive drive-async}))
 
 (defn- chat-client-memory-store
   "取 chat-client 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
@@ -654,8 +713,60 @@
       (dissoc result :direct-messages))
     result))
 
+(defn- invoke*
+  "invoke / invoke-async 的**唯一**实现；两者只差一个 `run`（跑法）。
+
+   两个注入项：
+   - `run`     `(fn [thunk] -> 链结果)`——`async/inline` 当场执行返回普通值，
+               `async/vthread` 丢进虚拟线程返回 CompletableFuture。只用在 heal
+               这一处**阻塞 store IO** 上（异步模式下它不该占住调用线程）。
+   - `loop-fn` 工具循环本体——`run-tool-loop`（同步）或 `run-tool-loop-async`
+               （异步，返回 deferred）。异步循环自己就不阻塞，故**不需要**再包
+               一层 vthread。
+
+   其余逐字相同——响应侧全走 `flt/fmap` / `flt/fcatch`（契约 C1「形态保持」的
+   直接兑现：同一份编排代码，同步进同步出、异步进异步出）。"
+  [chat-client store messages opts run loop-fn]
+  (when-not (:chat-model chat-client)
+    (throw (ex-info "ChatClient 未配置 ChatModel（请在 build-chat-client 中提供 :chat-model）"
+                    {:chat-client-keys (keys chat-client)})))
+  (let [base-ctx (or (:context opts) (ctx/create))
+        ephemeral? (nil? (ctx/conversation-id base-ctx))
+        conv-id (or (ctx/conversation-id base-ctx)
+                    (str "conv-" (java.util.UUID/randomUUID)))
+        init-ctx (ctx/with-conversation-id base-ctx conv-id)
+        max-iter (or (:max-iterations opts)
+                     (get-in chat-client [:settings :max-tool-iterations])
+                     default-max-iterations)
+        callbacks (or (:callbacks opts) {})
+        ;; turn 链：包整个工具循环（每 turn 一次；filter 可改写 :messages/:context、
+        ;; 递归重入——每次重入获得全新 max-iterations 预算）。设计见 §14。
+        ;; 异步 loop-fn 直接返回 deferred，turn filter 因此**真的**拿到 deferred
+        ;; （含递归重入：每次重入都是一条新的 deferred 链）。
+        turn-terminal (fn [treq]
+                        (-> (loop-fn chat-client
+                                     (mapv msg/normalize (:messages treq))
+                                     max-iter [] (or (:context treq) init-ctx)
+                                     (:tool-gate opts)
+                                     (build-chat-opts chat-client opts)
+                                     callbacks
+                                     {:on-env-error (or (:on-env-error opts) :proceed)})
+                            (flt/fmap #(persist-direct-messages! % chat-client conv-id))))
+        turn-chain ((:turn (flt/filter-hooks chat-client)) turn-terminal)]
+    ;; heal 也走 run：异步模式下它是 store IO，不该占住调用线程
+    (flt/fcatch
+      (-> (run (fn [] (heal-dangling-tool-calls! store conv-id)))
+          (flt/fbind (fn [_] (turn-chain {:messages messages :context init-ctx})))
+          (flt/fmap (fn [result]
+                      (when (and ephemeral? store (= :completed (:status result)))
+                        (memory/mem-clear store conv-id))
+                      result)))
+      (fn [t]
+        (when (and ephemeral? store) (memory/mem-clear store conv-id))
+        (throw t)))))
+
 (defn invoke
-  "工具调用循环主入口（统一循环）。
+  "工具调用循环主入口（统一循环）。**同步**：阻塞到出结果。
 
    参数:
    - chat-client:   ChatClient 实例（需配置 ChatModel）
@@ -670,39 +781,28 @@
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}"
   [chat-client store messages opts]
-  (when-not (:chat-model chat-client)
-    (throw (ex-info "ChatClient 未配置 ChatModel（请在 build-chat-client 中提供 :chat-model）"
-                    {:chat-client-keys (keys chat-client)})))
-  (let [base-ctx (or (:context opts) (ctx/create))
-        ephemeral? (nil? (ctx/conversation-id base-ctx))
-        conv-id (or (ctx/conversation-id base-ctx)
-                    (str "conv-" (java.util.UUID/randomUUID)))
-        init-ctx (ctx/with-conversation-id base-ctx conv-id)
-        max-iter (or (:max-iterations opts)
-                     (get-in chat-client [:settings :max-tool-iterations])
-                     default-max-iterations)
-        callbacks (or (:callbacks opts) {})
-        _ (heal-dangling-tool-calls! store conv-id)]
-    (try
-      ;; turn 链：包整个工具循环（每 turn 一次；filter 可改写 :messages/:context、
-      ;; 递归重入——每次重入获得全新 max-iterations 预算）。设计见 §14。
-      (let [turn-terminal (fn [treq]
-                            (-> (run-tool-loop chat-client
-                                               (mapv msg/normalize (:messages treq))
-                                               max-iter [] (or (:context treq) init-ctx)
-                                               (:tool-gate opts)
-                                               (build-chat-opts chat-client opts)
-                                               callbacks
-                                               {:on-env-error (or (:on-env-error opts) :proceed)})
-                                (persist-direct-messages! chat-client conv-id)))
-            turn-chain ((:turn (flt/filter-hooks chat-client)) turn-terminal)
-            result (turn-chain {:messages messages :context init-ctx})]
-        (when (and ephemeral? store (= :completed (:status result)))
-          (memory/mem-clear store conv-id))
-        result)
-      (catch Throwable t
-        (when (and ephemeral? store) (memory/mem-clear store conv-id))
-        (throw t)))))
+  (invoke* chat-client store messages opts async/inline run-tool-loop))
+
+(defn invoke-async
+  "同 `invoke`，但**立刻返回 `CompletableFuture`**，整个 turn 跑在虚拟线程上。
+
+   给 Ring / Luminus 异步 handler 用：HTTP 工作线程不被 LLM 往返占住。
+   取结果用 `flt/fmap` 组合、`async/on-complete` 接回调，或 `async/join` 阻塞。
+
+   语义与 `invoke` **逐字相同**（同一份 `invoke*`）：暂停/取消/错误状态、
+   ephemeral 会话清理、turn filter 的递归重入都照旧；差别只在返回值被
+   deferred 包了一层。turn filter 在这条路径上会真的拿到 deferred——
+   写响应侧时必须走 `flt/fmap` / `flt/fbind`，不能 `let` 出来直接用（§2.6.4）。
+
+   **全链路 deferred**（2026-09-03，P2）：循环本体走 `run-tool-loop-async`——
+   每轮 LLM 调用经 `chat-client/invoke-chat-async`，`:chat` / `:iteration` /
+   `:turn` 三条链都在异步形态下运行。ChatModel 未实现 `IAsyncChatModel` 时由
+   `chat-model/call-async*` 用虚拟线程兜底，行为一致、只是每次 LLM 调用占一根
+   虚拟线程。`:tool` 终端仍同步（工具是用户代码，阻塞是常态；批次并行本就在
+   executor 上），见 docs/async-chat-model-design.md §8。"
+  ^java.util.concurrent.CompletableFuture
+  [chat-client store messages opts]
+  (invoke* chat-client store messages opts async/vthread run-tool-loop-async))
 
 (defn- replace-tool-results
   "把重试产出的 tool 结果消息按 :tool-call-id 替换进原批次消息（保持原序）。"
@@ -714,38 +814,75 @@
   "从 :env-retry 暂停恢复（批已执行、环境类失败）。
    decision :retry   → 环境已修复：重跑失败调用，结果按 id 替换进原批次消息；
                        若仍有环境类失败则再次暂停（同 phase）。
-   decision 其他     → :proceed：原错误结果照常交给模型。"
-  [chat-client {:keys [batch-messages failed-calls remaining records]} decision opts]
+   decision 其他     → :proceed：原错误结果照常交给模型。
+
+   `run` / `loop-fn` 见 `invoke*`：重跑那一批是**阻塞**的工具执行，异步模式下
+   进虚拟线程；随后的循环由 `loop-fn` 决定同步还是 deferred。"
+  [chat-client {:keys [batch-messages failed-calls remaining records]} decision opts run loop-fn]
   (let [tctx (or (:context opts) (ctx/create))
         gate (:tool-gate opts)
         callbacks (or (:callbacks opts) {})
         policy {:on-env-error (or (:on-env-error opts) :pause)}
         chat-opts (build-chat-opts chat-client opts)]
     (if (= :retry decision)
-      (let [response (response/make-response :tool-calls failed-calls)
-            batch-opts {:gate nil
-                         :tool-context tctx
-                         :records records
-                         :on-tool-result (:on-tool-result callbacks)}
-             {:keys [messages records context errors]}
-             (if-let [tm (:tool-manager chat-client)]
-               (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
-              (execute-batch chat-client failed-calls nil tctx records
-                             (:on-tool-result callbacks)))
-            merged (replace-tool-results batch-messages messages)
-            env-errors (when (= :pause (:on-env-error policy))
-                         (filterv #(= :environment (:class %)) errors))]
-        (if (seq env-errors)
-          (env-pause env-errors merged records remaining context)
-          (run-tool-loop chat-client merged remaining records context
-                         gate chat-opts callbacks policy)))
-      (run-tool-loop chat-client batch-messages remaining records tctx
-                     gate chat-opts callbacks policy))))
+      (-> (run (fn []
+                 (let [response (response/make-response :tool-calls failed-calls)
+                       batch-opts {:gate nil
+                                   :tool-context tctx
+                                   :records records
+                                   :on-tool-result (:on-tool-result callbacks)}
+                       {:keys [messages records context errors]}
+                       (if-let [tm (:tool-manager chat-client)]
+                         (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
+                         (execute-batch chat-client failed-calls nil tctx records
+                                        (:on-tool-result callbacks)))]
+                   {:merged (replace-tool-results batch-messages messages)
+                    :records records
+                    :context context
+                    :env-errors (when (= :pause (:on-env-error policy))
+                                  (filterv #(= :environment (:class %)) errors))})))
+          (flt/fbind (fn [{:keys [merged records context env-errors]}]
+                       (if (seq env-errors)
+                         (env-pause env-errors merged records remaining context)
+                         (loop-fn chat-client merged remaining records context
+                                  gate chat-opts callbacks policy)))))
+      (loop-fn chat-client batch-messages remaining records tctx
+               gate chat-opts callbacks policy))))
 
-(declare ^:private resume-approval)
+(declare ^:private resume-approval resume-approval-batch)
+
+(defn- resume*
+  "resume / resume-async 的唯一实现；两者只差 `run` / `loop-fn` 两个注入项，见 `invoke*`。"
+  [chat-client loop-state decision opts run loop-fn]
+  (let [continuation
+        (fn []
+          (if (= :env-retry (:phase loop-state))
+            (resume-env chat-client loop-state decision opts run loop-fn)
+            (resume-approval chat-client loop-state decision opts run loop-fn)))
+        tctx (or (:context opts) (ctx/create))
+        max-iter (or (:max-iterations opts)
+                     (get-in chat-client [:settings :max-tool-iterations])
+                     default-max-iterations)
+        consumed? (atom false)
+        ;; 终端一次性分派：首调 = 暂停延续（自带 run：批次执行是阻塞的）；
+        ;; 重入 = 常规循环（新 delta，loop-fn 自己决定同步/异步）
+        terminal (fn [treq]
+                   (-> (if (compare-and-set! consumed? false true)
+                         (continuation)
+                         (loop-fn chat-client
+                                  (mapv msg/normalize (:messages treq))
+                                  max-iter [] (or (:context treq) tctx)
+                                  (:tool-gate opts)
+                                  (build-chat-opts chat-client opts)
+                                  (or (:callbacks opts) {})
+                                  {:on-env-error (or (:on-env-error opts) :proceed)}))
+                       ;; 延续与重入都可能撞上 return-direct 收尾
+                       (flt/fmap #(persist-direct-messages! % chat-client (ctx/conversation-id tctx)))))
+        turn-chain ((:turn (flt/filter-hooks chat-client)) terminal)]
+    (turn-chain {:resume? true :messages nil :context tctx})))
 
 (defn resume
-  "从 paused 的 loop-state 继续工具循环。
+  "从 paused 的 loop-state 继续工具循环。**同步**：阻塞到出结果。
 
    两种暂停 phase：
    - 审批暂停（缺省，工具未执行）：decision :approved（强制全部执行）
@@ -773,37 +910,42 @@
 
    返回: 同 invoke（:completed 或再次 :paused）"
   [chat-client loop-state decision opts]
-  (let [continuation
-        (fn []
-          (if (= :env-retry (:phase loop-state))
-            (resume-env chat-client loop-state decision opts)
-            (resume-approval chat-client loop-state decision opts)))
-        tctx (or (:context opts) (ctx/create))
-        max-iter (or (:max-iterations opts)
-                     (get-in chat-client [:settings :max-tool-iterations])
-                     default-max-iterations)
-        consumed? (atom false)
-        ;; 终端一次性分派：首调 = 暂停延续；重入 = 常规循环（新 delta）
-        terminal (fn [treq]
-                   (-> (if (compare-and-set! consumed? false true)
-                         (continuation)
-                         (run-tool-loop chat-client
-                                        (mapv msg/normalize (:messages treq))
-                                        max-iter [] (or (:context treq) tctx)
-                                        (:tool-gate opts)
-                                        (build-chat-opts chat-client opts)
-                                        (or (:callbacks opts) {})
-                                        {:on-env-error (or (:on-env-error opts) :proceed)}))
-                       ;; 延续与重入都可能撞上 return-direct 收尾
-                       (persist-direct-messages! chat-client (ctx/conversation-id tctx))))
-        turn-chain ((:turn (flt/filter-hooks chat-client)) terminal)]
-    (turn-chain {:resume? true :messages nil :context tctx})))
+  (resume* chat-client loop-state decision opts async/inline run-tool-loop))
+
+(defn resume-async
+  "同 `resume`，但立刻返回 `CompletableFuture`，延续跑在虚拟线程上。
+
+   HITL 的第二段（人答复之后接着跑）在 web 场景与首段同样长——首段异步了、
+   这段还阻塞 HTTP 线程就没有意义。语义与 `resume` 逐字相同（同一份 `resume*`）。"
+  ^java.util.concurrent.CompletableFuture
+  [chat-client loop-state decision opts]
+  (resume* chat-client loop-state decision opts async/vthread run-tool-loop-async))
 
 (defn- resume-approval
   "审批暂停的延续（工具未执行）：按 decision/payload 组 resume-gate，
-   执行批次后继续循环。"
+   执行批次后继续循环。
+
+   **校验与批次执行整个进 `run`**：异步模式下 payload 校验抛出的异常要落进
+   返回的 deferred（而不是同步抛给调用方——那会让 `chat-async` 的调用点
+   突然需要 try/catch）。同步模式 `run` = `inline`，与拆分前逐字相同。"
+  [chat-client loop-state decision opts run loop-fn]
+  (let [{:keys [remaining]} loop-state
+        gate (:tool-gate opts)
+        callbacks (or (:callbacks opts) {})
+        tctx (or (:context opts) (ctx/create))]
+    (-> (run #(resume-approval-batch chat-client loop-state decision opts))
+        (flt/fbind (fn [{:keys [messages records context]}]
+                     (loop-fn chat-client messages remaining records context
+                              gate
+                              (build-chat-opts chat-client opts)
+                              callbacks
+                              {:on-env-error (or (:on-env-error opts) :proceed)}))))))
+
+(defn- resume-approval-batch
+  "审批延续的**阻塞段**：校验 payload、组 resume-gate、执行工具批次。
+   返回 {:messages :records :context}。"
   [chat-client loop-state decision opts]
-  (let [{:keys [tool-calls remaining records pending-id]} loop-state
+  (let [{:keys [tool-calls records pending-id]} loop-state
         payload (:payload opts)
         _ (when (and (= :reply decision) (not (string? (:message payload))))
             (throw (ex-info ":reply 需要 opts :payload {:message \"...\"}"
@@ -839,8 +981,4 @@
         (if-let [tm (:tool-manager chat-client)]
           (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
           (execute-batch chat-client tool-calls resume-gate tctx records on-tool-result))]
-    (run-tool-loop chat-client messages remaining records context
-                   gate
-                   (build-chat-opts chat-client opts)
-                   callbacks
-                   {:on-env-error (or (:on-env-error opts) :proceed)})))
+    {:messages messages :records records :context context}))

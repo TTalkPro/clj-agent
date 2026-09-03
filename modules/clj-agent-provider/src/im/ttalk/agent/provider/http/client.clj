@@ -8,12 +8,14 @@
    (require '[im.ttalk.agent.provider.http.client :as http])
    (http/get  \"https://api.example.com/users\")
    (http/post \"https://api.example.com/users\" :body {:name \"张三\"})
-   (http/post-async url callback :body {...})   ; 异步回调
+   (http/post-deferred url :body {...})         ; 异步：返回 deferred<响应 map>
+   (http/post-async url callback :body {...})   ; 异步回调（低层，形状同上）
    (http/request :get url :async? true :callback (fn [resp] ...))"
   (:refer-clojure :exclude [get])
   (:require [cheshire.core :as json]
             [taoensso.timbre :as log]
             [clojure.string :as str]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.http.retry :as retry])
   (:import [java.net URI URLEncoder]
@@ -237,6 +239,43 @@
           (parse-response {:status status :headers headers :body body} as))
         (catch java.io.IOException e
           {:status 0 :error (.getMessage e) :success? false})))))
+
+(defn request-deferred
+  "`request` 的异步孪生：**不阻塞**，返回 deferred<响应 map>。
+
+   **响应 map 的形状与同步 `request` 逐字相同**（`{:status :headers :body :success?}`
+   / IO 失败时 `{:status 0 :error … :success? false}`）——形状对齐是刻意的：
+   provider 的异步路径因此能与同步路径**共用**后处理（`:success?` 判定、
+   `response->error`、限流头解析），不必另写一条更短的路。仓库里旧的
+   `xxx-call-async` 旁路正是栽在没有这条对齐上（docs/async-chat-model-design.md §0）。
+
+   非 IO 异常（如响应体解析失败）**原样落 error channel**，与同步版一致
+   （同步版也不吞它们）。"
+  [method url & {:keys [headers body query-params timeout as]
+                 :or {timeout *default-timeout*
+                      as :json}}]
+  (let [url (if query-params (build-url url query-params) url)
+        headers (merge *default-headers* headers)
+        req (build-request method url headers body timeout)
+        handler (body-handler as)
+        ^HttpClient client @default-client]
+    (flt/fcatch
+      (flt/fmap (.sendAsync client req handler)
+                (fn [resp]
+                  (let [^HttpResponse resp resp]
+                    (parse-response {:status (.statusCode resp)
+                                     :headers (http-headers->map (.headers resp))
+                                     :body (.body resp)}
+                                    as))))
+      (fn [t]
+        (if (instance? java.io.IOException t)
+          {:status 0 :error (.getMessage ^Throwable t) :success? false}
+          (throw t))))))
+
+(defn post-deferred
+  "异步 POST，返回 deferred<响应 map>（形状同同步 `post`）。"
+  [url & {:as opts}]
+  (apply request-deferred :post url (apply concat opts)))
 
 ;; ============================================================
 ;; HTTP 便捷方法（宏批量生成）

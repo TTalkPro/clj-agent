@@ -384,6 +384,53 @@ Both schemas would otherwise reach the LLM while only one handler survives — w
 model sees and what actually runs drift apart with no runtime symptom. Illegal
 `:timeout` / `:retry` declarations are rejected at assembly time too.
 
+### Async Entry Point (Ring / Luminus async handlers)
+
+`agent/chat-async` returns a `CompletableFuture` immediately and runs the whole turn on a
+virtual thread, so an HTTP worker thread is never parked on an LLM round-trip. It lines up
+exactly with Ring 3's three-argument async handler:
+
+```clojure
+(require '[im.ttalk.agent.async :as async] '[im.ttalk.agent.filter :as flt])
+
+(defn chat-handler [request respond raise]
+  (-> (agent/chat-async (session-agent request) (message-of request))
+      (flt/fmap ->ring-response)                  ;; response-side combinator; also valid on the sync chain
+      (async/on-complete respond raise)))         ;; respond/raise are Ring's own callbacks
+
+["/api/chat" {:post {:handler chat-handler}}]     ;; reitit detects async by arity
+```
+
+Also available: `react/invoke-async`, `react/resume-async`, `agent/resume-async` (the second
+half of a HITL turn stays non-blocking too), `async/join` to block for a value, and
+`async/vthread` to build your own async terminal. Sync and async share **one implementation**
+(they differ only in a "runner" argument) and return the same result shape.
+
+**Writing filters**: on the async path `(chain req)` really does return a deferred, so the
+response side must go through `flt/fmap` / `flt/fbind`. `(let [r (chain req)] …)` will not
+throw — it just silently hands you a future. On the sync chain the combinators are identity
+expansions (zero overhead), so always write them that way.
+
+**How deep does async go**: `:turn`, `:iteration` and `:chat` are deferred end to end; the
+`:tool` terminal stays synchronous (tools are user code — blocking is the norm, and batches
+already run on an executor). Providers that implement the optional `IAsyncLLMProvider`
+protocol (Anthropic-family and OpenAI-compatible ones do) use native async HTTP; the rest are
+covered by `chat-model/call-async*` on a virtual thread — **every provider can go async**,
+implementing the protocol merely saves that thread.
+
+⚠️ **The streaming sink's thread is not guaranteed**: on the async path `on-token` fires on a
+worker thread (the sync entry still uses the calling thread). Tokens of one stream are still
+delivered serially, so `:token-xform` needs no locking — but a sink that touches UI or a
+`ThreadLocal` must hop back itself. See
+[`docs/token-stream-filter-design.md`](docs/token-stream-filter-design.md) §2.1.
+
+Why the hooks were *not* split into before/after: see
+[`docs/filter-chain-design.md`](docs/filter-chain-design.md) §2.6; the async layer's design
+(optional protocols, `retry/run-async`, fallback) is in
+[`docs/async-chat-model-design.md`](docs/async-chat-model-design.md). Runnable example (offline,
+no API key; concurrency measurement, raise path, HITL):
+`examples/async_luminus_handler_example.clj`.
+
 ### ToolSearch — Progressive Tool Disclosure (mirrors Spring AI `ToolSearchToolCallingAdvisor`)
 
 Once you have many tools, every round ships the full schema set into the prompt

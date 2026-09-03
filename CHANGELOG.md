@@ -168,6 +168,73 @@ Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超
 
 ### ✨ 新增
 
+- **链结果组合子 + 异步入口：`invoke-async` / `chat-async`**（2026-09-03）。
+  起点是一个设计提问：chat 走异步之后，`:turn` 的 around 钩子要不要拆成
+  `turn-before` / `turn-after`？结论是**不拆**——async 改的是链的返回类型，
+  不是 around 的形状；而 before/after 换不来异步兼容，却换掉了递归重入
+  （`(chain req)` 调 N 次），那是 `:turn` 链存在的一半理由。决策记录见
+  `docs/filter-chain-design.md` §2.6。
+
+  改为把契约放宽成「返回 `resp` **或** `deferred<resp>`」，并给 filter 作者
+  一组组合子：
+
+      im.ttalk.agent.filter   IChainResult 协议：fmap / fbind / on-error
+                              fcatch 宏（同步 try/catch + 异步 error channel 二合一）
+      im.ttalk.agent.async    CompletionStage 适配层 + vthread / inline
+                              on-complete（Ring 的 respond/raise）/ join / unwrap-cause
+
+  同步值上组合子是恒等展开（零开销、语义逐字不变）；deferred 上是
+  thenApply / thenCompose / exceptionally。契约 C1–C6（形态保持、永不阻塞、
+  异常语义不变含**解包 CompletionException**、组合律、不绑定异步库、
+  `:token-xform` 不参与）见 §2.6.4，逐条有测试。
+
+  **异步入口**：`react/invoke-async`、`react/resume-async`、
+  `simple-agent/chat-async`、`simple-agent/resume-async` 立刻返回
+  `CompletableFuture`，整个 turn 跑在虚拟线程上——给 Ring / Luminus 的三参数
+  异步 handler 用，HTTP 工作线程不被 LLM 往返占住。同步与异步是**同一份实现**
+  （`invoke*` / `resume*` / `run-loop*` 只差一个 `run` 参数），语义逐字相同。
+  内置 filter 的响应侧已全部改写成组合子，故它们在两条路径上都对。
+  可跑示例：`examples/async_luminus_handler_example.clj`（离线，无需 API Key；
+  含 8 会话并发墙钟实测、raise 路径、HITL 202 → resume）。
+
+  **异步到哪一层（如实声明）**：只有 `:turn` 终端。`:chat` / `:tool` 仍是同步的
+  （provider HTTP 仍阻塞），它们只是被整体搬到虚拟线程上——Loom 下这就是正确
+  姿势。**turn filter 作者注意**：走异步入口时 `(chain req)` 真的返回 deferred，
+  响应侧必须 `flt/fmap` / `flt/fbind`，`(let [r (chain req)] …)` 不报错但静默错。
+
+- **异步全链路：`IAsyncChatModel` / `IAsyncLLMProvider` + `invoke-chat-async`**
+  （2026-09-03，紧随上一条组合子）。上一条把 `:turn` 终端搬上了虚拟线程；这一条
+  往下打通到传输层：`:turn` / `:iteration` / `:chat` 三条链全链路 deferred。
+  设计与落地记录见 `docs/async-chat-model-design.md`。
+
+      im.ttalk.agent.model       IAsyncLLMProvider（可选协议：call-llm-async / call-llm-stream-async）
+      im.ttalk.agent.chat-model  IAsyncChatModel + call-async* / stream-call-async*（探测 + 虚拟线程兜底）
+      im.ttalk.agent.retry       run-async（fbind 自递归；退避走 async/delayed，不 sleep）
+      im.ttalk.agent.async       delayed（CompletableFuture/delayedExecutor，不占线程）
+      im.ttalk.agent.chat-client invoke-chat-async / invoke-chat-stream-async
+      provider/http/client       request-deferred / post-deferred（响应 map 形状与同步版逐字相同）
+      provider/http/stream-client post-stream-deferred（不 @future 的 post-stream-sync）
+
+  **任何 provider 都能异步**：探测不到 `IAsyncLLMProvider` 就用虚拟线程包同步调用，
+  调用方永远拿得到 deferred；实现协议只是省掉那根线程。Anthropic 系（含 MiniMax /
+  zhipu 的 Anthropic 端点）与 OpenAI 兼容系两个 record 已实现原生异步。
+  两个可选协议都**不给 Object 兜底**——兜了 `satisfies?` 恒真，探测机制当场失效。
+
+  **同步与异步是同一份实现**：`react/run-tool-loop*` 的迭代体只有一份，两条路径
+  只差 `chat-fn`（`invoke-chat` / `invoke-chat-async`）与 `drive`（`loop/recur` /
+  `fbind` 自递归）两个注入项；`DefaultChatModel` 的异步分支复用同一套
+  `build-call-config` / 重试判据 / `normalize-response`。重试次数、退避曲线、
+  `:on-retry` 观测、`ChatResponse`（含 replay blocks）在两条路径上逐字相同，有测试钉住。
+
+  **💥 可观察语义变化——流式 sink 的线程不再保证**：异步入口下 `on-token` 在工作
+  线程（虚拟线程或传输层 executor）上派发，同步入口仍是调用线程。单次流内**仍串行**，
+  `:token-xform` 的有状态 transducer 不必加锁；但往 UI / `ThreadLocal` 写的 sink
+  要自己切回去。契约写在 `docs/token-stream-filter-design.md` §2.1。
+
+  **清理**：`xxx-call-async` / `xxx-call-stream-async` 那套 callback 式旁路
+  （零调用点、绕过 wire 转换与归一化、docstring 说返回 nil 实际返回 CompletableFuture）
+  改成 deferred 直通，同名函数仍在但语义换成「返回 deferred」，参数去掉 callback。
+
 - **第四条 around 链 `:iteration`**（2026-08-25）——包**单轮迭代**（LLM 调用 +
   该轮工具批次），在 `react/run-tool-loop` 每轮外面。补的是四层中间件模型里
   「内层 advisor」那一层：`:chat` 与它同频（每轮一次），但只包 LLM 调用那一半，

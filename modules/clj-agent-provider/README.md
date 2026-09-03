@@ -44,7 +44,11 @@ LLM Provider 和 ChatModel 工厂模块
 {:deps {im.ttalk/clj-agent-provider {:local/root "../clj-agent-provider"}}}
 ```
 
-内部依赖：`clj-agent-core`（实现其 `im.ttalk.agent.model/ILLMProvider` 协议）
+内部依赖：`clj-agent-core`（实现其 `im.ttalk.agent.model/ILLMProvider` 协议；
+两个 record —— `common/base` 的 `OpenAICompatProvider` 与 `anthropic` 的
+`AnthropicProvider` —— 另实现可选协议 `IAsyncLLMProvider`，走原生异步 HTTP。
+没实现它的 provider 由 `chat-model/call-async*` 用虚拟线程兜底，异步入口一样可用；
+设计见 [`docs/async-chat-model-design.md`](../../docs/async-chat-model-design.md)）
 
 外部依赖：
 - cheshire/cheshire 5.12.0（JSON）
@@ -96,7 +100,7 @@ LLM Provider 和 ChatModel 工厂模块
 | `im.ttalk.agent.provider.openai-compat-provider` | 通用 OpenAI 兼容 provider（base-url 必填） |
 | `im.ttalk.agent.provider.api` | Provider 统一门面 |
 | `im.ttalk.agent.provider.mock` | Mock Provider |
-| `im.ttalk.agent.provider.common.base` | Provider 基座 + defprovider 宏（辅助层） |
+| `im.ttalk.agent.provider.common.base` | Provider 基座 + defprovider 宏（辅助层）；`OpenAICompatProvider` 实现 `ILLMProvider` + `IAsyncLLMProvider` |
 | `im.ttalk.agent.provider.common.openai-compat` | OpenAI 兼容协议层（辅助层） |
 | `im.ttalk.agent.provider.common.cache` | Anthropic prompt caching 策略层（辅助层） |
 | `im.ttalk.agent.provider.common.response-parser` | 响应归一化（辅助层） |

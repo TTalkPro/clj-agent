@@ -7,7 +7,14 @@
 > `agent-loop-concurrency-design.md`（§4.6 tool 链契约收紧、§14 turn 链）；
 > 与 HITL 的交互见 `hitl-timeline-design.md`。
 >
-> 实现：`core/filter.clj`（机制 + 内置 filter + `compile-hooks`）、
+> **2026-09-03 增补 §2.6 / §2.7**：`:turn` **不拆** `before`/`after`（决策记录 +
+> async 前瞻，§2.6）；组合子 `flt/fmap` / `fbind` / `fcatch` + `IChainResult` 协议
+> 与 CompletionStage 适配层已实现，内置 filter 响应侧已改写，`:turn` 终端已可异步
+> ——`react/invoke-async`、`simple-agent/chat-async`，对接 Ring / Luminus 异步
+> handler（§2.7）。全套 406 tests / 1820 assertions / 0。
+>
+> 实现：`core/filter.clj`（机制 + 内置 filter + `compile-hooks` + 组合子）、
+> `core/async.clj`（CompletionStage 适配 + 虚拟线程入口 + Ring 回调 sink）、
 > `core/chat_client.clj`（:chat/:tool 组装点、`hooks` 字段、`filter-hooks` /
 > `with-filters`）、`client/react.clj`（:turn 与 :iteration 组装点）、
 > `client/filter/memory.clj`（memory filter）。
@@ -178,7 +185,8 @@ TurnResult   react 循环结果 {:status :response :tool-context :tool-calls-mad
 - **递归重入**：可多次 `(chain req)`（校验重试 / evaluator-optimizer）。
   重入的 `:messages` 应为**新 delta**（如反馈消息），完整上下文由 memory
   filter 拼接——递归类 turn filter 须与 memory 同挂；每次重入获得全新
-  max-iterations 预算；
+  max-iterations 预算。**这条能力正是「不把 `:turn` 拆成 before/after」的决定性
+  理由**——见 §2.6；
 - **硬规则**：`:paused` / `:cancelled` / `:error` 结果**必须透传、不得重入**
   （暂停态上重试会破坏 HITL 语义），有测试钉住；
 - **resume 同样经过 turn 链**——语义与机制见 §2.5。
@@ -223,6 +231,205 @@ terminal (fn [treq]
 **测试锚点**（turn_filter_test.clj）：暂停 → resume → 不合格答案 → 校验
 反馈重入 → 合格（恰好 3 次 LLM 调用）；`:resume?` 标记与 nil :messages
 的探针断言。
+
+### 2.6 为什么是 around，不拆 `before` / `after`（含 async 前瞻）
+
+> 起因是一个合理的担心：**一旦 chat 走 Flux / 异步，around 的「后半段」还拆得
+> 开吗？不如现在就把 `:turn` 拆成 `turn-before` + `turn-after`。**
+> 结论：**不拆**。async 改的是链的**返回类型**，不是 around 的**形状**；而
+> before/after 恰恰是那个在 async 下更难写、且今天就已经表达不了我们主用例的形状。
+
+#### 2.6.1 before/after 是 around 的真子集
+
+| 能力 | around `(fn [req chain])` | before + after |
+|---|---|---|
+| 改写请求 | ✅ | ✅ |
+| 观察响应 | ✅ | ✅ |
+| 短路（不进循环） | ✅ 不调 chain 即可 | ⚠️ 得另造 `{:abort result}` 返回协议——把 around 手工重新发明一遍，还更差 |
+| 栈上持有状态（计时 / turn 级预算 / tracing span） | ✅ `let` + try/finally | ❌ 必须在 req 里挖 `:filter-state` 口袋自己传递 |
+| after 的逆序执行 | ✅ 闭包折叠的构造性性质 | ⚠️ 手工保证 |
+| **递归重入 `(chain req)` N 次** | ✅ | ❌ **根本表达不了** |
+
+最后一行是决定性的：before/after 里压根没有 `chain` 这个可调用的东西，它是一个
+被动通知点。而**递归重入正是 `:turn` 链存在的一半理由**（§2.4）——拆完之后
+`validation-turn-filter`（调 chain 至多 3 次）与 evaluator-optimizer 直接作废，
+`:turn` 只剩 RAG 注入那一类请求侧改写能活，退化成 §2.2 `:chat` 的一个低频版本。
+
+**「只想在 turn 前后观察一下」这个需求已有归属**：`client/callbacks.clj` 的
+`:on-turn-start` / `:on-turn-end` / `:on-turn-error`（与 kernel filter 刻意解耦的
+九钩子体系）。再加一对 `turn-before` / `turn-after`，是在复制 callbacks 的同时
+把 filter 削弱成 callbacks——两边都变差。
+
+#### 2.6.2 async 改的是返回类型，不是形状
+
+around 在 reactive 下照样成立，变的只是「后半段」从直线代码变成续延：
+
+```clojure
+;; 今天（同步）
+(let [r (chain req)] (post r))
+;; 异步化之后
+(-> (chain req) (fmap post))
+```
+
+三条佐证：
+
+- **Spring AI 自己**：1.0 的 `CallAroundAdvisor` / `StreamAroundAdvisor`、2.0 的
+  `CallAdvisor` / `StreamAdvisor.adviseStream(req, chain) -> Flux`——一路 reactive
+  化，around 形状一次没变过。反倒是 before/after 在 async 下更难写：**没有栈了**，
+  before 攒的状态只能靠显式 context 传给 after。
+- **turn 链天生是 Mono 不是 Flux**：TurnResult 是单值。Flux 性只存在于 token 层，
+  而 token 层我们**故意没做成 around**——`:token-xform` 是 transducer（§0 第五钩子 /
+  `token-stream-filter-design.md`）。「单值链用 around，流用 transducer」这个按
+  形状分家的决定，本身就是这个担心的既有答案，且已经落地。
+- **我们跑在 Loom 上**：`core/tool.clj` 的超时、`react/run-on-executor` 的并行工具
+  批次、`subagent/manager.clj` 全是虚拟线程 + 阻塞调用。这个技术栈下的「async」
+  大概率是结构化并发，around 一个字都不用改。Flux 那种控制反转，正是 Spring 因为
+  Loom 在往回撤的东西。
+
+#### 2.6.3 真正会被 async 咬到的（都不是钩子形状）
+
+- `binding` 动态绑定不跨异步边界——同类问题已在 `run-on-executor` 用 `bound-fn*`
+  处理过（§2.1 警示的同源问题）；
+- 包着 `(chain req)` 的 `try/catch` 抓不到异步失败，得换成 error channel 组合
+  （见下 `fcatch`）；
+- filter 内部 `@` 阻塞等结果会把异步收益吃光——**契约上禁止**（见下）。
+
+#### 2.6.4 前瞻性对冲：`flt/fmap` 契约（同步版已实现，2026-09-03）
+
+不拆钩子，改为**把契约放宽成「返回 resp **或** deferred\<resp\>」**，并给 filter
+作者一组组合子。今天在同步世界里它们是恒等展开，零成本；将来终端异步化，走组合子
+的 filter 源码一行不用动。
+
+```clojure
+;; core/filter.clj —— 协议进 core，异步实现不进（C5）
+(defprotocol IChainResult
+  (fmap  [x f])        ;; 响应侧改写的唯一入口：(flt/fmap (chain req) (fn [result] ...))
+  (fbind [x f])        ;; f 自身返回链结果（flatMap）；递归重入在 async 下的形状
+  (on-error [x handler]))  ;; 挂 error channel；同步值原样返回。一般不直接调，用 fcatch
+
+(extend-protocol IChainResult          ;; 同步路径 = 恒等展开
+  nil    (fmap [_ f] (f nil)) (fbind [_ f] (f nil)) (on-error [x _] x)
+  Object (fmap [x f] (f x))   (fbind [x f] (f x))   (on-error [x _] x))
+
+(defmacro fcatch [expr handler]        ;; 同步 try/catch + 异步 error channel，二合一
+  `(let [h# ~handler]
+     (try (on-error ~expr h#) (catch Throwable t# (h# t#)))))
+```
+
+**`fcatch` 为什么是宏**：同步下异常在**实参求值**时就抛了，函数形态的
+`(fcatch (chain req) h)` 根本接不住——h 还没拿到控制权。宏把表达式包进 try，
+才能与 `fmap` 组成同一条 `->` 链，且顺带覆盖「异步终端在返回 deferred 之前
+就同步抛」这一路。
+
+**契约条款**
+
+| # | 条款 | 说明 |
+|---|---|---|
+| C1 | **形态保持** | 同步值进 → 同步值出；deferred 进 → 同类 deferred 出。filter 因此对「链是否已异步化」**零感知**。`fbind` 是定义使然的例外：同步值上 f 返回 deferred，结果就是 deferred。 |
+| C2 | **永不阻塞** | `fmap` / `fbind` 内部绝不 deref。想拿值就 `fmap`，**不要 `@`**——`@` 是异步化时唯一必须人工改写的写法。 |
+| C3 | **异常语义不变** | `f` 抛异常：同步路径原样抛出（与今天逐字相同，现有测试不动）；异步路径落进 deferred 的 error channel，**不吞**。 |
+| C4 | **组合律** | `(fmap (fmap x f) g) ≡ (fmap x (comp g f))`；`(fmap x identity)` ≡ `x`（同步路径下还是**同一个对象**）。另有 `fbind` 的左单位元与结合律。这条是「今天写的 filter 明天不用改」的形式保证，已由 `chain_result_test.clj` 钉住。 |
+| C5 | **不绑定异步库** | 靠可扩展协议 `IChainResult`（不是类型判断）；CompletableFuture / manifold / core.async chan 由适配层 `extend-protocol` 注入——与 `IRetriever`（rag）、`IToolIndex`（tool-search）同一取舍：**协议进 core，实现不进**。参考实现见 `chain_result_test.clj` 顶部的 CompletableFuture 适配（约 8 行）。 |
+| C6 | **`:token-xform` 不参与** | 它是 transducer 不是 around，流的异步化由 provider 的流实现负责，与本组合子无关。 |
+
+**递归重入在 async 下的形状**（这是 async 化真正要重写的地方，也是又一条「不拆」
+的理由——**只有 around 表达得了**）：
+
+```clojure
+;; 同步：loop/recur
+(loop [attempt 0, req req]
+  (let [result (chain req)]
+    (if (retry? result) (recur (inc attempt) (feedback req result)) result)))
+
+;; 异步：fbind 自递归（形状同构，chain 仍是那个 chain）
+(letfn [(step [attempt req]
+          (fbind (chain req)
+                 (fn [result]
+                   (if (retry? result) (step (inc attempt) (feedback req result)) result))))]
+  (step 0 req))
+```
+
+before/after 版本这里连写都写不出来——没有 `chain` 可以再调一次。
+
+**迁移路径（三步，前两步互不阻塞）**
+
+1. ✅ **已完成**：加 `fmap` / `fbind` / `fcatch`（同步实现 = 恒等展开），内置
+   filter 的响应侧逐个改写成组合子——`logging-filter`、`logging-chat-filter`、
+   memory filter 走 `fmap`，`validation-turn-filter` 的 `loop/recur` 换成 `fbind`
+   自递归。同步语义逐字不变，测试全绿。
+2. ✅ **已完成（`:turn` 层）**：`react/invoke-async` 的 terminal 返回 deferred，
+   四条链的契约实际已是 `-> resp | deferred<resp>`。链的折叠代码
+   （`build-chain` / `compile-chain`）**一个字没改**——它只传递闭包，不看返回值
+   类型，这正是当初的预期。`:chat` / `:tool` 终端仍同步（provider HTTP 仍阻塞），
+   见 §2.7。
+3. **第三方 filter**：用 `@` 或裸 `try/catch` 硬写的才需要改；走组合子的零改动。
+
+### 2.7 异步入口：`invoke-async` / `chat-async`（2026-09-03 落地）
+
+§2.6.4 的组合子不是纸面推演——第一个消费者已经在了：**Ring / Luminus 的异步
+handler**。HTTP 工作线程不该被一次 LLM 往返占住。
+
+**落地形态**
+
+| 位置 | 东西 | 说明 |
+|---|---|---|
+| `core/async.clj` | `IChainResult` 的 CompletionStage 实现 | C5 说的适配层。JDK 自带、零依赖，故可住 core；manifold / core.async 照抄形状自写 |
+| 同上 | `vthread` / `inline` | 两种「跑法」，同签名 `(fn [thunk])`：前者丢虚拟线程返回 `CompletableFuture`，后者当场执行返回普通值 |
+| 同上 | `on-complete` / `join` / `unwrap-cause` | 出口：两回调 sink（就是 Ring 的 `respond`/`raise`）、阻塞取值、剥 JDK 包装 |
+| `client/react.clj` | `invoke-async` / `resume-async` | turn 终端跑在虚拟线程上 |
+| `client/simple_agent.clj` | `chat-async` / `resume-async` | agent 级同款 |
+
+**一份代码两条路径**：`invoke` 与 `invoke-async` 是同一个 `invoke*`，只差一个
+`run` 参数（`async/inline` vs `async/vthread`）；`resume*`、`run-loop(-async)`
+同理。编排代码的响应侧全走 `flt/fmap` / `flt/fcatch`，于是**同步进同步出、
+异步进异步出**——这就是契约 C1「形态保持」的直接兑现，也是「不拆
+before/after」这个决定省下的钱：拆了的话这里得写两套。
+
+**异步到哪一层（如实声明）**：只有 `:turn` 的终端异步化。`:chat` / `:tool`
+两条内层链仍是同步的——provider 的 HTTP 客户端还是阻塞式，它们只是被整体搬到
+了虚拟线程上。这在 Loom 下**就是正确姿势**（§2.6.2）：阻塞代码一行不用改写成
+回调，而调用线程立刻拿到 future。真要把 provider 也换成异步 HTTP，那时
+`:chat` 终端返回 deferred，链的代码依然不用动——那一层的设计（可选协议
+`IAsyncChatModel` / `IAsyncLLMProvider` + 虚拟线程兜底 + `retry/run-async`，
+以及**什么条件下才值得做**）见 [`async-chat-model-design.md`](async-chat-model-design.md)。
+
+**turn filter 作者须知**：走异步入口时 `(chain req)` **真的**返回 deferred。
+响应侧必须 `fmap` / `fbind`，`(let [r (chain req)] …)` 会拿到 deferred 本身
+（计时 filter 会立刻「结束」、校验 filter 会对着 future 做判断——都不报错，
+只是静默错）。硬规则不变：`:paused` / `:cancelled` / `:error` 透传不重入。
+
+**Ring / Luminus 对接**
+
+```clojure
+(defn chat-handler [request respond raise]          ;; Ring 3 三参数异步 handler
+  (-> (agent/chat-async (session-agent request) (message-of request))
+      (flt/fmap ->ring-response)                    ;; 同步链上这行也成立
+      (async/on-complete respond raise)))
+
+;; reitit 路由按 arity 自动识别异步；服务器需开异步
+;; （ring-jetty {:async? true} / immutant / http-kit 均可）
+["/api/chat" {:post {:handler chat-handler}}]
+```
+
+`:paused` 渲染成 202 + pending-tool，人批准后打 `/resume` 走
+`agent/resume-async`——HITL 两段都不占 HTTP 线程。完整可跑示例（含并发实测、
+raise 路径、HITL、turn filter）：`examples/async_luminus_handler_example.clj`，
+离线不需要 API Key。
+
+**边界**
+
+- **agent 的 state-atom 是单会话状态机**：别在同一个 agent 实例上并发多个
+  `chat-async`（`start-turn!` 会互相踩 run-id / 暂停态）。web 场景一会话一实例；
+- turn 级回调（`:on-turn-end` / `:on-interrupt`…）在**工作线程**上触发，不在
+  调用线程——回调里要碰请求作用域的东西请自行切回；
+- `heal-dangling-tool-calls!` 也走 `run`：它是 store IO，异步模式下不该占住调用线程；
+- `async/join` 只给调用方（脚本 / 测试 / 同步 API 边界）。**filter 内部禁止**
+  ——契约 C2。
+
+**测试锚点**：`core/async_test.clj`（线程模型、绑定传导、异常解包、回调对接）、
+`client/async_invoke_test.clj`（异步 ≡ 同步、turn filter 真拿到 deferred、
+递归重入、暂停透传 + resume-async、error channel、8 会话并发墙钟）。
+
 
 ---
 
@@ -298,3 +505,5 @@ terminal (fn [treq]
   §14（turn 链的实施记录与 Spring AI 调研）
 - `hitl-timeline-design.md`（gate/暂停/resume 与 filter 链的边界分工）
 - `token-stream-filter-design.md`（`:token-xform` token 流变换链权威设计）
+- `async-chat-model-design.md`（🚧 `:chat` 终端异步化的下一层设计：可选异步协议、
+  `retry/run-async`、分批判据。本文 §2.7 是它的上游）

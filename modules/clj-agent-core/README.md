@@ -46,8 +46,8 @@ core 对记忆与循环零感知。
 | `im.ttalk.agent.model.content` | 中立多模态内容部件（图片 / PDF / 音频；wire 层按 media type 分派） |
 | `im.ttalk.agent.model.embedding` | `IEmbeddingProvider` 协议（**可选**能力，无 Object 兜底 → `satisfies?` 可信） |
 | `im.ttalk.agent.model.request` | `ChatRequest`（消息 + 选项）—— 发往 ChatModel 的那一段 |
-| `im.ttalk.agent.chat-model` | `IChatModel` 协议 + `DefaultChatModel` / `FnChatModel`；`create-chat-model` |
-| `im.ttalk.agent.retry` | 通用重试（判据取自 canonical error 的 `:retryable?`），零依赖 |
+| `im.ttalk.agent.chat-model` | `IChatModel` 协议 + `DefaultChatModel` / `FnChatModel`；`create-chat-model`；**异步**：可选协议 `IAsyncChatModel` + `call-async*` / `stream-call-async*`（`satisfies?` 探测，否则虚拟线程兜底） |
+| `im.ttalk.agent.retry` | 通用重试（判据取自 canonical error 的 `:retryable?`），无外部依赖；`run` / `run-async` 共用同一套判据与退避曲线 |
 | `im.ttalk.agent.tool-calling-manager` | `ToolCallingManager` 工具批次执行协议 |
 
 **ChatClient 原语**
@@ -58,7 +58,8 @@ core 对记忆与循环零感知。
 | `im.ttalk.agent.chat-client` | `ChatClient` record + `build-chat-client` + 三个 invoke 原语 |
 | `im.ttalk.agent.tool-registry` | 工具声明表：装配期建表/校验 + 运行期查询（8 个） |
 | `im.ttalk.agent.tool` | `deftool` 宏定义 |
-| `im.ttalk.agent.filter` | Filter 契约、链合成与预编译、`ChatClientRequest`/`Response`、内置 filter |
+| `im.ttalk.agent.filter` | Filter 契约、链合成与预编译、`ChatClientRequest`/`Response`、内置 filter、链结果组合子（`fmap`/`fbind`/`fcatch` + `IChainResult`） |
+| `im.ttalk.agent.async` | 异步适配层：`IChainResult` 的 CompletionStage 实现 + 虚拟线程入口 `vthread` + Ring 回调 sink `on-complete` / `join`（给 `react/invoke-async`、`agent/chat-async` 用） |
 | `im.ttalk.agent.context` | Context 状态管理 |
 | `im.ttalk.agent.streaming` | 流式取消令牌 |
 

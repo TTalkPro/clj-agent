@@ -225,6 +225,29 @@
       (:writes out) (assoc :writes (:writes out))
       (:error out)  (assoc :error (:error out)))))
 
+(defn- chat-model-of
+  "取 ChatClient 的 ChatModel；未配置则抛（四个 invoke-chat* 入口共用同一句话）。"
+  [chat-client]
+  (or (:chat-model chat-client)
+      (throw (ex-info "ChatClient 未配置 ChatModel（请在 build-chat-client 中提供 :chat-model）"
+                      {:chat-client-keys (keys chat-client)}))))
+
+(defn- token-sink
+  "组装 `:token-xform` 出站变换，返回 `[rf on-tok]`。
+
+   `rf` 每次现场实例化（有状态 xform 的作用域 = 单次 LLM 流；comp 在装配期做过）；
+   下游 reduced（如 take）后不再喂 token。`rf` 为 nil 表示没挂 token filter，
+   此时 on-tok 就是原 sink（零包装）。flush（`(rf nil)`）由调用方在**正常完流**
+   时执行——同步版在 terminal 里，异步版在 fmap 的续延里。"
+  [make-rf sink]
+  (if-let [rf (when make-rf (make-rf sink))]
+    [rf (let [done (volatile! false)]
+          (fn [tok]
+            (when-not @done
+              (when (reduced? (rf nil tok))
+                (vreset! done true)))))]
+    [nil sink]))
+
 ;;; ============================================================
 ;;; Invoke API - invoke-chat（纯 LLM 调用，带 chat filter）
 ;;; ============================================================
@@ -246,9 +269,7 @@
     返回:
     `ChatClientResponse`{:response ChatResponse :context updated-ctx}"
   [chat-client messages opts]
-  (let [model (or (:chat-model chat-client)
-                  (throw (ex-info "ChatClient 未配置 ChatModel（请在 build-chat-client 中提供 :chat-model）"
-                                  {:chat-client-keys (keys chat-client)})))
+  (let [model (chat-model-of chat-client)
         context (or (:context opts) (ctx/create))
         ;; 两层请求：外层 ChatClientRequest 走 filter 链（带 :context），
         ;; 内层 ChatRequest 是真正下发给 ChatModel 的那一段
@@ -284,9 +305,7 @@
 
     返回: `ChatClientResponse`{:response ChatResponse :context ctx}"
   [chat-client messages opts]
-  (let [model (or (:chat-model chat-client)
-                  (throw (ex-info "ChatClient 未配置 ChatModel（请在 build-chat-client 中提供 :chat-model）"
-                                  {:chat-client-keys (keys chat-client)})))
+  (let [model (chat-model-of chat-client)
         context (or (:context opts) (ctx/create))
         ;; :on-token 是 ChatClientRequest 的字段而非 ChatRequest 的 option——
         ;; sink 永远不该出现在 wire 上，两层结构让这件事无需靠白名单去保证
@@ -298,24 +317,68 @@
         ;; 装配期预 comp 好的 (fn [sink] -> rf)，无 :token-xform filter 则 nil
         make-rf (:token-xform hooks)
         terminal (fn [req]
-                   (let [creq (:request req)
-                         sink (:on-token req)
-                         ;; :token-xform 链：chat 链之后组装（包裹链上存活的 on-token）。
-                         ;; comp 在装配期做过，rf 每次现场实例化——有状态 xform
-                         ;; 的作用域 = 单次 LLM 流。
-                         rf (when make-rf (make-rf sink))
-                         on-tok (if rf
-                                  (let [done (volatile! false)]
-                                    (fn [tok]
-                                      (when-not @done
-                                        ;; 下游 reduced（如 take）：早停，不再喂 token
-                                        (when (reduced? (rf nil tok))
-                                          (vreset! done true)))))
-                                  sink)
-                         response (cm/stream-call model creq on-tok)]
+                   (let [[rf on-tok] (token-sink make-rf (:on-token req))
+                         response (cm/stream-call model (:request req) on-tok)]
                      ;; 正常完流 flush（对齐 transduce：reduced 后 completion 照常）；
                      ;; stream-fn 抛异常则不执行——缓冲丢弃，半截答案不外泄
                      (when rf (rf nil))
                      (filters/->ChatClientResponse response (:context req))))
+        chain ((:chat hooks) terminal)]
+    (chain request)))
+
+;;; ============================================================
+;;; Invoke API - 异步孪生（:chat 链终端返回 deferred）
+;;; ============================================================
+;;;
+;;; 与同步版**只差终端那一行**（`cm/call` → `cm/call-async*`）加响应侧的 fmap。
+;;; 链的折叠代码（build-chain / compile-chain）一个字不用改——它只传闭包，
+;;; 不看返回值类型；`:chat` filter 也不用改（内置的响应侧已全走 flt/fmap）。
+;;; 设计见 docs/async-chat-model-design.md §7。
+
+(defn invoke-chat-async
+  "`invoke-chat` 的异步版：返回 **deferred<`ChatClientResponse`>**，调用线程不阻塞。
+
+   ChatModel 实现 `IAsyncChatModel` 时走原生异步；否则虚拟线程兜底
+   （`cm/call-async*`）——任何 provider 都可用。
+
+   ⚠️ 走这条路时 `:chat` filter 的 `(chain req)` **真的返回 deferred**，响应侧
+   必须用 `flt/fmap` / `flt/fbind`（`(let [r (chain req)] …)` 不报错，但拿到的是
+   future——静默错）。"
+  [chat-client messages opts]
+  (let [model (chat-model-of chat-client)
+        context (or (:context opts) (ctx/create))
+        request (filters/->ChatClientRequest
+                  (req/chat-request messages (dissoc opts :context))
+                  context
+                  nil)
+        terminal (fn [req]
+                   (filters/fmap (cm/call-async* model (:request req))
+                                 #(filters/->ChatClientResponse % (:context req))))
+        chain ((:chat (filters/filter-hooks chat-client)) terminal)]
+    (chain request)))
+
+(defn invoke-chat-stream-async
+  "`invoke-chat-stream` 的异步版：返回 deferred<`ChatClientResponse`>。
+
+   `:token-xform` 的组装位置与同步版完全一致（chat 链之后、terminal 之内），
+   flush 挪进 fmap 的续延——**正常完流才 flush，异常（error channel）不 flush**，
+   与同步版的 try 语义逐字相同。
+
+   ⚠️ on-token 的调用线程不保证（见 `cm/stream-call-async*`）。"
+  [chat-client messages opts]
+  (let [model (chat-model-of chat-client)
+        context (or (:context opts) (ctx/create))
+        request (filters/->ChatClientRequest
+                  (req/chat-request messages (dissoc opts :context :on-token))
+                  context
+                  (:on-token opts))
+        hooks (filters/filter-hooks chat-client)
+        make-rf (:token-xform hooks)
+        terminal (fn [req]
+                   (let [[rf on-tok] (token-sink make-rf (:on-token req))]
+                     (filters/fmap (cm/stream-call-async* model (:request req) on-tok)
+                                   (fn [response]
+                                     (when rf (rf nil))
+                                     (filters/->ChatClientResponse response (:context req))))))
         chain ((:chat hooks) terminal)]
     (chain request)))

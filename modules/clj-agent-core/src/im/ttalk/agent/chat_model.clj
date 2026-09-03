@@ -34,6 +34,8 @@
 
    (chat-model/call cm (req/chat-request messages {:tools [...]}))"
   (:require [clojure.string]
+            [im.ttalk.agent.async :as async]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model :as provider]
             [im.ttalk.agent.model.request :as req]
             [im.ttalk.agent.model.response :as response]
@@ -145,6 +147,51 @@
     "该 ChatModel 的缺省调用选项（{:model ... :max-tokens ...}）。
      单次请求的 `:options` 覆盖它。"))
 
+(defprotocol IAsyncChatModel
+  "**可选**协议：ChatModel 能异步调用时实现它。语义与 `IChatModel` 逐字相同
+   （含重试策略：`call-async` 重试、`stream-call-async` 不重试），只是不阻塞调用线程。
+
+   **不实现也能异步**：`call-async*` / `stream-call-async*` 探测不到会用虚拟线程包
+   同步调用兜底——调用方永远拿得到 deferred。实现本协议只省掉那根线程。
+
+   **不得 `extend-type Object` 兜底**（`satisfies?` 会恒真，探测机制当场失效）。"
+  (call-async [this request]
+    "-> deferred<ChatResponse>。语义同 `call`（含重试）。")
+  (stream-call-async [this request on-token]
+    "-> deferred<ChatResponse>。语义同 `stream-call`（**不重试**）。
+
+     on-token 的调用线程不保证——原生异步实现里 token 在传输层 executor 上派发。"))
+
+
+;;; ============================================================
+;;; 异步入口（探测 + 虚拟线程兜底）
+;;; ============================================================
+;;;
+;;; 设计见 docs/async-chat-model-design.md §4。要害是**兜底**：探测不到原生
+;;; 异步不等于不能异步——用虚拟线程包同步调用，调用方永远拿得到 deferred。
+;;; 于是「异步入口」这件事对所有 provider（含仓库外自实现的 {:chat-fn …}）
+;;; 一视同仁，原生异步实现可以逐家慢慢补，不构成阻塞。
+
+(defn call-async*
+  "任何 ChatModel 的异步调用入口 → deferred<ChatResponse>。
+
+   实现了 `IAsyncChatModel` 就用原生异步；否则 `async/vthread` 包 `call`。
+   两条路径的语义（重试、归一化、异常）逐字相同。"
+  [chat-model request]
+  (if (satisfies? IAsyncChatModel chat-model)
+    (call-async chat-model request)
+    (async/vthread #(call chat-model request))))
+
+(defn stream-call-async*
+  "`call-async*` 的流式版 → deferred<ChatResponse>。**不重试**（同 `stream-call`）。
+
+   ⚠️ on-token 的调用线程不保证：原生异步路径上 token 在传输层 executor 上派发，
+   虚拟线程兜底路径上则在那根虚拟线程上。sink 自行保证线程安全。"
+  [chat-model request on-token]
+  (if (satisfies? IAsyncChatModel chat-model)
+    (stream-call-async chat-model request on-token)
+    (async/vthread #(stream-call chat-model request on-token))))
+
 ;;; ============================================================
 ;;; DefaultChatModel —— 包一个 ILLMProvider
 ;;; ============================================================
@@ -183,7 +230,51 @@
             (when on-token (on-token {:token t})))
           resp))))
 
-  (model-options [_] config))
+  (model-options [_] config)
+
+  ;; ---- 异步孪生 ----
+  ;; **归一化路径与同步版共用**（build-call-config / retry 判据 /
+  ;; normalize-response 一份），异步只把「等 HTTP 结果」换成 fmap。任何
+  ;; 「另写一条更短的异步路径」都会重蹈旧 `xxx-call-async` 旁路的覆辙：
+  ;; 绕过 wire 转换与归一化，永远接不进 filter 链
+  ;; （docs/async-chat-model-design.md §0 / §5）。
+  IAsyncChatModel
+  (call-async [this request]
+    (if-not (satisfies? provider/IAsyncLLMProvider provider)
+      (async/vthread #(call this request))     ;; provider 无原生异步：兜底
+      (let [request     (req/as-chat-request request)
+            call-config (build-call-config config (req/wire-options request))
+            tools       (:tools call-config)
+            messages    (:messages request)
+            ropts       (merge (retry/resolve-opts config (req/wire-options request))
+                               (select-keys (req/wire-options request) [:on-retry]))]
+        (-> (retry/run-async
+              #(provider/call-llm-async provider call-config messages tools)
+              ropts)
+            (flt/fmap #(normalize-response provider %))))))
+
+  (stream-call-async [this request on-token]
+    (cond
+      ;; 不支持流式：同步路径就是「走重试的非流式调用 + 全文单 token emit」，
+      ;; 异步照抄这条（call-async 已含重试）
+      (not (provider/supports-stream? provider))
+      (flt/fmap (call-async this request)
+                (fn [resp]
+                  (when-let [t (response/response-text resp)]
+                    (when on-token (on-token {:token t})))
+                  resp))
+
+      (not (satisfies? provider/IAsyncLLMProvider provider))
+      (async/vthread #(stream-call this request on-token))
+
+      :else
+      ;; 不包 retry：token 已投递给 sink，重跑 = 下游看到重复内容（硬约束不因异步而改）
+      (let [request     (req/as-chat-request request)
+            call-config (build-call-config config (req/wire-options request))
+            tools       (:tools call-config)
+            messages    (:messages request)]
+        (flt/fmap (provider/call-llm-stream-async provider call-config messages tools on-token)
+                  #(normalize-response provider %))))))
 
 ;;; ============================================================
 ;;; FnChatModel —— 包 {:chat-fn :stream-fn} 两个闭包

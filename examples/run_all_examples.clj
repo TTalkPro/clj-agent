@@ -9,7 +9,13 @@
      clojure -M -e \"(load-file \\\"examples/run_all_examples.clj\\\")\"
 
    环境变量:
-     ZHIPU_API_KEY - 智谱 AI API Key（必需）"
+     ZHIPU_API_KEY - 智谱 AI API Key（必需）
+
+   另**内嵌两个独立示例脚本**（不复制其逻辑，load-file 后调它们的 run）：
+     examples/async_luminus_handler_example.clj  Ring/Luminus 异步 handler（离线，跑一次）
+     examples/async_live_test.clj                异步全链路 live（对两个 provider 各跑一次）
+   两者都遵守「嵌入约定」：设了系统属性 clj-agent.embedded-examples 就只定义不自跑，
+   run 返回失败项数而不 System/exit。"
   (:require [clojure.edn]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.chat-client :as chat-client]
@@ -125,6 +131,31 @@
       nil)))
 
 (def api-delay 2000)
+
+;;; ============================================================
+;;; 内嵌的独立示例脚本
+;;; ============================================================
+;;;
+;;; 不把它们的场景抄一遍——load-file 进来直接调各自的 run，一份实现两处跑。
+;;; 先设系统属性，两个脚本据此**只定义不自跑**（否则它们末尾的 System/exit
+;;; 会把整个 runner 带走）。
+
+(System/setProperty "clj-agent.embedded-examples" "1")
+
+(load-file "examples/async_luminus_handler_example.clj")
+(load-file "examples/async_live_test.clj")
+
+(def ^:private luminus-run (resolve 'async-luminus-handler-example/run))
+(def ^:private async-live-run (resolve 'async-live-test/run))
+
+(defn- embed-script
+  "把内嵌脚本的一次 run 计入本 runner 的汇总：0 失败算通过，否则算失败。"
+  [name run-fn & args]
+  (test-case name
+    (fn []
+      (let [n (apply run-fn args)]
+        (assert (zero? n) (str n " 个场景失败"))
+        true))))
 
 ;;; ============================================================
 ;;; Example 1: ChatClient 基础功能测试
@@ -374,6 +405,18 @@
 ;;; 运行所有测试
 ;;; ============================================================
 
+(defn run-async-tests
+  "异步全链路（`examples/async_live_test.clj` 的六个场景）。
+
+   用**当前 provider 实例**跑——于是 Anthropic 兼容与 OpenAI 兼容两轮下来，
+   `IAsyncLLMProvider` 的两个实现方（`AnthropicProvider` / `OpenAICompatProvider`）
+   各被真实端点验一遍。"
+  [provider provider-name]
+  (separator (str "异步全链路 live (" provider-name ")"))
+  (embed-script (str "异步六场景 @ " provider-name)
+                async-live-run
+                {:provider provider :model "glm-4.7" :label provider-name}))
+
 (defn run-all-with-provider [provider provider-name]
   (println)
   (println (str "┌─────────────────────────────────────────────────────────────────┐"))
@@ -384,7 +427,9 @@
   (wait api-delay)
   (run-simpleagent-tests provider provider-name)
   (wait api-delay)
-  (run-filter-tests provider provider-name))
+  (run-filter-tests provider provider-name)
+  (wait api-delay)
+  (run-async-tests provider provider-name))
 
 (defn print-summary []
   (separator "测试汇总")
@@ -420,6 +465,10 @@
     (System/exit 1))
 
   (reset! test-results {:passed 0 :failed 0 :tests []})
+
+  ;; Ring/Luminus 异步 handler 示例：桩 provider、离线，与 API Key 无关，先跑
+  (separator "Ring / Luminus 异步 handler（离线）")
+  (embed-script "异步 handler 五场景（离线）" luminus-run)
 
   ;; 使用 Anthropic 兼容 Provider 运行
   (let [anthropic-provider (create-anthropic-provider)]

@@ -139,6 +139,31 @@
      :format 是**降级判据**——历史跨 provider 复用时，认不出 format 的一方
      必须当它不存在（见 wire/anthropic assistant->wire）。"))
 
+(defprotocol IAsyncLLMProvider
+  "**可选**协议：provider 有原生异步 HTTP 时实现它，让调用不占线程。
+
+   为什么不加进 ILLMProvider：同 `IReplayableResponse` 的理由——那是 DIP 的端口，
+   加方法 = 所有实现方（含仓库外的）破坏性变更。**同样不得 `extend-type Object`
+   兜底**：兜了 `satisfies?` 就恒真，探测机制当场失效。
+
+   **没实现不等于不能异步**：`chat-model/call-async*` 探测不到会用虚拟线程包同步
+   调用兜底，调用方永远拿得到 deferred。实现本协议只是省掉那根线程——收益在
+   超高扇出场景才显著，判据见 docs/async-chat-model-design.md §2。
+
+   **返回值形状必须与同步版逐字相同**（`call-llm` 的原始响应，不是 HTTP map）：
+   ChatModel 层对两条路径用的是同一个 `normalize-response`。历史上仓库里那套
+   `xxx-call-async` 旁路正是栽在这——它把裸 HTTP map 交给 callback，绕过了
+   wire 转换与归一化，于是永远接不进 filter 链（§0）。"
+  (call-llm-async [this config messages tools]
+    "异步调用 LLM。返回 deferred<原始响应>（形状同 `call-llm`）。
+     失败：deferred 落 error channel，异常即 canonical error 的 ex-info。")
+  (call-llm-stream-async [this config messages tools on-token]
+    "异步流式调用。返回 deferred<原始响应>（形状同 `call-llm-stream`）。
+
+     **on-token 的调用线程不保证**——异步实现里 token 在传输层的 executor
+     上派发，不再是调用线程。取消令牌的登记必须在**调用线程**完成
+     （动态 var 不跨异步边界），见 docs/async-chat-model-design.md §6。"))
+
 ;;; ============================================================
 ;;; 默认实现
 ;;; ============================================================

@@ -21,11 +21,19 @@
    **判据是 canonical error 的 `:retryable?`**，不是 HTTP 状态码——那是
    provider 边界的事（见 `provider.http.client/response->error`，它顺带把
    `Retry-After` 解析成 `:retry-after-ms` 塞进错误 map，core 只读那个数）。
-   core 因此对 HTTP 一无所知；本 ns **零依赖**，只读 canonical error 里的两个键
-   （`:retryable?` / `:retry-after-ms`）。
+   core 因此对 HTTP 一无所知；本 ns **无外部依赖**，只读 canonical error 里的两个键
+   （`:retryable?` / `:retry-after-ms`）。（异步版 `run-async` 用到 core 内的链结果
+   组合子 `im.ttalk.agent.filter`，仍无第三方依赖。）
+
+   **同步 / 异步两个入口共用一套判据**：`run` 与 `run-async` 的重试次数、
+   `retryable-ex?`、退避曲线（含 `Retry-After` 与满抖动）都走同一批函数，
+   只差「等待」的实现——同步 `Thread/sleep`，异步 `CompletableFuture/delayedExecutor`
+   （绝不能在异步路径上 sleep：那会睡掉传输层 executor 的线程）。
 
    参数三级取值：**单次 opts > provider config > 框架默认**；`:max-retries 0`
-   即关闭（等价于直接调用，零开销）。")
+   即关闭（等价于直接调用，零开销）。"
+  (:require [im.ttalk.agent.async :as async]
+            [im.ttalk.agent.filter :as flt]))
 
 (set! *warn-on-reflection* true)
 
@@ -139,6 +147,39 @@
             (sleep! delay-ms)
             (recur (inc attempt)))
           (:ok result))))))
+
+(defn run-async
+  "`run` 的异步孪生：`f` 是无参函数，返回**链结果**（deferred 或普通值）。
+
+   与 `run` 的差别只有两处，其余（判据 `retryable-ex?`、次数、退避曲线含
+   `Retry-After` 与满抖动、`:on-retry` 回调时机）**逐字共用**：
+
+   1. 失败经 deferred 的 error channel 传播，用 `flt/fcatch` 接（同步抛出也接得住）；
+   2. 退避不 `Thread/sleep`——用 `async/delayed`（`CompletableFuture/delayedExecutor`）。注入了 `:sleep-fn` 时仍走它（测试用：立即返回、只记账）。
+
+   返回: deferred（或普通值——`f` 同步返回且没触发重试时就是普通值，形态保持见
+   filter-chain-design.md §2.6.4 契约 C1）。
+   抛出/落 error channel: 最后一次失败的异常，**原样**，不包一层。
+
+   递归深度 ≤ max-retries（缺省 2），不吃栈。"
+  [f {:keys [max-retries on-retry rand-fn sleep-fn]
+      :or {rand-fn rand}
+      :as opts}]
+  (let [maxr (long (or max-retries 0))
+        wait (fn [ms] (if sleep-fn (do (sleep-fn ms) nil) (async/delayed ms)))]
+    (letfn [(step [attempt]
+              (flt/fcatch (f)
+                (fn [t]
+                  (if (and (< attempt maxr) (retryable-ex? t))
+                    (let [delay-ms (delay-for t attempt opts rand-fn)]
+                      (when on-retry
+                        (on-retry {:attempt   (inc attempt)
+                                   :delay-ms  delay-ms
+                                   :error     (ex-data t)
+                                   :exception t}))
+                      (flt/fbind (wait delay-ms) (fn [_] (step (inc attempt)))))
+                    (throw t)))))]
+      (step 0))))
 
 (defn wrap
   "把 `f` 包成带重试的同名函数。config/opts 语义同 `resolve-opts`。"

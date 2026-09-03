@@ -46,6 +46,7 @@
             [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.tool-registry :as registry]
             [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.async :as async]
             [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.message :as msg]
@@ -337,19 +338,50 @@
                               {:context result})
          :tool-calls-made (:tool-calls-made result)}))))
 
+(defn- error-result
+  "Throwable → {:status :error ...}。**`Error`（OOM 等）原样重抛**——只兜 Exception，
+   与拆分前的 `(catch Exception e)` 逐字同义。同步与异步两条路径共用。"
+  [t]
+  (cond
+    (instance? clojure.lang.ExceptionInfo t)
+    {:status :error
+     :error (errors/exception->error t)
+     :tool-calls-made (:tool-calls-made (ex-data t))}
+
+    (instance? Exception t)
+    {:status :error
+     :error (errors/exception->error t)}
+
+    :else (throw t)))
+
 (defn- run-loop
   "执行 loop 调用并捕获异常为 {:status :error}，再交给 finalize 统一处理。"
   [agent f]
-  (finalize agent
-            (try
-              (f)
-              (catch clojure.lang.ExceptionInfo e
-                {:status :error
-                 :error (errors/exception->error e)
-                 :tool-calls-made (:tool-calls-made (ex-data e))})
-              (catch Exception e
-                {:status :error
-                 :error (errors/exception->error e)}))))
+  (finalize agent (try (f) (catch Throwable t (error-result t)))))
+
+(defn- run-loop-async
+  "`run-loop` 的异步孪生：f 返回 deferred，finalize 在其完成后（工作线程上）执行。
+
+   与 `run-loop` 同义——`fcatch` 既接住 f **同步**抛出的异常（如 invoke-async
+   的前置校验），也接住 error channel 上的失败；`error-result` 两边共用，
+   故 `Error` 照样逃逸。返回 deferred<标准化结果>。
+
+   **回调线程**：`:on-turn-end` / `:on-interrupt` 等 turn 级回调在虚拟线程上触发，
+   不在调用线程——回调内若要碰 UI/请求作用域的东西，自行切回。"
+  [agent f]
+  (flt/fcatch
+    (flt/fmap (f) #(finalize agent %))
+    (fn [t] (finalize agent (error-result t)))))
+
+(defn- start-turn!
+  "chat / chat-stream / chat-async 共用的开场：取消未 resume 的暂停、登记 run-id、
+   发 `:on-turn-start`。返回 run-id。"
+  [agent]
+  (cancel-pending! agent)
+  (let [run-id (str (java.util.UUID/randomUUID))]
+    (swap! (:state-atom agent) assoc :run-id run-id)
+    (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
+    run-id))
 
 (defn- build-invoke-opts
   "构建传给 agent-loop/invoke 的 opts，含 callbacks（带 metadata）。"
@@ -374,12 +406,35 @@
   "对话。返回 {:status :completed :text ...} 或 {:status :paused ...}"
   ([agent message] (chat agent message nil))
   ([agent message opts]
-   (cancel-pending! agent)
-   (let [run-id (str (java.util.UUID/randomUUID))]
-     (swap! (:state-atom agent) assoc :run-id run-id)
-     (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
+   (let [run-id (start-turn! agent)]
      (run-loop agent
        #(agent-loop/invoke (:chat-client agent) (store agent) [(msg/user message)]
+          (build-invoke-opts agent run-id opts))))))
+
+(defn chat-async
+  "同 `chat`，但**立刻返回 `CompletableFuture`**，整个 turn 跑在虚拟线程上。
+
+   给 Ring / Luminus 异步 handler 用：
+
+   ```clojure
+   (defn handler [request respond raise]
+     (-> (agent/chat-async a (get-in request [:body-params :message]))
+         (flt/fmap (fn [r] {:status 200 :body {:text (:text r)}}))
+         (async/on-complete respond raise)))
+   ```
+
+   返回值形状与 `chat` 逐字相同（`:completed` / `:paused` / `:error`），只是被
+   deferred 包了一层：`async/join` 阻塞取、`flt/fmap` 组合、`async/on-complete`
+   接回调。turn 级回调在工作线程上触发（见 `run-loop-async`）。
+
+   ⚠️ agent 的 state-atom 是单会话状态机：**同一个 agent 上不要并发多个
+   chat-async**（`start-turn!` 会互相踩 run-id / 暂停态）。web 场景下每个会话
+   一个 agent 实例，或自行串行化。"
+  (^java.util.concurrent.CompletableFuture [agent message] (chat-async agent message nil))
+  (^java.util.concurrent.CompletableFuture [agent message opts]
+   (let [run-id (start-turn! agent)]
+     (run-loop-async agent
+       #(agent-loop/invoke-async (:chat-client agent) (store agent) [(msg/user message)]
           (build-invoke-opts agent run-id opts))))))
 
 (defn chat-stream
@@ -388,15 +443,48 @@
    返回最终结果（与 chat 同形）。取消：opts 传 `:cancel-token`。"
   ([agent message on-token] (chat-stream agent message on-token nil))
   ([agent message on-token opts]
-   (cancel-pending! agent)
-   (let [run-id (str (java.util.UUID/randomUUID))]
-     (swap! (:state-atom agent) assoc :run-id run-id)
-     (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
+   (let [run-id (start-turn! agent)]
      (run-loop agent
        #(agent-loop/invoke (:chat-client agent) (store agent) [(msg/user message)]
           (cond-> (build-invoke-opts agent run-id opts)
             true               (assoc :on-token on-token)
             (:cancel-token opts) (assoc :cancel-token (:cancel-token opts))))))))
+
+(defn- resume-prep
+  "resume / resume-async 共用的前置：校验暂停态、翻译 decision、登记 run-id、
+   发 `:on-resume`，返回 `{:ls :loop-decision :opts}`（喂给 react/resume(-async)）。"
+  [agent decision payload]
+  (let [paused (paused-state agent)
+        _ (when-not paused
+            (throw (ex-info "Agent 未处于暂停状态"
+                            {:status (:status @(:state-atom agent))})))
+        ls (:loop-state paused)
+        env? (= :env-retry (:phase ls))
+        reply? (contains? #{"reply" :reply} decision)
+        _ (when (and env? reply?)
+            (throw (ex-info "环境类暂停不支持 :reply（用 \"retry\" 或 \"proceed\"）" {})))
+        approved? (contains? #{"approved" :approved "retry" :retry} decision)
+        loop-decision (cond
+                        env?    (if approved? :retry :proceed)
+                        reply?  :reply
+                        approved? :approved
+                        :else   :rejected)
+        run-id (str (java.util.UUID/randomUUID))
+        meta (build-meta agent run-id)
+        callbacks (:callbacks agent)]
+    (swap! (:state-atom agent) assoc :run-id run-id)
+    (cb/invoke callbacks :on-resume
+               (cond-> {:approved? approved? :decision loop-decision}
+                 payload (assoc :payload payload))
+               meta)
+    {:ls ls
+     :loop-decision loop-decision
+     :opts (cond-> {:context (resume-context agent paused)
+                    :tool-gate (gate-of agent)
+                    :on-env-error (env-error-policy agent nil)
+                    :callbacks (assoc callbacks :metadata meta)}
+             payload (assoc :payload payload)
+             (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil)))}))
 
 (defn paused?
   "是否处于暂停态（本进程 state-atom 或 PauseStore 中的持久化快照）。"
@@ -421,37 +509,20 @@
    resume 的 ToolContext 恢复自暂停快照（各轮 :writes 的累积折叠结果保留）。"
   ([agent decision] (resume agent decision nil))
   ([agent decision payload]
-   (let [paused (paused-state agent)
-         _ (when-not paused
-             (throw (ex-info "Agent 未处于暂停状态"
-                             {:status (:status @(:state-atom agent))})))
-         ls (:loop-state paused)
-         env? (= :env-retry (:phase ls))
-         reply? (contains? #{"reply" :reply} decision)
-         _ (when (and env? reply?)
-             (throw (ex-info "环境类暂停不支持 :reply（用 \"retry\" 或 \"proceed\"）" {})))
-         approved? (contains? #{"approved" :approved "retry" :retry} decision)
-         loop-decision (cond
-                         env?    (if approved? :retry :proceed)
-                         reply?  :reply
-                         approved? :approved
-                         :else   :rejected)
-         run-id (str (java.util.UUID/randomUUID))
-         meta (build-meta agent run-id)
-         callbacks (:callbacks agent)]
-     (swap! (:state-atom agent) assoc :run-id run-id)
-     (cb/invoke callbacks :on-resume
-                (cond-> {:approved? approved? :decision loop-decision}
-                  payload (assoc :payload payload))
-                meta)
+   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload)]
      (run-loop agent
-       #(agent-loop/resume (:chat-client agent) ls loop-decision
-          (cond-> {:context (resume-context agent paused)
-                   :tool-gate (gate-of agent)
-                   :on-env-error (env-error-policy agent nil)
-                   :callbacks (assoc callbacks :metadata meta)}
-            payload (assoc :payload payload)
-            (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil))))))))
+       #(agent-loop/resume (:chat-client agent) ls loop-decision opts)))))
+
+(defn resume-async
+  "同 `resume`，但立刻返回 `CompletableFuture`，延续跑在虚拟线程上。
+
+   HITL 的第二段（人答复之后接着跑）与第一段一样长——首段用了 `chat-async`，
+   这段还阻塞 HTTP 线程就白费了。返回值形状同 `resume`。"
+  (^java.util.concurrent.CompletableFuture [agent decision] (resume-async agent decision nil))
+  (^java.util.concurrent.CompletableFuture [agent decision payload]
+   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload)]
+     (run-loop-async agent
+       #(agent-loop/resume-async (:chat-client agent) ls loop-decision opts)))))
 
 (defn reset!
   "清空会话历史、持久化暂停快照并重置控制状态"

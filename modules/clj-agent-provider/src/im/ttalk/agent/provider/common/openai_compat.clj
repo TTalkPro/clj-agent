@@ -20,6 +20,7 @@
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model.error :as errors]))
 
 (set! *warn-on-reflection* true)
@@ -241,67 +242,41 @@
        :provider (:provider-name config)})))
 
 ;;; ============================================================
-;;; 异步调用
+;;; 异步调用（deferred）
 ;;; ============================================================
+;;;
+;;; 与同步版**共用后处理**：`http/post-deferred` 的响应 map 形状与 `http/post`
+;;; 逐字相同，故 `:success?` 判定与 `response->error` 只有一份。这条对齐是
+;;; 刻意的——旧的 callback 式 `call-api-async` 把裸 HTTP map 交给回调、绕过
+;;; wire 转换与归一化，于是永远接不进 filter 链（docs/async-chat-model-design.md §0）。
 
-(defn call-api-async
-  "调用 OpenAI 兼容 API（异步）
+(defn call-api-deferred
+  "调用 OpenAI 兼容 API（异步，返回 deferred<响应体>）。
 
-   参数：
-   - api-url:  API 端点 URL
-   - api-key:  API 密钥
-   - config:   请求配置
-   - messages: 消息列表
-   - tools:    工具列表
-   - callback: 回调函数 (fn [response] ...)
-   - opts:     可选配置 {:timeout 120000, :extra-headers {}}
-
-   返回：
-   nil（结果通过 callback 返回）
-
-   示例：
-   (call-api-async url key config messages tools
-     (fn [resp]
-       (if (:success? resp)
-         (println \"Response:\" (:body resp))
-         (println \"Error:\" (:error resp)))))"
-  [api-url api-key config messages tools callback & [opts]]
+   参数与语义同 `call-api`；失败落 error channel（canonical error）。
+   **无重试**：重试在 ChatModel 层（`im.ttalk.agent.retry/run-async`）。"
+  [api-url api-key config messages tools & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
         params (build-params config messages tool-schemas)
         timeout (or (:timeout opts) 120000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
+                       (:extra-headers config)
                        (:extra-headers opts))]
-    (http/post-async api-url
-                     callback
-                     :headers headers
-                     :body params
-                     :timeout timeout)))
+    (flt/fmap (http/post-deferred api-url
+                                  :headers headers
+                                  :body params
+                                  :timeout timeout)
+              (fn [response]
+                (if (:success? response)
+                  (:body response)
+                  (errors/throw! (response->error response (:provider-name config))))))))
 
-(defn call-api-stream-async
-  "调用 OpenAI 兼容 API（异步流式）
+(defn call-api-stream-deferred
+  "流式调用（异步，返回 deferred<最终响应>）。
 
-   完全异步处理，适合与异步服务器集成。
-
-   参数：
-   - api-url:     API 端点 URL
-   - api-key:     API 密钥
-   - config:      请求配置
-   - messages:    消息列表
-   - tools:       工具列表
-   - on-token:    token 回调 (fn [{:keys [token]}] ...)
-   - on-complete: 完成回调 (fn [response] ...)
-   - on-error:    错误回调 (fn [error] ...)（可选）
-   - opts:        可选配置 {:timeout 120000, :extra-headers {}}
-
-   返回：
-   nil（所有结果通过回调返回）
-
-   示例：
-   (call-api-stream-async url key config messages tools
-     (fn [{:keys [token]}] (print token) (flush))
-     (fn [response] (println \"\\nDone!\"))
-     (fn [error] (println \"Error:\" error)))"
-  [api-url api-key config messages tools on-token on-complete & [on-error opts]]
+   参数与语义同 `call-api-stream`（含 `:retry` 的建链重试与取消），
+   只是不阻塞调用线程。⚠️ on-token 在传输层 executor 上派发，不是调用线程。"
+  [api-url api-key config messages tools on-token & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
         params (-> (build-params config messages tool-schemas)
                    (assoc :stream true))
@@ -310,17 +285,15 @@
                        (:extra-headers config)
                        (:extra-headers opts))
         {:keys [process-fn get-id get-model]} (stream/make-stream-processor)]
-    ;; 真增量、非阻塞；返回 {:future :cancel}，cancel 供客户端断连/停止时取消上游
-    (stream-client/post-stream-async
+    (stream-client/post-stream-deferred
       api-url
       {:headers headers :body params :timeout timeout
        :parse-fn stream/parse-sse-line
        :process-fn process-fn
-       :initial-state (stream/make-initial-state)
-       :on-token on-token
-       :on-complete (fn [final-state]
-                      (on-complete (stream/build-response final-state
+       :make-initial-state stream/make-initial-state
+       :build-response (fn [state] (stream/build-response state
                                                           :id (get-id)
-                                                          :model (get-model))))
-       :on-error (or on-error (fn [_] nil))
+                                                          :model (get-model)))
+       :on-token on-token
+       :retry (:retry config)
        :provider (:provider-name config)})))

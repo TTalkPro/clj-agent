@@ -54,7 +54,10 @@
            (if-let [cid (get-in (flt/req-context req) [:conversation-id])]
              (do
                (mem/mem-add store cid (mapv msg/normalize (flt/req-messages req)))  ;; 存 delta
-               (let [resp (chain (flt/with-messages req (mem/mem-get store cid)))]  ;; 展开历史 → 下游
-                 (mem/mem-add store cid [(response->neutral (:response resp))])     ;; 存回复
-                 resp))
+               ;; 展开历史 → 下游；响应侧走 fmap（同步下即恒等展开，
+               ;; :chat 终端将来异步化时同一份代码不用改，见 §2.6.4）
+               (flt/fmap (chain (flt/with-messages req (mem/mem-get store cid)))
+                         (fn [resp]
+                           (mem/mem-add store cid [(response->neutral (:response resp))])
+                           resp)))
              (chain req)))}))

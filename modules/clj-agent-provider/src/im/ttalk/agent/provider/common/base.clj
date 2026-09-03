@@ -147,54 +147,33 @@
       on-token
       {:timeout (:timeout cfg)})))
 
-(defn call-api-async
-  "异步调用 API
+(defn call-api-deferred
+  "异步调用 API（返回 deferred<响应体>）——`call-api` 的孪生。
 
-   参数：
-   - config:    Provider 配置 atom
-   - llm-config: LLM 调用配置
-   - messages:  消息列表
-   - tools:     工具列表
-   - callback:  完成回调函数
-
-   返回：
-   nil（结果通过回调返回）"
-  [config llm-config messages tools callback]
+   2026-09-03 取代了旧的 callback 式 `call-api-async`：那套零调用点、把裸 HTTP
+   map 交给回调、绕过 wire 转换与归一化，接不进 filter 链
+   （docs/async-chat-model-design.md §0）。"
+  [config llm-config messages tools]
   (let [cfg @config]
-    (compat/call-api-async
+    (compat/call-api-deferred
       (get-api-url config)
       (get-api-key config)
       llm-config
       messages
       tools
-      callback
       {:timeout (:timeout cfg)})))
 
-(defn call-api-stream-async
-  "异步流式调用 API
-
-   参数：
-   - config:      Provider 配置 atom
-   - llm-config:  LLM 调用配置
-   - messages:    消息列表
-   - tools:       工具列表
-   - on-token:    Token 回调
-   - on-complete: 完成回调
-   - on-error:    错误回调（可选）
-
-   返回：
-   nil（结果通过回调返回）"
-  [config llm-config messages tools on-token on-complete & [on-error]]
+(defn call-api-stream-deferred
+  "异步流式调用 API（返回 deferred<最终响应>）——`call-api-stream` 的孪生。"
+  [config llm-config messages tools on-token]
   (let [cfg @config]
-    (compat/call-api-stream-async
+    (compat/call-api-stream-deferred
       (get-api-url config)
       (get-api-key config)
       llm-config
       messages
       tools
       on-token
-      on-complete
-      on-error
       {:timeout (:timeout cfg)})))
 
 ;;; ============================================================
@@ -228,7 +207,18 @@
   (supports-stream? [_] true)
 
   (tool->schema [_ tool]
-    (schema/tool->schema tool)))
+    (schema/tool->schema tool))
+
+  ;; 原生异步（可选协议）：wire 转换与同步分支逐字相同，只换传输那一层。
+  ;; **同一个 defrecord 里协议名只能出现一次**（重复会让先前那组方法变抽象），
+  ;; 故整块放最后。
+  proto/IAsyncLLMProvider
+  (call-llm-async [_ llm-config messages tools]
+    (call-api-deferred config llm-config (:messages (wire/neutral->wire messages)) tools))
+
+  (call-llm-stream-async [_ llm-config messages tools on-token]
+    (call-api-stream-deferred config llm-config (:messages (wire/neutral->wire messages))
+                              tools on-token)))
 
 ;;; ============================================================
 ;;; 工厂函数
@@ -324,18 +314,17 @@
          [config# messages# tools# on-token#]
          (call-api-stream ~config-sym config# messages# tools# on-token#))
 
-       ;; 异步调用
+       ;; 异步调用（deferred）——2026-09-03 取代 callback 式旁路，见 call-api-deferred
        (defn ~call-async-fn
-         ~(str "异步调用 " name-str " API")
-         [config# messages# tools# callback#]
-         (call-api-async ~config-sym config# messages# tools# callback#))
+         ~(str "异步调用 " name-str " API（返回 deferred<响应体>）")
+         [config# messages# tools#]
+         (call-api-deferred ~config-sym config# messages# tools#))
 
-       ;; 异步流式调用
+       ;; 异步流式调用（deferred）
        (defn ~call-stream-async-fn
-         ~(str "异步流式调用 " name-str " API")
-         [config# messages# tools# on-token# on-complete# & [on-error#]]
-         (call-api-stream-async ~config-sym config# messages# tools#
-                                on-token# on-complete# on-error#))
+         ~(str "异步流式调用 " name-str " API（返回 deferred<最终响应>）")
+         [config# messages# tools# on-token#]
+         (call-api-stream-deferred ~config-sym config# messages# tools# on-token#))
 
        ;; 工厂函数
        (defn ~'create-provider

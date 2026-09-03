@@ -33,6 +33,7 @@
 | [`provider-variant-design.md`](provider-variant-design.md) | 一个标准 provider 如何承载多套厂商方言（MiniMax thinking）：**三类差异三种机制**，不动 `ILLMProvider` 而用**可选协议 + `satisfies?` 探测**。修了 config 白名单（provider 专属键递不到底）与 thinking 回传丢失（实测正确率 100%→82.5%）。**也是「预注册判据双向作数」的范例**：判据先否掉一次、卡住一次，最后才放行同一个结论 |
 | [`tool-timeout-design.md`](tool-timeout-design.md) | 工具超时：借鉴 beamai 但**不照搬三层**（JVM 无 `exit(Pid,kill)`，超时=放弃等待≠终止执行）。修了 `:timeout` 死选项与 `timeout-filter` 平台线程两个真 bug；§5.7 记工具声明查询合成 `ToolMeta` 一张表 + 同名工具装配期拒绝 |
 | [`streaming-async-design.md`](streaming-async-design.md) | 真增量 SSE 传输选型 + 异步框架整合。**也是 §2《框架无关》的出处** |
+| [`async-chat-model-design.md`](async-chat-model-design.md) | 异步入口全链路：可选协议 `IAsyncChatModel` / `IAsyncLLMProvider` + `satisfies?` 探测 + 虚拟线程兜底、`retry/run-async`、`post-stream-deferred`、react 循环同步/异步同源。**也是「判据被越过」的记录**（P2 的门槛写在 §2，本轮按指示提前实施，判据不撤销） |
 | [`onion-filter.md`](onion-filter.md) | 洋葱式 filter + chat-client 瘦身（loop/memory 下沉 client 模块） |
 | [`memory-filter-refactor.md`](memory-filter-refactor.md) | 消除显式 Context，转向 Memory Filter + 中立消息 |
 | [`unified-invoke-agent.md`](unified-invoke-agent.md) | 统一 invoke + 合并 Agent |

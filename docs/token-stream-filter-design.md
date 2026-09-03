@@ -1,6 +1,8 @@
 # Token 流变换链设计（`:token-xform`）
 
 > **状态：✅ 已实施（2026-07-14，全套 253 tests / 1039 assertions / 0）。**
+> **2026-09-03 补 §2.1 线程契约**：异步入口落地后 token 不再保证在调用线程上
+> 派发（单次流内仍串行）。见 `async-chat-model-design.md` §6。
 > 本文是 filter 体系第五钩子 `:token-xform` 的权威参考。四链体系
 > （:tool/:chat/:turn）见 `filter-chain-design.md`；本文只讲 token 粒度。
 > 动机来自与 Spring AI `StreamAdvisor` 的对照（§5）。
@@ -68,6 +70,31 @@ filter map 增加可选键 `:token-xform`，与 `:tool/:chat/:iteration/:turn` �
   无状态，可安全复用（这是 transducer 的标准性质）；
 - **同步路径（invoke-chat）完全忽略 `:token-xform`**；`:tool`/`:iteration`/`:turn` 链与
   token 流无关。
+
+### 2.1 ⚠️ 线程契约：**sink 的线程不保证**（2026-09-03 起）
+
+`invoke-chat-stream`（同步入口）下 token 在**调用线程**串行 emit——这条从来
+没写进契约，但实现上一直如此，写 sink 的人自然会依赖它。
+
+`invoke-chat-stream-async` / `agent/chat-async` 落地后**不再成立**：
+
+| 入口 | token 派发在哪根线程 |
+|---|---|
+| `invoke-chat-stream`（同步） | 调用线程（不变） |
+| 异步 + provider 无原生异步 | `async/vthread` 起的那根虚拟线程 |
+| 异步 + provider 原生异步（`IAsyncLLMProvider`） | 传输层 HttpClient 的 executor（虚拟线程池） |
+
+**不变的部分**（这些仍然是契约）：
+
+- **单次流内串行**：同一条流的 token 不会并发 emit，`:token-xform` 的有状态
+  transducer 因此**不需要**自己加锁；作用域仍是「单次 LLM 流」；
+- **flush 时机不变**：正常完流调 completion arity，异常（error channel）不 flush；
+- **顺序不变**：token 按到达顺序过链。
+
+**变的部分**（写 sink 的人要知道）：token 回调可能跑在**任意工作线程**上。
+往 UI / 请求作用域 / `ThreadLocal` 里写的 sink 必须自己切回去；跨流共享的
+可变状态要自己保证线程安全。这是**可观察语义变化**，故显式记在这里，
+而不是当作实现细节。
 
 ## 3. 组装点与数据流
 
