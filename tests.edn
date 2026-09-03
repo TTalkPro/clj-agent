@@ -9,6 +9,7 @@
           :test-paths ["modules/clj-agent-provider/test"
                        "modules/clj-agent-client/test"
                        "modules/clj-agent-core/test"
+                       "modules/clj-agent-mcp/test"
                        "modules/clj-agent-agui/test"]}
          {:id :examples
           :test-paths ["examples"]

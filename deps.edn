@@ -1,6 +1,7 @@
 {:paths ["modules/clj-agent-core/src"
           "modules/clj-agent-client/src"
           "modules/clj-agent-provider/src"
+          "modules/clj-agent-mcp/src"
           "modules/clj-agent-agui/src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
@@ -16,6 +17,7 @@
  :aliases {:test {:extra-paths ["modules/clj-agent-provider/test"
                                "modules/clj-agent-client/test"
                                "modules/clj-agent-core/test"
+                               "modules/clj-agent-mcp/test"
                                "modules/clj-agent-agui/test"]
                  :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
                  :main-opts ["-m" "kaocha.runner"]}
@@ -24,6 +26,10 @@
            ;; （design-principles §2.2：集成代码只进 examples/，web 依赖不进核心 :deps）
            :copilotkit {:extra-paths ["examples"]     ;; 让 examples/copilotkit/*.clj 能 require
                         :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}}}
+
+           ;; MCP server 示例的 web 依赖——**只在这个 alias 里**（同 :copilotkit 的理由）
+           :mcp {:extra-paths ["examples"]
+                 :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}}}
 
            ;; 各模块的构建/发布统一在根 build.clj（见其 ns docstring）
            :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
