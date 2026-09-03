@@ -9,6 +9,11 @@
 
    每个函数返回**内联工具 map**（含 :handler），可直接放入 :tools 列表。
 
+   三类入口的 config 都认一个可选的 `:observer`——**协议无关的观察挂点**，
+   原样透进 `manager/spawn!` 的 spec（契约见 `manager` 的 ns docstring）。
+   AG-UI 那侧用它把委派期间的 token / 工具调用归属到一条 lane
+   （docs/subagent-event-attribution-design.md）；不传就是今天的行为，逐字不变。
+
    使用示例：
    (def research-tool
      (delegate-tool {:name \"deep_research\"
@@ -75,6 +80,8 @@
    - :seed-fn      (fn [args ctx] -> prompt-prefix)（可选）
    - :result-fn    (fn [chat-result] -> string)（可选，默认取 :text）
    - :timeout      超时毫秒（可选，默认 60000）
+   - :observer     观察者工厂（可选，见 ns docstring）
+   - :subagent-name 给观察者看的子 agent 名（可选，缺省取工具名）
 
    返回内联工具 map，可放入 :tools 列表。"
   [config]
@@ -99,7 +106,18 @@
                           spec       {:subagent-config subagent-config
                                       :prompt          prompt
                                       :result-fn       result-fn
-                                      :owner           (get ctx :conversation-id)}]
+                                      :owner           (get ctx :conversation-id)
+                                      :observer        (:observer config)
+                                      :subagent-name   (or (:subagent-name config)
+                                                           (:name config))
+                                      ;; 给观察者的是**原始 task**，不是拼好的 prompt
+                                      ;; ——prompt 里还有 seed 与背景，动辄几 KB，
+                                      ;; 塞进 SUBAGENT_STARTED.description 没人读得下去
+                                      :task            task
+                                      ;; 本次委派是哪个 tool-call 发起的。同一批里
+                                      ;; 几个委派工具并发时，这是唯一能把 lane 挂回
+                                      ;; 正确那张工具卡片的依据——猜不得
+                                      :parent-tool-call-id (get ctx :tool/call-id)}]
                       (run-sync spec timeout)))}))
 
 (defn fanout-tool
@@ -130,14 +148,25 @@
                           owner      (get ctx :conversation-id)]
                       (if (empty? tasks)
                         "错误：tasks 不能为空"
-                         (let [;; 并发 spawn 所有子 agent
-                               spawn-ids (mapv (fn [task]
-                                                (let [spec {:subagent-config (subagent-fn (assoc args :task task) ctx)
-                                                            :prompt          (compose-prompt seed background task)
-                                                            :result-fn       result-fn
-                                                            :owner           owner}]
-                                                  (:ok (mgr/spawn! spec))))
-                                              tasks)
+                         (let [base-name (or (:subagent-name config) (:name config))
+                               ;; 并发 spawn 所有子 agent
+                               spawn-ids (map-indexed
+                                          (fn [idx task]
+                                            (let [spec {:subagent-config (subagent-fn (assoc args :task task) ctx)
+                                                        :prompt          (compose-prompt seed background task)
+                                                        :result-fn       result-fn
+                                                        :owner           owner
+                                                        :observer        (:observer config)
+                                                        ;; 每路一个名字：N 路并发在前端是 N 条
+                                                        ;; lane，同名的话除了 id 谁也认不出谁
+                                                        :subagent-name   (str base-name "#" idx)
+                                                        :task            task
+                                                        ;; N 路共享同一个 tool-call
+                                                        ;; ——它们本就是一次调用的扇出
+                                                        :parent-tool-call-id (get ctx :tool/call-id)}]
+                                              (:ok (mgr/spawn! spec))))
+                                          tasks)
+                               spawn-ids (vec spawn-ids)
                                deadline  (deadline-ms timeout)
                                ;; 共享截止时间，顺序 await（总等待时间 ≤ timeout）
                                ;; R6: try/finally 保 drop! — 与 run-sync 同款，
@@ -182,7 +211,11 @@
                                                               (get-arg args :context)
                                                               (get-arg args :task))
                              :result-fn       result-fn
-                             :owner           (get ctx :conversation-id)}
+                             :owner           (get ctx :conversation-id)
+                             :observer        (:observer config)
+                             :subagent-name   (or (:subagent-name config) "subagent")
+                             :task            (get-arg args :task)
+                             :parent-tool-call-id (get ctx :tool/call-id)}
                        spawn-id (:ok (mgr/spawn! spec))]
                    (str "子 Agent 已启动，id: " spawn-id)))}
 
