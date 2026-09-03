@@ -46,8 +46,11 @@
 ;;; 快照构造
 ;;; ============================================================
 
-(defn- edn-safe?
-  "value 能否无损 EDN 往返（函数/连接/Java 对象等不能）。"
+(defn edn-safe?
+  "value 能否无损 EDN 往返（函数/连接/Java 对象等不能）。
+
+   **公开**：快照剥离与「context 能不能当状态发出去」是同一条判断，
+   agui 那侧要用（见 `agui.emit` 的 `emit-state!`），不复制第二份。"
   [v]
   (try (= v (edn/read-string (pr-str v)))
        (catch Throwable _ false)))
