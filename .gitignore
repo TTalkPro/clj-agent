@@ -50,6 +50,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Browser automation artifacts (playwright MCP)
+.playwright-mcp/
+
 # Node.js / JavaScript examples
 node_modules/
 .next/
