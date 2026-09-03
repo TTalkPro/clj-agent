@@ -64,7 +64,14 @@
       pending-tool  (assoc :metadata {:pendingTool {:name (:name pending-tool)
                                                     :args (:args pending-tool)}}))))
 
-(defn ->agui
+(def ^:private subagent-outcome-message
+  "AG-UI 没有 killed / timeout 这两种收尾，按 `SUBAGENT_ERROR` 发并把原因写进 code
+   ——同 `:run/cancelled → RUN_FINISHED + result.status` 的既有取舍：宁可换个类型
+   说清楚，也不造协议外的类型。"
+  {:killed  "子 agent 已被终止"
+   :timeout "子 agent 超时"})
+
+(defn- agui-of
   "中立事件 → AG-UI 事件 map。返回 nil = 该事件在 AG-UI 里没有对应物（丢弃）。"
   [{:keys [type run-id conversation-id message-id tool-call-id] :as ev}]
   (case type
@@ -110,6 +117,35 @@
 
     :state/snapshot {:type "STATE_SNAPSHOT" :snapshot (:state ev)}
 
+    ;; 子 agent lane（AG-UI 0.0.59 起的 `SUBAGENT_*` 事件族）。
+    ;; **这三个类型是老客户端的雷**：`@ag-ui/client` ≤ 0.0.57 在 HTTP transport 里
+    ;; 就拿 discriminated union 校验每一条事件，一条未知类型掐断整条流，客户端侧
+    ;; 什么都救不回来。所以产出侧有开关（`runtime` 的 `:subagent-events?`，缺省关）。
+    ;; 相比之下**给既有事件多一个 `subagentRunId` 字段是安全的**——AG-UI 的事件
+    ;; schema 是 `passthrough`，老客户端原样忽略。
+    :subagent/started
+    (cond-> {:type "SUBAGENT_STARTED"
+             :subagentRunId (:subagent-run-id ev)
+             :name (or (:name ev) "subagent")}
+      (:task ev)                   (assoc :description (:task ev))
+      (:parent-subagent-run-id ev) (assoc :parentSubagentRunId (:parent-subagent-run-id ev))
+      (:parent-tool-call-id ev)    (assoc :parentToolCallId (:parent-tool-call-id ev)))
+
+    :subagent/finished
+    (let [oc (or (:outcome ev) :success)]
+      (if (= :success oc)
+        {:type "SUBAGENT_FINISHED" :subagentRunId (:subagent-run-id ev)
+         :outcome {:type "success"}}
+        {:type "SUBAGENT_ERROR" :subagentRunId (:subagent-run-id ev)
+         :message (get subagent-outcome-message oc "子 agent 未正常结束")
+         :code (name oc)}))
+
+    :subagent/error
+    {:type "SUBAGENT_ERROR"
+     :subagentRunId (:subagent-run-id ev)
+     :message (or (get-in ev [:error :message]) "subagent failed")
+     :code (some-> (get-in ev [:error :class]) name)}
+
     ;; activity 消息：AG-UI 里「不是聊天文本、但要在对话流里占一块」的东西
     ;; （生成式 UI、进度卡片…）。快照建消息，delta 是 JSON Patch。
     ;; 产出方见 `agui.genui`（可选插件），核心路径不发这两条。
@@ -126,6 +162,23 @@
                      :messages (into [] (map-indexed (fn [i m] (message->agui m i)))
                                      (:messages ev))}
     nil))
+
+(defn- with-lane
+  "给一条 AG-UI 事件打上 lane 归属。
+
+   `:subagent-run-id` 由发射器的 tag 挂在该 lane 的**每一条**事件上
+   （`agui.event/subagent-emitter`），到了协议这层就是每条事件多一个 `subagentRunId`。
+   统一在这里打而不是逐个 case 写，是因为它对所有类型一视同仁；`SUBAGENT_STARTED`
+   自己那份已经在 case 里写死，not-contains 守卫保证不覆盖。"
+  [agui ev]
+  (cond-> agui
+    (and (:subagent-run-id ev) (not (contains? agui :subagentRunId)))
+    (assoc :subagentRunId (:subagent-run-id ev))))
+
+(defn ->agui
+  "中立事件 → AG-UI 事件 map（nil = 没有对应物），带 lane 归属。"
+  [ev]
+  (some-> (agui-of ev) (with-lane ev)))
 
 (defn message->agui
   "中立消息 → AG-UI 消息。
@@ -181,10 +234,12 @@
    看得见思考内容，只是少了外层括号。"
   [{:keys [type message-id] :as ev}]
   (case type
-    :reasoning/started [{:type "REASONING_START" :messageId message-id}
+    ;; 外层那对括号是在这里**合成**的，没走 `->agui`——所以归属得自己打一遍。
+    ;; 漏了的话，子 agent 的思考块会出现「括号在对话里、内容在 console 里」。
+    :reasoning/started [(with-lane {:type "REASONING_START" :messageId message-id} ev)
                         (->agui ev)]
     :reasoning/ended   [(->agui ev)
-                        {:type "REASONING_END" :messageId message-id}]
+                        (with-lane {:type "REASONING_END" :messageId message-id} ev)]
     (if-let [one (->agui ev)] [one] [])))
 
 (defn events->agui
