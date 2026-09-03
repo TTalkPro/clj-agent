@@ -662,3 +662,54 @@
           chat-client (batch-chat-client [(inline-tool "oom" oom-tool)])]
       (is (thrown? OutOfMemoryError
             (agent-loop/execute-batch chat-client [(tc "1" "oom")] nil {} []))))))
+
+;;; ============================================================
+;;; :tool/call-id —— 工具拿得到自己这次调用的 id
+;;; （docs/subagent-event-attribution-design.md §3.7a / S4）
+;;; ============================================================
+
+(defn- ctx-capturing-tool
+  "把每次调用看到的 [tool-call-id ctx] 记进 log。"
+  [name log]
+  (inline-tool name (fn [_args ctx]
+                      (swap! log conj [name (:tool/call-id ctx)])
+                      "ok")))
+
+(deftest tool-call-id-in-context-test
+  (testing "工具从 context 里拿得到**自己这次**调用的 tool-call id"
+    (let [log (atom [])
+          chat-client (batch-chat-client [(ctx-capturing-tool "a" log)])]
+      (agent-loop/execute-batch chat-client [(tc "tc-1" "a")] nil {} [])
+      (is (= [["a" "tc-1"]] @log))))
+
+  (testing "同批多个调用：各拿各的 id，不串（并发委派挂回工具卡片全靠这个）"
+    (let [log (atom [])
+          chat-client (batch-chat-client [(ctx-capturing-tool "a" log)])]
+      (agent-loop/execute-batch chat-client
+                                [(tc "tc-1" "a") (tc "tc-2" "a") (tc "tc-3" "a")]
+                                nil {} [])
+      (is (= #{"tc-1" "tc-2" "tc-3"} (set (map second @log))))))
+
+  (testing "**内联与 executor 逐字段相同**（§3「批内调度可观察语义必须一致」）：
+            批大小由 LLM 临场决定，不该改变工具看到的东西"
+    (let [seen (fn [m calls]
+                 (let [log (atom [])
+                       chat-client (core/build-chat-client
+                                    {:tools [(ctx-capturing-tool "a" log)]
+                                     :tool-manager m})]
+                   (via-manager m chat-client calls)
+                   (set (map second @log))))
+          serial (agent-loop/sequential-tool-calling-manager {})
+          vt (agent-loop/virtual-thread-tool-calling-manager {})
+          calls [(tc "tc-1" "a") (tc "tc-2" "a")]]
+      (is (= #{"tc-1" "tc-2"} (seen serial calls)))
+      (is (= (seen serial calls) (seen vt calls)))))
+
+  (testing "只钉在 per-call 快照上——折叠回去的 context 里没有它，
+            否则每轮的状态快照都会多一个框架键"
+    (let [chat-client (batch-chat-client
+                       [(inline-tool "w" (fn [_ _] {:result "ok" :writes {:items 1}}))])
+          {:keys [context]} (agent-loop/execute-batch
+                             chat-client [(tc "tc-1" "w")] nil {:conversation-id "c1"} [])]
+      (is (= {:conversation-id "c1" :items 1} context))
+      (is (not (contains? context :tool/call-id))))))

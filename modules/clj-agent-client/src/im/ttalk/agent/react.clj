@@ -119,8 +119,18 @@
 
     :else
     (let [fn-key (keyword (:name tc))
+          ;; **本次调用的 tool-call id 钉进 context**（`ctx/framework-keys` 里声明）。
+          ;; 工具此前拿不到它：`invoke-tool` 的入参是 (chat-client fn-key args ctx)，
+          ;; 手里有 id 的只有这一层。子 agent 委派要靠它把 lane 挂回那张工具卡片
+          ;; （docs/subagent-event-attribution-design.md §3.7a）。
+          ;;
+          ;; **只钉在这一份 per-call 快照上**：reduce 阶段折 `:writes` 用的是
+          ;; `collect-batch` 手里那份轮初 context，所以这个键不会随折叠外泄，
+          ;; 也不会进暂停快照。发状态快照的那一侧另有过滤（`agui.emit/emit-state!`）。
+          tctx (cond-> tool-context
+                 (and (map? tool-context) (:id tc)) (assoc :tool/call-id (:id tc)))
           {:keys [value writes error]}
-           (try (invoke-with-retry chat-client fn-key (:args tc) tool-context)
+           (try (invoke-with-retry chat-client fn-key (:args tc) tctx)
                 (catch Throwable t
                   (let [{:keys [message class]} (err/contain-throwable t)]
                     {:value (str "错误: " message)
