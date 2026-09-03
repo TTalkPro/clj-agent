@@ -383,20 +383,36 @@
     (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
     run-id))
 
+(def ^:private loop-passthrough-keys
+  "循环认识、由调用方逐次决定的键——**四个入口共用一份透传**。
+
+   此前没有这份名单：`chat-stream` 在 `build-invoke-opts` **之后**手动 assoc
+   `:on-token` / `:cancel-token`，`chat-async` 没补，`resume-prep` 连 opts 位都没有。
+   于是异步入口不能流式也不能取消，HITL 第二段（审批后的续跑，往往正是最终答案）
+   两样都没有。加键时往这里加，别再各补各的。"
+  [:on-token :cancel-token])
+
+(defn- passthrough
+  "把 `loop-passthrough-keys` 里**实际出现**的键并进 loop opts（nil 不覆盖）。"
+  [loop-opts opts]
+  (reduce (fn [m k] (if (some? (get opts k)) (assoc m k (get opts k)) m))
+          loop-opts loop-passthrough-keys))
+
 (defn- build-invoke-opts
   "构建传给 agent-loop/invoke 的 opts，含 callbacks（带 metadata）。"
   [agent run-id opts]
   (let [meta (build-meta agent run-id)
         ;; 把 metadata 嵌入 callbacks，供 react 层 on-llm-call 等使用
         callbacks-with-meta (assoc (:callbacks agent) :metadata meta)]
-    (cond-> {:context (tctx agent)
-             :tool-gate (gate-of agent)
-             :callbacks callbacks-with-meta
-             :on-env-error (env-error-policy agent opts)
-             :max-iterations (or (:max-iterations opts)
-                                 (:max-iterations (:settings agent)) 10)}
-      (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
-      (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))))
+    (-> (cond-> {:context (tctx agent)
+                 :tool-gate (gate-of agent)
+                 :callbacks callbacks-with-meta
+                 :on-env-error (env-error-policy agent opts)
+                 :max-iterations (or (:max-iterations opts)
+                                     (:max-iterations (:settings agent)) 10)}
+          (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
+          (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))
+        (passthrough opts))))
 
 ;;; ============================================================
 ;;; 公开 API
@@ -427,6 +443,9 @@
    deferred 包了一层：`async/join` 阻塞取、`flt/fmap` 组合、`async/on-complete`
    接回调。turn 级回调在工作线程上触发（见 `run-loop-async`）。
 
+   **opts 与 `chat-stream` 同源**：传 `:on-token` 即异步流式，传 `:cancel-token`
+   即可从别的线程取消（见 `loop-passthrough-keys`）。
+
    ⚠️ agent 的 state-atom 是单会话状态机：**同一个 agent 上不要并发多个
    chat-async**（`start-turn!` 会互相踩 run-id / 暂停态）。web 场景下每个会话
    一个 agent 实例，或自行串行化。"
@@ -440,20 +459,24 @@
 (defn chat-stream
   "流式对话。`on-token` 接收 {:token / :reasoning-token ...}（增量 token，需全文请自行累积）。
 
-   返回最终结果（与 chat 同形）。取消：opts 传 `:cancel-token`。"
+   返回最终结果（与 chat 同形）。取消：opts 传 `:cancel-token`。
+
+   **`chat-async` 也吃 `:on-token`**（opts 透传，见 `loop-passthrough-keys`）——
+   要「异步 + 流式 + 可取消」用 `(chat-async a msg {:on-token f :cancel-token t})`。"
   ([agent message on-token] (chat-stream agent message on-token nil))
   ([agent message on-token opts]
    (let [run-id (start-turn! agent)]
      (run-loop agent
        #(agent-loop/invoke (:chat-client agent) (store agent) [(msg/user message)]
-          (cond-> (build-invoke-opts agent run-id opts)
-            true               (assoc :on-token on-token)
-            (:cancel-token opts) (assoc :cancel-token (:cancel-token opts))))))))
+          (build-invoke-opts agent run-id (assoc opts :on-token on-token)))))))
 
 (defn- resume-prep
   "resume / resume-async 共用的前置：校验暂停态、翻译 decision、登记 run-id、
-   发 `:on-resume`，返回 `{:ls :loop-decision :opts}`（喂给 react/resume(-async)）。"
-  [agent decision payload]
+   发 `:on-resume`，返回 `{:ls :loop-decision :opts}`（喂给 react/resume(-async)）。
+
+   `opts` 与 `chat` 侧同义（`:on-token` / `:cancel-token` / `:system-prompt` /
+   `:on-env-error`），经 `passthrough` 并进 loop opts。"
+  [agent decision payload opts]
   (let [paused (paused-state agent)
         _ (when-not paused
             (throw (ex-info "Agent 未处于暂停状态"
@@ -479,12 +502,13 @@
                meta)
     {:ls ls
      :loop-decision loop-decision
-     :opts (cond-> {:context (resume-context agent paused)
-                    :tool-gate (gate-of agent)
-                    :on-env-error (env-error-policy agent nil)
-                    :callbacks (assoc callbacks :metadata meta)}
-             payload (assoc :payload payload)
-             (sys-prompts agent nil) (assoc :system-prompts (sys-prompts agent nil)))}))
+     :opts (-> (cond-> {:context (resume-context agent paused)
+                        :tool-gate (gate-of agent)
+                        :on-env-error (env-error-policy agent opts)
+                        :callbacks (assoc callbacks :metadata meta)}
+                 payload (assoc :payload payload)
+                 (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))
+               (passthrough opts))}))
 
 (defn paused?
   "是否处于暂停态（本进程 state-atom 或 PauseStore 中的持久化快照）。"
@@ -506,10 +530,17 @@
    环境类暂停（:env-retry）：\"retry\"/:retry 或 \"approved\"/:approved 表示
    环境已修复、重跑失败工具；其余 → 错误结果交给模型（不支持 :reply）。
 
-   resume 的 ToolContext 恢复自暂停快照（各轮 :writes 的累积折叠结果保留）。"
-  ([agent decision] (resume agent decision nil))
-  ([agent decision payload]
-   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload)]
+   resume 的 ToolContext 恢复自暂停快照（各轮 :writes 的累积折叠结果保留）。
+
+   4-arity 的 `opts` 与 `chat` 侧同义，**尤其是 `:on-token` / `:cancel-token`**：
+   HITL 第二段（审批之后的续跑）往往正是最终答案那段，不给这两个键，前端就只能
+   干等若干秒再一次性收到整段文字，期间「停止」也按不动。
+   `payload` 是**用户答复**的载荷（`:args` / `:message`），传输选项走 `opts`
+   ——两件事不挤一个槽。"
+  ([agent decision] (resume agent decision nil nil))
+  ([agent decision payload] (resume agent decision payload nil))
+  ([agent decision payload opts]
+   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload opts)]
      (run-loop agent
        #(agent-loop/resume (:chat-client agent) ls loop-decision opts)))))
 
@@ -517,10 +548,12 @@
   "同 `resume`，但立刻返回 `CompletableFuture`，延续跑在虚拟线程上。
 
    HITL 的第二段（人答复之后接着跑）与第一段一样长——首段用了 `chat-async`，
-   这段还阻塞 HTTP 线程就白费了。返回值形状同 `resume`。"
-  (^java.util.concurrent.CompletableFuture [agent decision] (resume-async agent decision nil))
-  (^java.util.concurrent.CompletableFuture [agent decision payload]
-   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload)]
+   这段还阻塞 HTTP 线程就白费了。返回值形状同 `resume`；4-arity 的 `opts`
+   见 `resume`（`:on-token` / `:cancel-token` 在这里同样成立）。"
+  (^java.util.concurrent.CompletableFuture [agent decision] (resume-async agent decision nil nil))
+  (^java.util.concurrent.CompletableFuture [agent decision payload] (resume-async agent decision payload nil))
+  (^java.util.concurrent.CompletableFuture [agent decision payload opts]
+   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload opts)]
      (run-loop-async agent
        #(agent-loop/resume-async (:chat-client agent) ls loop-decision opts)))))
 
