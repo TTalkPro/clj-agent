@@ -125,12 +125,13 @@ clj-agent/
 ├── modules/
 │   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + chat-client 原语(chat_client/tool/filter)；零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent)，依赖 core
-│   └── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
+│   ├── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
+│   └── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议(im.ttalk.agent.agui.*)，依赖 core + client
 ├── examples/              # 使用示例
 ├── docs/                  # 设计文档（索引见 docs/README.md；design-principles.md = 项目级硬约束，先读它）
 ├── scripts/check_docs.clj # 文档一致性门禁（JVM Clojure，见下）
 ├── bb.edn                 # 开发任务入口（bb tasks 看全部）
-├── build.clj              # 三模块构建/发布（tools.build）
+├── build.clj              # 各模块构建/发布（tools.build）
 └── deps.edn               # 根依赖配置
 ```
 

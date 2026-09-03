@@ -26,6 +26,12 @@
 | [`tool-calling-manager-design.md`](tool-calling-manager-design.md) | 工具**执行引擎**（线程模型 + 隔离边界 + 调度策略）；含 `deftool :backend` 的否决记录（§5） |
 | [`advisor-alignment-design.md`](advisor-alignment-design.md) | 逐个对齐 Spring AI 2.0 Advisor：有什么、对应什么、吸收还是不跟、为什么 |
 
+## 设计中（🚧 已定稿未施工）
+
+| 文档 | 讲什么 |
+|---|---|
+| [`agent-runtime-design.md`](agent-runtime-design.md) | **新建 `clj-agent-agui` 模块**：借鉴 CopilotKit runtime 的「run 与 HTTP 请求解耦」机制并原生实现（会话注册表 + 有界事件缓冲 + `:seq` 偏移续传 + 跨请求 stop/resume），从而不需要它的 remote agent。§6 是**对现有框架的强化清单**（框架侧只有 `resume` 收不到 `:on-token`/`:cancel-token` 一处必须改），§7 是**能力缺口清单**（真缺的只有跨 run 共享状态；前端工具是既有 HITL 词汇的一个用法）。**也是一份「抄一半」的记录**：事件折叠 / 事件日志持久化 / Runner 协议 / 全局单例 / hooks 逐条否决并记明重启条件 |
+
 ## 已实施（专题 / 重构记录）
 
 | 文档 | 讲什么 |

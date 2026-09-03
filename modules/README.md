@@ -2,20 +2,21 @@
 
 ## 模块结构
 
-clj-agent 采用**依赖倒置(DIP)**的三层划分:**Core 定义协议(端口)+ chat-client 原语;Provider 实现协议(适配器);Client 是 Agent 运行时(循环/记忆/门面)。** 任何实现了 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能作为 provider 注入 agent。
+clj-agent 采用**依赖倒置(DIP)**的分层:**Core 定义协议(端口)+ chat-client 原语;Provider 实现协议(适配器);Client 是 Agent 运行时(循环/记忆/门面)。** 任何实现了 `im.ttalk.agent.model/ILLMProvider` 的 jar 都能作为 provider 注入 agent。三层之外还有一个**可选的最外层** `clj-agent-agui`——它让 run 的寿命不再由 HTTP 请求的寿命决定(断线重连 / 跨请求 stop 与 resume),并把事件流按 AG-UI 编码。
 
 ```
 clj-agent/
 ├── modules/
 │   ├── clj-agent-core/      # 协议(端口) + chat-client 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
-│   └── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
+│   ├── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
+│   └── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议,依赖 core + client
 ├── bb.edn                   # 开发任务(bb test / bb jar / bb release …)
 ├── build.clj                # 三模块统一构建发布(tools.build)
 └── deps.edn                 # 根配置(开发/测试一次性加载全部模块)
 ```
 
-依赖方向:**Provider → Core ← Client**(实现与运行时各自依赖抽象,互不依赖)。应用层在运行时构造一个 provider 注入 agent。
+依赖方向:**Provider → Core ← Client ← AGUI**(实现与运行时各自依赖抽象,互不依赖;agui 挂在 client 外面,没人依赖它)。应用层在运行时构造一个 provider 注入 agent。
 
 ---
 
@@ -57,6 +58,26 @@ clj-agent/
 - `im.ttalk.agent.common` - 共享 ChatClient 构建
 
 **依赖**: `clj-agent-core`; timbre, next.jdbc, sqlite-jdbc
+
+---
+
+### 1.6 clj-agent-agui — Agent Runtime 后台机制 + AG-UI 协议(可选)
+
+**职责**: 让 **run 的寿命不再由 HTTP 请求的寿命决定**——会话注册表 + 有界事件
+缓冲 + 会话级单调 `:seq` 偏移续传 + 跨请求 stop/resume;再把中立事件按 AG-UI
+编码,于是 CopilotKit 之类的前端可以**直连 Clojure**,不需要中间那个 Node runtime。
+
+- `im.ttalk.agent.agui.runtime` - 会话注册表 + run 生命周期 + 订阅(**中立,无 AG-UI 概念**)
+- `im.ttalk.agent.agui.event` - 中立事件模型 + 每 run 的发射器(`:seq` 无洞 / 开块补关 / 终态唯一)
+- `im.ttalk.agent.agui.emit` - 接线:`on-token` + `:iteration` filter + `:on-llm-result` → 事件
+- `im.ttalk.agent.agui.codec` - 中立事件 ⇄ AG-UI 事件、中立消息 → AG-UI 消息、`RunAgentInput` 解析
+- `im.ttalk.agent.agui.tools` - AG-UI 前端工具(client-side tool)→ 内联工具 + gate
+
+**零 web 依赖**(`docs/design-principles.md` §2):订阅是回调,本模块不认识
+Request/Response/SSE 帧。真路由在 `examples/copilotkit/`。
+
+**依赖**: `clj-agent-core` + `clj-agent-client`; cheshire, timbre
+(设计与判据见 `docs/agent-runtime-design.md`)
 
 ---
 

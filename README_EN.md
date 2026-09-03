@@ -75,12 +75,13 @@ clj-agent/
 ├── modules/
 │   ├── clj-agent-core/      # Protocol (im.ttalk.agent.model) + chat-client primitives; zero deps
 │   ├── clj-agent-client/    # Agent runtime (client/react/memory/subagent), depends on core
-│   └── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
+│   ├── clj-agent-provider/  # Vendor adapters (im.ttalk.agent.provider.*), implement protocol, depend on core
+│   └── clj-agent-agui/      # (optional) Agent runtime backend + AG-UI protocol (im.ttalk.agent.agui.*), depends on core + client
 ├── examples/              # Usage Examples
 ├── docs/                  # Design Documents
 ├── scripts/check_docs.clj # Docs-vs-code gate (JVM Clojure, see below)
 ├── bb.edn                 # Dev task entry point (`bb tasks` lists them all)
-├── build.clj              # Build/release for all three modules (tools.build)
+├── build.clj              # Build/release for every module (tools.build)
 └── deps.edn               # Root Dependency Configuration
 ```
 
