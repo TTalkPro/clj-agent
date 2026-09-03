@@ -4,6 +4,138 @@
 
 ---
 
+# 【当前轮】新建 `clj-agent-agui` 模块：原生 runtime 后台机制（2026-09-03）
+
+> 设计：[`docs/agent-runtime-design.md`](docs/agent-runtime-design.md)（本轮施工单据此展开）。
+> 起因：借鉴 `~/workspace/CopilotKit` `packages/runtime` v2 的「run 与 HTTP 请求解耦」
+> 机制并**原生实现**，从而不需要它的 remote agent（也不需要那个 Node runtime）。
+> 范围定调（用户拍板）：**整块新建模块 `clj-agent-agui`，不改既有 agent**——
+> 框架侧只动设计文档 §6.1 判定为「绕不开」的那一处。
+>
+> 测试基线：416 tests / 1876 assertions（三模块）→ **收尾 458 tests / 2066
+> assertions / 0 failures（四模块）**。
+> 状态：**✅ 12 项全部完成 + 验收通过 + 真机验证通过**（2026-09-03）。唯一未做的是
+> 真 CopilotKit React 前端联调——那要一个前端工程，不在本仓库里（设计文档 §9.4）。
+
+## S0 — 前置：框架侧唯一的改动 + 模块骨架
+
+- [x] **1. `resume` / `resume-async` 接 `:on-token` / `:cancel-token`**（§6.1，P0）：
+      `resume-prep` 构造的 opts 从来没有这两个键，导致 HITL 第二段（审批后的续跑，
+      往往正是最终答案）不流式、不可取消。新增 4-arity `[agent decision payload opts]`，
+      旧调用一字不动。
+- [x] **2. 四个入口共用一份 opts 透传**（§6.2）：把 `:on-token` / `:cancel-token`
+      收进 `build-invoke-opts`，`chat-stream` 那两行手动 assoc 随之删掉；
+      `chat-async` 因此**同时获得流式与取消**（这正是 6.1 那个洞的同一个根）。
+- [x] **3. 新建 `modules/clj-agent-agui/` 并登记五处**：`deps.edn`（paths + test）、
+      `tests.edn`、`bb.edn` 的 modules 表、`build.clj` 的 modules 表、
+      `modules/README.md`、CI matrix。build.clj 的 `:override-core?` 布尔位
+      泛化成 `:override-libs`（agui 同时依赖 core 与 client，只覆盖 core 会让
+      pom 缺 client 依赖）。
+
+## S1 — 骨架：事件模型 + 注册表（无 AG-UI，可独立验收）
+
+- [x] **4. `agui/event.clj`**：中立事件 + 发射器。`:seq` **会话级**单调（不是每 run
+      重置——§4.2 契约 1 施工时改的：HITL 下一次对话跨多个 run，订阅挂在会话上）；
+      开集合跟踪（未闭合的 message / tool）；终态良构（§4.6）：已有终态则**什么都不补**，
+      否则先补关再发终态；终态类型取自**本 run 自己**的停止意图 holder。
+      **发射器自身永不抛**（§6.3：callbacks 的吞异常语义对事件流是错的）。
+- [x] **5. `agui/emit.clj`**：接线。`on-token` → `:message/delta`；`:iteration` filter
+      （请求侧 `:context` 取 state、响应侧 `:messages` 取带 `tool-call-id` 的结果）
+      → `:tool/*` + `:state/snapshot`；`:on-llm-result` callback → `:tool/started`+`:args`
+      （**tool-call-id 只有这里拿得到**：`:on-tool-call` 与 `:tool` 链的请求对象都没有 id）。
+- [x] **6. `agui/runtime.clj`**：`runtime` / `start-run!` / `resume-run!` / `subscribe` /
+      `stop!` / `run-status` / `shutdown!`。一会话一把锁一个 agent 一个 in-flight run。
+
+## S2 — 生命周期完备
+
+- [x] **7. 并发策略**：`:reject`（缺省）/ `:supersede`；被 supersede 的旧 run 落
+      `:run/cancelled` **而不是 `:error`**（CopilotKit 的 `RunFinalizeControl` 坑）。
+- [x] **8. 跨请求 HITL**：`resume-run!` 凭 conv-id 恢复；暂停中的会话
+      `:awaiting-resume`，此时 `start-run!` 拒绝（§4.4，待拍板项 1 拍 (a)）。
+- [x] **9. `:since` 偏移续传 + 落后 `:run/resync`**（走 ChatMemory 快照，不建第二真相店）；
+      有界环形缓冲 + 空闲会话驱逐 + `shutdown!` 收尾。
+
+## S3 — AG-UI 端到端
+
+- [x] **10. `agui/codec.clj`**：中立事件 ⇄ AG-UI 事件、中立消息 → AG-UI 消息 +
+      `/info` 响应体。`:run/paused` 先走 `CUSTOM`（待拍板项 2 的 (a)）。
+- [x] **11. `agui/tools.clj`**：AG-UI 前端 action → inline tool + gate
+      （§7.2：**零框架改动**——inline tool 的非 `:handler` 键原样就是 schema，
+      gate 判 `:pause`，前端结果经 `resume :reply` 回灌）。
+- [x] **12. `examples/copilotkit/`**：离线可跑的端到端示例（假容器，不引 web 依赖）
+      + 一份真 http-kit 路由示例（四条路由 + SSE 编码）。
+
+## 验收 ✅
+
+- [x] 四模块全绿：**454 tests / 2032 assertions / 0 failures**（新增 38 tests /
+      156 assertions）；agui 单模块 34 tests / 137 assertions；覆盖 §9.6 的 14 条清单
+- [x] `bb check-docs` 全绿（7 个 README / 73 个 ns / 21 份 docs）
+- [x] `examples/copilotkit/agui_example.clj` 离线跑通六场景（流式 / 工具 /
+      断线重连 / 停止 / 审批 HITL / 前端工具），并入 `run_all_examples`
+- [x] 框架侧回归钉住：`modules/clj-agent-client/test/.../resume_opts_test.clj`
+      （resume 流式 / resume 取消 / chat-async 流式 / chat-async 取消）
+- [x] **真机验证**（`examples/copilotkit/agui_live_test.clj`，MiniMax-M2.7 真实端点）
+      六场景全过：流式 54 块真 token / 工具调用 id 全程串得起来 / 断线重连（6 字处
+      断开，重连补齐 424 字，seq 连续无洞）/ 停止（100 字处停住落 `:run/cancelled`）/
+      审批 HITL（续跑 20 块**流式**）/ 前端工具（`:reply` 回灌）
+- [x] **真前端联调**（CopilotKit 官方 `examples/v2/react/demo` + 真浏览器 + 真
+      MiniMax，**全程没起 Node runtime**）：demo 自带 dev-only 逃生口
+      `NEXT_PUBLIC_COPILOTKIT_RUNTIME_URL`，指到我们的进程即可，它一行都不用改。
+      跑通：流式渲染 / `get-weather` 工具卡片 / 敏感工具暂停（卡片停在 inProgress）/
+      **另一个请求**凭 conversation-id 审批 → 工具真执行 → `/connect` 看到续跑的
+      `TOOL_CALL_RESULT` 与最终回答 / CopilotKit suggestions 自动工作（它的
+      `copilotkitSuggest` 走的就是我们的前端工具通道）
+
+## 联调挖出来的五个问题（全部已修，设计文档 §9.10）
+
+单测与 live 脚本全绿也照不到这些——它们全在「协议对接」那一层：
+
+- [x] **1. `/info` 的 `agents` 必须是以 id 为键的字典**，我们发的是数组 →
+      客户端 `Object.entries` 把下标当 agent id，去请求 `/agent/0/run`
+- [x] **2. `/stop` 的 threadId 是路径段** `/stop/:threadId`，不是请求体 → 404
+- [x] **3. `AGUIError: First event must be 'RUN_STARTED'`**：起 run 与订阅之间有
+      真空（run 立刻起跑就发终态前的第一条，HTTP 层要等返回值才订阅）。
+      `start-run!` 增返回 **`:since`**（起跑前的水位）——**这正是会话级 `:seq` 的用处**
+- [x] **4. 暂停的 run 在 AG-UI 侧没有终态、流也不关** → 工具卡片永远 inProgress、
+      HTTP 请求不结束。`:run/paused` 改发 `CUSTOM` + `RUN_FINISHED`；
+      `/run` 终态即关流，**`/connect` 不关**（它跨 run）
+- [x] **5. 会话被前端工具的暂停永久卡死**：CopilotKit suggestions 把
+      `copilotkitSuggest` 塞进 `tools`，**只读 `TOOL_CALL_ARGS`、从不回结果**，
+      会话于是永远 `:awaiting-resume`，挡住后续所有消息（输入框敲了字发不出去）。
+      `start-run!` 增 `:discard-pause?`——**缺省仍是拒绝**（§4.4 的取舍不变），要丢就显式说
+- [x] 顺带两条**不属于 AG-UI** 的端点：`POST …/approve`、`GET …/pending`
+      （人工审批是应用自己的事，协议里没有它）
+- [ ] **未做**：给 `CUSTOM/cljagent.run.paused` 写前端 renderer（前端工程的活），
+      所以 demo 上的「同意」是用 curl 打 `/approve` 代替的
+
+## 真机验证挖出来的老 bug（已修，设计文档 §9.9）
+
+- [x] **Anthropic 路径每个工具发两遍**：`chat-model/build-call-config` 把本次调用的
+      tools **同时**塞进 config 与第三个参数，而 `anthropic/build-params` 又把
+      `(:tools config)` 当「预置 wire 工具」与之 `into` 在一起。`deftool` 的 schema
+      两份都合法（只是白烧 token）所以一直没暴露；**内联工具是第一个不是 wire 形态的**
+      （`:parameters`），config 那份没归一化，MiniMax 当场 400
+      「invalid params, function parameters is empty (2013)」。
+      修法：新增 `anthropic/merge-tools`（两边都归一化 + 按 `:name` 去重），
+      `params_test.clj` 四条断言钉住。OpenAI 兼容那条路只读第三个参数，本来就没这问题。
+- [x] **顺带记一条实测经验**：前端工具的 `description` 要写成**可调用的动作**
+      （「弹出确认对话框并返回用户的选择」）。写成「在用户浏览器里弹…」，模型会判定
+      「这不归我调」，转而给你讲怎么写 JS——live 脚本里踩过，注释已就地记下。
+
+## 施工与设计的差异（五处，已记进设计文档 §9.8）
+
+1. `:seq` 改成**会话级**单调（不是每 run 重置）——HITL 一次对话跨多个 run，
+   订阅挂在会话上，`:since` 因此能退化成一个数，正好对上 SSE 的 `Last-Event-ID`；
+2. `:retain-ms` 并入 `:buffer-size`（缓冲改会话级后不再按 run 分桶）；
+3. `run-status` 加 `:stopping?`——「取消已登记但还没停稳」是真实存在的窗口，
+   UI 要显示「正在停止…」就得读得到；
+4. `build.clj` 的 `:override-core?` 布尔泛化成 `:override-libs` 列表——agui 同时
+   依赖 core 与 client，只覆盖 core 会让 pom **只缺 client 那一条**；
+5. 测试的时序改用**闸门**（mock provider 的 `:hold` + 工具里的 promise）而不是
+   `sleep` 赌——初版聚合跑时当场间歇性红两条。
+
+---
+
 # 【当前轮】异步 ChatModel / Provider 落地（2026-09-03）
 
 > 设计：[`docs/async-chat-model-design.md`](docs/async-chat-model-design.md)（本轮施工单据此展开）。
