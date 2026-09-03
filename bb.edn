@@ -9,7 +9,7 @@
     ;; 模块的**测试**顺序（构建顺序在 build.clj 的 modules 表里）。
     ;; client 曾长期缺席旧 test-all.sh 的列表——CI matrix 有它、脚本没有，
     ;; 于是本地跑 test 会静默跳过整个 Agent 运行时。别再删它。
-    (def modules ["clj-agent-core" "clj-agent-client" "clj-agent-provider"])
+    (def modules ["clj-agent-core" "clj-agent-client" "clj-agent-provider" "clj-agent-agui"])
 
     (defn module-dir
       "吃 core / clj-agent-core 两种写法。"

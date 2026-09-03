@@ -42,11 +42,15 @@
   "按依赖顺序：core 必须最先 install，否则 client/provider 的 :release
    override（把 core 从 :local/root 换成同版本 :mvn/version）解析不到坐标。
 
-   :override-core? —— 发布关键：core 在模块 deps.edn 里是 {:local/root \"..\"}，
-   write-pom 无法把本地路径写成合法 Maven 坐标，生成的 pom 会**缺失 core 依赖**，
-   消费方解析即断。故构建期用 alias 把它覆盖成同版本 :mvn/version。
+   :override-libs —— 发布关键：模块间依赖在各自 deps.edn 里是 {:local/root \"..\"}，
+   write-pom 无法把本地路径写成合法 Maven 坐标，生成的 pom 会**缺失该依赖**，
+   消费方解析即断。故构建期用 alias 把它们覆盖成同版本 :mvn/version。
    （create-basis 没有顶层 :override-deps 参数——曾直接传 → 被静默忽略，pom 仍缺
-   core 依赖。必须放进 alias 再经 :aliases 启用。）"
+   依赖。必须放进 alias 再经 :aliases 启用。）
+
+   **它是列表而不是布尔**（2026-09-03 随 agui 模块泛化）：agui 同时依赖 core 与
+   client，原来的 `:override-core?` 只覆盖 core，pom 会**只缺 client 那一条**——
+   同一个坑换个依赖再踩一遍。加模块时把它依赖的全部内部模块列进来。"
   [{:key :core
     :lib 'im.ttalk/clj-agent-core
     :dir "modules/clj-agent-core"
@@ -54,13 +58,18 @@
    {:key :client
     :lib 'im.ttalk/clj-agent-client
     :dir "modules/clj-agent-client"
-    :override-core? true
+    :override-libs ['im.ttalk/clj-agent-core]
     :description "clj-agent Client - Agent runtime (client / ReAct loop / memory / subagent)"}
    {:key :provider
     :lib 'im.ttalk/clj-agent-provider
     :dir "modules/clj-agent-provider"
-    :override-core? true
-    :description "clj-agent LLM - LLM Provider Abstraction Module"}])
+    :override-libs ['im.ttalk/clj-agent-core]
+    :description "clj-agent LLM - LLM Provider Abstraction Module"}
+   {:key :agui
+    :lib 'im.ttalk/clj-agent-agui
+    :dir "modules/clj-agent-agui"
+    :override-libs ['im.ttalk/clj-agent-core 'im.ttalk/clj-agent-client]
+    :description "clj-agent AGUI - Agent runtime backend (run registry / event stream / AG-UI codec)"}])
 
 (def ^:private class-dir "target/classes")
 (def ^:private src-dirs ["src"])
@@ -68,16 +77,17 @@
 (defn- jar-file [{:keys [lib]}]
   (format "target/%s-%s.jar" (name lib) version))
 
-(defn- basis [{:keys [override-core?]}]
-  (if override-core?
+(defn- basis [{:keys [override-libs]}]
+  (if (seq override-libs)
     (b/create-basis {:project "deps.edn"
-                     :extra {:aliases {:release {:override-deps {'im.ttalk/clj-agent-core
-                                                                 {:mvn/version version}}}}}
+                     :extra {:aliases {:release {:override-deps
+                                                 (into {} (map (fn [lib] [lib {:mvn/version version}]))
+                                                       override-libs)}}}
                      :aliases [:release]})
     (b/create-basis {:project "deps.edn"})))
 
 (defn- select
-  ":module core|client|provider（也吃 clj-agent-core 这种全名）→ 单模块；缺省 = 全部。"
+  ":module core|client|provider|agui（也吃 clj-agent-core 这种全名）→ 单模块；缺省 = 全部。"
   [{:keys [module]}]
   (if-not module
     modules
@@ -109,16 +119,13 @@
               :jar-file (jar-file m)
               :class-dir class-dir}))
 
-(def ^:private core-module (first (filter #(= :core (:key %)) modules)))
-
-(defn- core-installed?
-  "client/provider 的 basis 把 core 覆盖为 :mvn/version，故它们**打包前**就要求
-   本地仓库里已有同版本 core——否则 create-basis 直接解析失败。"
-  []
-  (let [{:keys [lib]} core-module]
-    (.exists (io/file (System/getProperty "user.home") ".m2" "repository"
-                      (str/replace (namespace lib) "." "/") (name lib) version
-                      (format "%s-%s.jar" (name lib) version)))))
+(defn- installed?
+  "下游模块的 basis 把内部依赖覆盖为 :mvn/version，故它们**打包前**就要求本地仓库
+   里已有同版本的那些 jar——否则 create-basis 直接解析失败。"
+  [{:keys [lib]}]
+  (.exists (io/file (System/getProperty "user.home") ".m2" "repository"
+                    (str/replace (namespace lib) "." "/") (name lib) version
+                    (format "%s-%s.jar" (name lib) version))))
 
 ;;; ============================================================
 ;;; 任务
@@ -132,20 +139,22 @@
 
 (declare jar)
 
-(defn- ensure-core-installed!
-  "只打 client/provider（例如 `jar :module client`）时自动补齐 core，
-   免得撞上「必须先 install core」这条隐式前提——旧的 build-all.sh 就栽在这。"
+(defn- ensure-deps-installed!
+  "只打某个下游模块（例如 `jar :module agui`）时自动补齐它 override 掉的内部依赖，
+   免得撞上「必须先 install core」这条隐式前提——旧的 build-all.sh 就栽在这。
+   按 `modules` 的声明序补（core 在前）：补 client 本身又要求 core 已在库里。"
   [opts]
-  (when (and (some :override-core? (select opts))
-             (not (core-installed?)))
-    (println (format "[prep] 本地 Maven 缺 %s %s，先补一次" (:lib core-module) version))
-    (jar {:module :core})
-    (run-modules! {:module :core} "install" install*)))
+  (let [needed (into #{} (mapcat :override-libs) (select opts))]
+    (doseq [m modules
+            :when (and (contains? needed (:lib m)) (not (installed? m)))]
+      (println (format "[prep] 本地 Maven 缺 %s %s，先补一次" (:lib m) version))
+      (jar {:module (:key m)})
+      (run-modules! {:module (:key m)} "install" install*))))
 
 (defn jar
   "写 pom + 打 jar 到 modules/<m>/target/。"
   [opts]
-  (ensure-core-installed! opts)
+  (ensure-deps-installed! opts)
   (run-modules!
    opts "jar"
    (fn [{:keys [lib description] :as m}]
@@ -192,7 +201,7 @@
 (defn release
   "发布前的完整本地流程。
 
-   是**逐模块** clean → jar → install，而非三遍全量：client/provider 打包时
+   是**逐模块** clean → jar → install，而非全量各来一遍：下游模块打包时
    basis 已把 core 换成 :mvn/version，故 core 必须在**它们打包之前**就落进 ~/.m2。
    先 jar 全部再 install 全部会在 fresh clone 上当场解析失败。"
   [opts]
