@@ -11,8 +11,9 @@
    环境变量:
      ZHIPU_API_KEY - 智谱 AI API Key（必需）
 
-   另**内嵌两个独立示例脚本**（不复制其逻辑，load-file 后调它们的 run）：
+   另**内嵌三个独立示例脚本**（不复制其逻辑，load-file 后调它们的 run）：
      examples/async_luminus_handler_example.clj  Ring/Luminus 异步 handler（离线，跑一次）
+     examples/copilotkit/agui_example.clj        AG-UI runtime 六场景（离线，跑一次）
      examples/async_live_test.clj                异步全链路 live（对两个 provider 各跑一次）
    两者都遵守「嵌入约定」：设了系统属性 clj-agent.embedded-examples 就只定义不自跑，
    run 返回失败项数而不 System/exit。"
@@ -143,9 +144,11 @@
 (System/setProperty "clj-agent.embedded-examples" "1")
 
 (load-file "examples/async_luminus_handler_example.clj")
+(load-file "examples/copilotkit/agui_example.clj")
 (load-file "examples/async_live_test.clj")
 
 (def ^:private luminus-run (resolve 'async-luminus-handler-example/run))
+(def ^:private agui-run (resolve 'copilotkit.agui-example/run))
 (def ^:private async-live-run (resolve 'async-live-test/run))
 
 (defn- embed-script
@@ -466,9 +469,12 @@
 
   (reset! test-results {:passed 0 :failed 0 :tests []})
 
-  ;; Ring/Luminus 异步 handler 示例：桩 provider、离线，与 API Key 无关，先跑
+  ;; 两个离线示例：桩 provider，与 API Key 无关，先跑
   (separator "Ring / Luminus 异步 handler（离线）")
   (embed-script "异步 handler 五场景（离线）" luminus-run)
+
+  (separator "AG-UI runtime（离线）")
+  (embed-script "AG-UI runtime 六场景（离线）" agui-run)
 
   ;; 使用 Anthropic 兼容 Provider 运行
   (let [anthropic-provider (create-anthropic-provider)]

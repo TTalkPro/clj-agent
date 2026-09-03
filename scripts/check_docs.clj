@@ -8,7 +8,7 @@
 
    分两组：**README 查内容**（与代码对不对得上），**docs/ 查结构**（记账烂没烂）。
 
-   A 组 —— 六个 README × 代码（内容检查）：
+   A 组 —— 各模块 README × 代码（内容检查）：
 
    1. **ns 存在**：README 里点名的 `im.ttalk.agent.*` 命名空间必须真的存在
       （抓到过 `im.ttalk.agent.model.types` —— 从来不存在的幽灵）；
@@ -85,7 +85,8 @@
   ["README.md" "README_EN.md" "modules/README.md"
    "modules/clj-agent-core/README.md"
    "modules/clj-agent-client/README.md"
-   "modules/clj-agent-provider/README.md"])
+   "modules/clj-agent-provider/README.md"
+   "modules/clj-agent-agui/README.md"])
 
 ;;; 允许不被任何 README 提及的 ns（内部实现细节）
 (def ^:private coverage-allowlist
