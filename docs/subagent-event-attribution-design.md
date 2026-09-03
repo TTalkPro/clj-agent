@@ -270,7 +270,7 @@ agui.subagent/observer ── {:decorate (fn [agent] …)  ;; emit/attach lane �
 ```
 
 **为什么 lane 不接插件 transform**：`:transform` 槽被终态守卫占了。插件
-（`agui.genui`）的 transform 是**按 run 现造的有状态对象**，多条 lane 共用一个
+（如 `agui.a2ui`）的 transform 是**按 run 现造的有状态对象**，多条 lane 共用一个
 实例，它记的「这一轮见过哪些 tool-call」就会被交错的 lane 污染。v1 明确不接。
 **重启条件**：出现「子 agent 的工具调用也要渲染成 activity 卡片」的真实场景时，
 把守卫与插件组合起来，并给每条 lane 现造一个插件实例。

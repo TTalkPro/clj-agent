@@ -995,7 +995,10 @@ interrupt 协议**（`interruptId` 出现 0 次），demo 也没用 `useInterrup
 上游是 `packages/runtime/src/v2/runtime/open-generative-ui-middleware.ts`：模型调
 `generateSandboxedUi` 生成一块 HTML/CSS/JS，运行时**不执行**它，把参数翻译成
 `ACTIVITY_SNAPSHOT` + 一串 `ACTIVITY_DELTA`（JSON Patch），前端在沙箱 iframe 里
-边收边渲染。落成 `modules/clj-agent-agui/src/…/agui/genui.clj`，**默认不装**。
+边收边渲染。落成 `examples/copilotkit/genui.clj`，**默认不装**。
+（原在 `modules/clj-agent-agui/src/…/agui/genui.clj`，2026-09-03 移出模块：
+它是 CopilotKit Runtime 一个可选中间件的约定，不是 AG-UI 的核心能力——
+协议层只认通用的 `ACTIVITY_SNAPSHOT` / `ACTIVITY_DELTA`。A2UI 与 MCP 留在模块内。）
 
 **为此新增的唯一运行时 API**：`event/emitter` 的 `:transform` +
 `runtime` 的 `:event-transform`（每 run 现造一个有状态的 transform）。
