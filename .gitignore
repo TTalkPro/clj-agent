@@ -49,3 +49,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Node.js / JavaScript examples
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-error.log*
