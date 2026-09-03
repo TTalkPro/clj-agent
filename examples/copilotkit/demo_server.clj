@@ -140,7 +140,11 @@
                  (fn [ev] (into [] (mapcat gf) (af ev)))))))
     (and a2ui? (not genui?))
     (assoc :event-transform (a2ui/event-transform))
-    a2ui? (assoc :input-transform (a2ui/input-transform))
+    a2ui? (assoc :input-transform (a2ui/input-transform)
+                 ;; 与 genui 的 `:open-generative-ui?` 对称：不报这一位，stock 前端
+                 ;; 只有自己传了 catalog 才会激活 A2UI（`CopilotKitProvider.tsx:328`
+                 ;; 的 `a2uiActive = runtimeA2UIEnabled || a2uiCatalogProvided`）
+                 :a2ui? true)
     ;; MCP：工具已经在 spec 里了，这里只接 MCP Apps 的两件事——
     ;; activity 消息（event-transform）与前端 iframe 的代理通道（mcp-proxy）
     (seq mcp-servers)

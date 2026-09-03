@@ -534,11 +534,11 @@
   ([port agent-spec] (start! port agent-spec "/api/copilotkit" nil))
   ([port agent-spec base-path] (start! port agent-spec base-path nil))
   ([port agent-spec base-path {:keys [event-transform input-transform open-generative-ui?
-                                      suggestions? mcp-proxy threads?]}]
+                                      a2ui? suggestions? mcp-proxy threads?]}]
    (let [runtime (rt/runtime (cond-> {:agent-fn (agui-tools/agent-fn agent-spec)
                                       ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled）
                                       :on-concurrent :supersede}
-                               ;; 事件流插件（如 agui.genui）；不传就完全不存在
+                               ;; 事件流插件（如 agui.a2ui / copilotkit.genui）；不传就完全不存在
                                event-transform (assoc :event-transform event-transform)))
          ;; 服务端工具名：用来把「前端同名声明」认成**渲染意图**而不是新工具
          server-tool-names (into #{}
@@ -547,6 +547,9 @@
                                  (:tools agent-spec))]
      {:server (hk/run-server (handler runtime ["default"] base-path server-tool-names
                                       {:open-generative-ui? open-generative-ui?
+                                       ;; 这两位都是 `/info` 的能力位：前端据此才注册
+                                       ;; 对应的 renderer（`codec/run-info` 的注释）
+                                       :a2ui? a2ui?
                                        :input-transform input-transform
                                        :mcp-proxy mcp-proxy
                                        ;; 线程只读面：历史在 ChatMemory，名字/归档
