@@ -1,0 +1,27 @@
+# feedbacks —— 下游宿主报上来的账
+
+一条一个文件，`<日期>-<slug>.md`。**只记「clj-agent 这一侧该改」的**：下游自己
+绕过去了但绕法很蠢、或者根本绕不过去的那些。下游自己的 bug 不进这里。
+
+每份的格式（症状先行，病因其次，建议最后）：
+
+| 段 | 写什么 |
+|---|---|
+| **症状** | 下游看到的**那一行**（报错原文 / 或者「一个字都不报」） |
+| **位置** | `文件:行`，clj-agent 这一侧的 |
+| **怎么撞上的** | 最短复现路径 |
+| **影响面** | 谁会撞、撞了会怎样、**报不报错** |
+| **建议** | 可选，下游不替仓主拍板 |
+
+## 现有
+
+| # | 标题 | 报的人 | 严重度 | 回没回 |
+|---|---|---|---|---|
+| [2026-09-04](2026-09-04-agui-drops-multimodal-content-parts.md) | AG-UI 层不认 `InputContent` 部件 —— 图片被 `(str content)` 压成 data URI 字符串喂给模型 | happy | 🔴 不报错，内容全丢 | ✅ 已收（`8977df4`，采纳报方随附的补丁）|
+| [2026-09-04](2026-09-04-info-does-not-advertise-multimodal.md) | `/info` 不宣告多模态能力 ⇒ 客户端没法 gate 附件 UI，只能盲发 | happy | 🟡 能力位缺一格 | ✅ 已修：`run-info` 收 `:multimodal`，**装配方传**、库不猜；demo 缺省 `image=false`（M2.7 无视觉），`CLJ_AGENT_VISION=1` 打开 |
+| [2026-09-04](2026-09-04-threads-delete-blocked-by-cors.md) | `/threads/:id` 的 **DELETE 跨源过不去**（`Allow-Methods` 只有 GET, POST, OPTIONS）⇒ 写端点等于不存在 | happy | 🟡 配了却用不了，浏览器只说 Failed to fetch | ✅ 已修（`6d467b8`）：`Allow-Methods` 加 `DELETE`，并把 `:3000/:3002` 做成回声白名单 + `Allow-Credentials` |
+| [2026-09-04](2026-09-04-run-finished-has-no-usage.md) | `RUN_FINISHED` 不带 `usage` ⇒ 客户端的 token 用量环恒空（keel 那边带） | happy | 🟢 不挡事，但每个接入方都要撞一次 | ✅ 已修：每次 LLM 往返记一笔累在根发射器，四条 run 终态都带 `usage[]`（含子 agent 的账）|
+
+> 背景：happy（ClojureScript + UIx 的 AG-UI 客户端）2026-09-03/04 拿
+> `examples/copilotkit/demo_server.clj`（`:4002`）做主力联调后端，逐页对着
+> CopilotKit 的参照实现比。上面几条是那趟路上 **clj-agent 这一侧**留下的账。
