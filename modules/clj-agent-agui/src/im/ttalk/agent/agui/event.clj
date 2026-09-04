@@ -18,7 +18,8 @@
    对的，对事件流是错的——吞掉一次发射 = `:seq` 出洞 = 断线续传从此对不上，
    而且不报错。所以这里反过来：sink 抛异常由**发射器**兜住并计数，
    `:seq` 由发射器自己分配（不依赖 sink 的返回值），一次失败不影响后续编号。"
-  (:require [taoensso.timbre :as log]))
+  (:require [im.ttalk.agent.agui.state :as state]
+            [taoensso.timbre :as log]))
 
 (set! *warn-on-reflection* true)
 
@@ -80,6 +81,13 @@
                  ;; `usage` 挂在 `RUN_FINISHED` 上、且是数组，正是为「一轮里换过
                  ;; 模型 / 有子 agent」准备的
                  :usage []
+                 ;; 共享状态：本 run 那一份的**运行中副本**，与 `:usage` 一样累在
+                 ;; 根发射器上（AG-UI 的 state 是 run 级的，lane 上的 `subagentRunId`
+                 ;; 只表示「这条更新是谁产生的」，不是「状态归谁」）。
+                 ;; `:state-emitted?` 记「发过快照没有」——delta 必须打在一份客户端
+                 ;; 也有的基线上，没发过就得先补一条
+                 :agent-state nil
+                 :state-emitted? false
                  :drops 0})
    ;; 派生出去的子 agent lane（`subagent-emitter` 自己登记）。**父认子**这一向是
    ;; 收尾要用的：run 终态之前得先把还开着的 lane 收掉，否则客户端看到的是一条
@@ -217,6 +225,68 @@
     ;; 时候已经有了」，事件照样漏在终态之后。锁是可重入的，`deliver!` 再拿一次无妨。
     (locking (:gate em)
       (reduce (fn [_ ev] (deliver! em ev)) nil (expand em base)))))
+
+;;; ---- 共享状态：一条快照 + 一串增量 ----
+
+(defn agent-state
+  "本 run 的共享状态**当前值**（服务端这份）。"
+  [em] (:agent-state @(:state (root-of em))))
+
+(defn seed-state!
+  "把 `RunAgentInput.state` 作为本 run 的初始状态**装上但不发**。
+
+   客户端本来就有这份（是它发上来的），再发一遍是噪声；装上是为了后续 delta
+   对着**真实基线**算，而不是对着 nil 算。"
+  [em v]
+  (when (some? v)
+    (swap! (:state (root-of em)) assoc :agent-state v))
+  nil)
+
+(defn emit-state-snapshot!
+  "整份替换 + 发 `:state/snapshot`。
+
+   ⚠️ `v` 必须是**状态对象本身，不是 JSON 字符串**。发成字符串之后客户端那边是
+   一坨转义引号，更要命的是**后续每条 delta 都打不上**（patch 打在字符串上），
+   而上游客户端不防这一手（`state = snapshot` 直接替换）。这里做不了类型强制
+   ——JSON 里字符串也是合法值——但调用方（`agui.tools` 的写状态工具）会先解一层。"
+  [em v]
+  (swap! (:state (root-of em)) assoc :agent-state v :state-emitted? true)
+  (emit! em :state/snapshot {:state v}))
+
+(defn emit-state-delta!
+  "规范化 + 发 `:state/delta`（RFC 6902 op 数组）。返回**实际发出去的** op 数组。
+
+   两件在这里解掉的事，都是**一个字都不报**的静默失败：
+
+   1. **没发过快照就发 delta** —— 客户端没有基线，patch 无处可打。所以首条 delta
+      之前先补一条当前状态的快照。
+
+      ⛔ **「没有状态」补的是 `{}`，不是跳过 —— 这一条是刻意比上游严，别「对齐
+      上游」把它改回去。** 上游那个守卫逐字是
+      `!hasEmittedState && initialState !== undefined`
+      （`CopilotKit/packages/runtime/src/agent/state-delta.ts`
+      的 `createStateEventNormalizer`）：`state` 字段**缺席**时它不补快照。上游
+      自己撞不到，是因为它的 `AbstractAgent` 永远发 `state ?? {}`；而我们这条路
+      客户端可以真的不带这个字段。跳过的后果不是少一条快照，是**下面第 2 条守卫
+      一起失灵**——对着 nil 算，连 `add /todos []` 这条初始化 op 自己都打不上，
+      于是裸 delta 照样发出去，客户端 `console.warn` 一声就把它丢了。
+      我们把「字段缺席」与 `{}` 当同一件事（客户端的 state 缺省本来就是 `{}`）。
+      下游在 2026-09-04 的回执里专门记了这一格，说另一台参照实现照抄上游的条件、
+      那条路上仍会发出打不上的裸 delta；
+   2. **`add /x/-` 而 `/x` 还不存在** —— 由 `state/normalize-ops` 在前面插一条
+      `add /x []`（见那个 ns 的注释）。
+
+   服务端这边同步应用一遍，下一条 delta 才是对着真实值算的。"
+  [em ops]
+  (let [root (root-of em)
+        {:keys [state-emitted? agent-state]} @(:state root)
+        base (or agent-state {})
+        {ops' :ops next-state :state} (state/normalize-ops ops base)]
+    (when-not state-emitted?
+      (emit-state-snapshot! em base))
+    (swap! (:state root) assoc :agent-state next-state :state-emitted? true)
+    (emit! em :state/delta {:delta (vec ops')})
+    (vec ops')))
 
 ;;; ---- 文本消息：自动开合 ----
 

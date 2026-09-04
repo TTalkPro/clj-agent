@@ -307,6 +307,60 @@
       (is (= ["父" "子"] (mapv :model (:usage (last @out)))))
       (is (= 2 (count (event/usage-of lane))) "lane 上读到的也是根那一份"))))
 
+(deftest shared-state-test
+  (testing "快照：整份替换，服务端同步留一份"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/emit-state-snapshot! em {:todos ["甲"]})
+      (is (= [:state/snapshot] (mapv :type @out)))
+      (is (= {:todos ["甲"]} (:state (last @out))))
+      (is (= {:todos ["甲"]} (event/agent-state em)))))
+
+  (testing "⭐ 首条 delta 之前**自动补一条快照**——客户端没有基线，patch 无处可打"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/seed-state! em {:todos ["旧"]})
+      (is (empty? @out) "seed 只装不发：客户端本来就有这份，再发一遍是噪声")
+      (event/emit-state-delta! em [{:op "add" :path "/todos/-" :value "新"}])
+      (is (= [:state/snapshot :state/delta] (mapv :type @out)))
+      (is (= {:todos ["旧"]} (:state (first @out))) "补的是**基线**，不是改完之后的值")
+      (is (= {:todos ["旧" "新"]} (event/agent-state em)))))
+
+  (testing "⛔ 没有种子时基线是 `{}`，**不是跳过** —— 这条守卫刻意比上游严，
+            改回 `initialState !== undefined` 就会退化成发裸 delta。
+
+            上游守卫逐字是 `!hasEmittedState && initialState !== undefined`，
+            它撞不到是因为 `AbstractAgent` 永远发 `state ?? {}`；我们这条路
+            客户端可以真的不带这个字段。跳过的后果不是少一条快照，是补数组那条
+            守卫一起失灵（对着 nil 算，初始化 op 自己都打不上）。
+            这个断言就是拿来挡「对齐上游」那类改动的。"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/emit-state-delta! em [{:op "add" :path "/todos/-" :value "买牛奶"}])
+      (is (= [:state/snapshot :state/delta] (mapv :type @out)))
+      (is (= {} (:state (first @out))))
+      (is (= [{:op "add" :path "/todos" :value []}
+              {:op "add" :path "/todos/-" :value "买牛奶"}]
+             (:delta (last @out)))
+          "补数组的初始化 op 排在前面")))
+
+  (testing "第二条 delta 不再补快照"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/emit-state-delta! em [{:op "add" :path "/n" :value 1}])
+      (event/emit-state-delta! em [{:op "replace" :path "/n" :value 2}])
+      (is (= [:state/snapshot :state/delta :state/delta] (mapv :type @out)))
+      (is (= {:n 2} (event/agent-state em)))))
+
+  (testing "快照之后再发 delta 也不补——快照本身就是基线"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/emit-state-snapshot! em {:n 1})
+      (event/emit-state-delta! em [{:op "replace" :path "/n" :value 2}])
+      (is (= [:state/snapshot :state/delta] (mapv :type @out)))))
+
+  (testing "状态是 **run 级**的：lane 上发也算这条 run 的账（`subagentRunId` 只表示谁产生的）"
+    (let [{:keys [em out]} (session-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/emit-state-delta! lane [{:op "add" :path "/n" :value 1}])
+      (is (= {:n 1} (event/agent-state em)) "累在根上")
+      (is (= "sa-1" (:subagent-run-id (last @out))) "但事件本身带归属"))))
+
 (deftest lane-closed-before-run-terminal-test
   (testing "父 run 收口前，还开着的 lane 被主动关掉——AG-UI 要求每个开过的子代理
             在 RUN_FINISHED 前关闭。靠 `silenced?` 是不行的：那只是把 lane 的
