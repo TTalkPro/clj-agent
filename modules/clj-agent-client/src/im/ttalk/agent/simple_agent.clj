@@ -42,7 +42,8 @@
      (when (= :paused (:status r))
        (resume a \"approved\")))"
   (:refer-clojure :exclude [reset!])
-  (:require [im.ttalk.agent.filter.memory :as memory-filter]
+  (:require [clojure.string :as str]
+            [im.ttalk.agent.filter.memory :as memory-filter]
             [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.tool-registry :as registry]
             [im.ttalk.agent.filter :as flt]
@@ -251,9 +252,29 @@
             (and on-pause (sensitive-tool? agent tc))     :pause
             :else                                          :proceed))))))
 
-(defn- sys-prompts [agent opts]
-  (when-let [sp (or (:system-prompt opts) (:system-prompt (:settings agent)))]
-    [{:role "system" :content sp}]))
+(defn- sys-prompts
+  "本轮的 system 段。
+
+   两个键**语义相反，别混**：
+   - `:system-prompt`        **覆盖**——opts 压 settings，一如既往（agent 的人设）
+   - `:extra-system-prompts` **追加**——一串字符串，接在人设后面
+
+   追加位是给「每轮由调用方带上来的一段上下文」用的：AG-UI 的
+   `RunAgentInput.context`（前端 `useAgentContext` 注册的那些）就是这个形状，
+   它是**这一轮**的环境说明，不该把 agent 自己的人设顶掉。
+
+   **不落 ChatMemory**：`react/build-chat-opts` 只把这些段落拼进本次请求的
+   system，历史里一个字都不留。所以下一轮不带就自动消失——turn 级，正是
+   前端上下文该有的生命周期（同 `:state` 的取舍，§7.1）。"
+  [agent opts]
+  (let [base (or (:system-prompt opts) (:system-prompt (:settings agent)))
+        extra (->> (:extra-system-prompts opts)
+                   (keep #(let [t (some-> % clojure.core/str str/trim)]
+                            (when (seq t) t))))]
+    (not-empty
+     (into (if base [{:role "system" :content base}] [])
+           (map (fn [t] {:role "system" :content t}))
+           extra))))
 
 (defn- env-error-policy
   "环境类工具失败的屏障策略：显式配置优先；缺省——配置了 :on-tool-call

@@ -316,6 +316,41 @@
       (agent/chat a "?" {:system-prompt "覆盖"})
       (is (= "覆盖" (:system-prompt (first @log)))))))
 
+(deftest extra-system-prompts-test
+  (testing ":extra-system-prompts 是**追加**，不是覆盖——人设还在，附加段接在后面"
+    (let [log (atom [])
+          a (agent/create-agent {:provider (spy-provider log) :model "test"
+                                 :system-prompt "你是数学助手"})]
+      (agent/chat a "1+1?" {:extra-system-prompts ["当前页面是 /orders/42"]})
+      (let [sp (:system-prompt (first @log))]
+        (is (clojure.string/includes? sp "你是数学助手") "人设不能被顶掉")
+        (is (clojure.string/includes? sp "当前页面是 /orders/42"))
+        (is (< (.indexOf ^String sp "你是数学助手")
+               (.indexOf ^String sp "当前页面是"))
+            "人设在前，本轮上下文在后"))))
+
+  (testing "没有人设时只有附加段；空串 / nil 条目丢掉"
+    (let [log (atom [])
+          a (agent/create-agent {:provider (spy-provider log) :model "test"})]
+      (agent/chat a "?" {:extra-system-prompts ["  " nil "只剩这条"]})
+      (is (= "只剩这条" (:system-prompt (first @log))))))
+
+  (testing "全空即不发 system——不给模型塞一段空白"
+    (let [log (atom [])
+          a (agent/create-agent {:provider (spy-provider log) :model "test"})]
+      (agent/chat a "?" {:extra-system-prompts ["" "   "]})
+      (is (nil? (:system-prompt (first @log))))))
+
+  (testing "**不落 ChatMemory**：turn 级，下一轮不带就没了"
+    (let [log (atom [])
+          a (agent/create-agent {:provider (spy-provider log) :model "test"})]
+      (agent/chat a "第一句" {:extra-system-prompts ["只在这一轮"]})
+      (agent/chat a "第二句")
+      (is (nil? (:system-prompt (second @log))))
+      (is (not-any? #(clojure.string/includes? (str %) "只在这一轮")
+                    (memory/mem-get (:memory a) (:conversation-id a)))
+          "历史里一个字都不该留"))))
+
 (deftest pre-built-chat-client-test
   (testing ":chat-client 选项直接复用"
     (let [p (ts/create-mock-provider [{:text "来自预构建" :tool-calls nil}])
@@ -584,13 +619,15 @@
     (.deleteOnExit f)
     (.getAbsolutePath f)))
 
+(defn- no-ids [ms] (mapv #(dissoc % :id) ms))   ;; store 落库时补的身份，见 memory_test
+
 (deftest sqlite-store-basic-test
   (let [path (temp-db)
         s (sqlite/sqlite-store path)]
     (testing "add/get/clear"
       (is (= [] (memory/mem-get s "c1")))
       (memory/mem-add s "c1" [(msg/user "a") (msg/assistant "b")])
-      (is (= [(msg/user "a") (msg/assistant "b")] (memory/mem-get s "c1")))
+      (is (= [(msg/user "a") (msg/assistant "b")] (no-ids (memory/mem-get s "c1"))))
       (memory/mem-clear s "c1")
       (is (= [] (memory/mem-get s "c1"))))
     (testing "中立消息（含 tool-calls）无损往返"
@@ -612,7 +649,7 @@
                        (content/image-part "QUJD" {:media-type "image/png"})])]
       (memory/mem-add s "mm" [m])
       (let [[out] (memory/mem-get s "mm")]
-        (is (= m out))
+        (is (= m (dissoc out :id)))
         (is (content/parts? (msg/content out)))
         (is (= "QUJD" (:data (nth (msg/content out) 2)))))
       (sqlite/close-store! s))))
@@ -635,7 +672,7 @@
       (memory/mem-add s "c1" [(msg/user "a")])
       (memory/mem-add s "c1" [(msg/assistant "b")])
       ;; 多次操作共享同一内存库，建表与数据都在
-      (is (= [(msg/user "a") (msg/assistant "b")] (memory/mem-get s "c1")))
+      (is (= [(msg/user "a") (msg/assistant "b")] (no-ids (memory/mem-get s "c1"))))
       (sqlite/close-store! s))))
 
 (deftest sqlite-closeable-test
