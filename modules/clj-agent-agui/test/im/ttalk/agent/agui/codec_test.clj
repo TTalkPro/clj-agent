@@ -271,6 +271,37 @@
     (is (some? (:usage (codec/->agui (assoc base :type :run/paused
                                             :usage [{:input-tokens 1}])))))))
 
+(deftest interrupt-kinds-are-distinguishable-test
+  (let [base* (assoc base :type :run/paused
+                     :pending-tool {:name "generateSandboxedUi" :args {:x 1}
+                                    :tool-call {:id "call_1"}})
+        it (fn [fe?] (get-in (codec/->agui (assoc base* :pending-frontend? fe?
+                                                  :reason "需要审批: generateSandboxedUi"))
+                             [:outcome :interrupts 0]))]
+
+    (testing "⭐ 两类挂起在 wire 上必须分得开——resume 走的是两支完全不同的路：
+              服务端敏感工具要**决策**（活还在服务端），前端工具要**结果**（活在客户端）。
+              曾经逐字段同形，客户端照审批回 cancelled 就把拒绝吃成了空结果。"
+      (is (not= (it true) (it false)) "三处任何一处都够客户端分辨"))
+
+    (testing "前端工具：措辞说的是「去执行」，schema 要的是 result，kind 标 frontend-tool"
+      (let [i (it true)]
+        (is (re-find #"客户端执行" (:reason i)))
+        (is (= ["result"] (get-in i [:responseSchema :required])))
+        (is (nil? (get-in i [:responseSchema :properties :decision])) "别给 decision 枚举误导")
+        (is (= "frontend-tool" (get-in i [:metadata :kind])))))
+
+    (testing "真审批：措辞与 decision 枚举照旧，kind 标 approval（既有客户端不受影响）"
+      (let [i (it false)]
+        (is (= "需要审批: generateSandboxedUi" (:reason i)))
+        (is (= ["decision"] (get-in i [:responseSchema :required])))
+        (is (= ["approved" "rejected"] (get-in i [:responseSchema :properties :decision :enum])))
+        (is (= "approval" (get-in i [:metadata :kind])))))
+
+    (testing "两类的 id / toolCallId 口径不变——客户端靠它回指同一次调用"
+      (is (= "call_1" (:id (it true)) (:toolCallId (it true))
+             (:id (it false)) (:toolCallId (it false)))))))
+
 (deftest state-events-test
   (testing "STATE_DELTA 的字段就叫 delta（StateDeltaEventSchema），是 op 数组"
     (is (= {:type "STATE_DELTA" :delta [{:op "add" :path "/a" :value 1}]}

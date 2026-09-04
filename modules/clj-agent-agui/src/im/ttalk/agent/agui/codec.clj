@@ -35,6 +35,18 @@
   (or (some-> (get-in pending-tool [:tool-call :id]) str)
       (str run-id "-interrupt")))
 
+(def ^:private frontend-tool-response-schema
+  "**前端工具**那条 interrupt 该回什么：这次调用的**结果**，不是决策。
+
+   它要的不是批准——活在客户端，服务端只是停下来等它执行完把结果送回来
+   （ask-user 语义，见路由的 resume 分支）。给 decision 枚举是**误导**：客户端
+   照着回 `{\"status\":\"cancelled\"}`（取消不带载荷，协议里 payload 本就可选），
+   落到 `:reply` 那支就变成一个**空字符串结果**，模型据此宣布「已成功执行」
+   ——拒绝在语义上被吃掉，而且是往成功的方向吃。"
+  {:type "object"
+   :properties {:result {:description "这次工具调用的结果（客户端执行后回传）"}}
+   :required ["result"]})
+
 (def ^:private decision-response-schema
   "`Interrupt.responseSchema`：告诉前端「这条 interrupt 该回什么」，通用客户端
    照它渲染审批控件。
@@ -55,15 +67,37 @@
     :else "paused"))
 
 (defn- interrupt-of
-  "暂停事件 → AG-UI `Interrupt`。"
-  [{:keys [pending-tool] :as ev}]
-  (let [tc-id (get-in pending-tool [:tool-call :id])]
+  "暂停事件 → AG-UI `Interrupt`。
+
+   **两类挂起必须在 wire 上分得开**，因为 resume 走的是两支完全不同的路：
+
+   | `metadata.kind` | 挂起的是 | 客户端该回 |
+   |---|---|---|
+   | `\"approval\"` | 服务端 `:sensitive` 工具 | **决策**——活还在服务端等着干 |
+   | `\"frontend-tool\"` | 客户端声明的工具 | **结果**——活在客户端 |
+
+   曾经两者逐字段同形（都写「需要审批」、都给 decision 枚举），客户端没有任何
+   字段能分开：照审批去回 `{status:\"cancelled\"}`（不带 payload）落到前端工具那支
+   就成了**空字符串结果**，模型据此宣布「已成功执行」——拒绝往成功的方向被吃掉。
+
+   三处一起改，客户端照哪一处判都对：`reason` 的措辞、`responseSchema` 的形状、
+   `metadata.kind` 的标签。"
+  [{:keys [pending-tool pending-frontend?] :as ev}]
+  (let [tc-id (get-in pending-tool [:tool-call :id])
+        name* (str (:name pending-tool))]
     (cond-> {:id (interrupt-id ev)
-             :reason (reason-str (:reason ev))
-             :responseSchema (or (:response-schema ev) decision-response-schema)}
+             :reason (if pending-frontend?
+                       ;; 它要的不是批准，是**客户端去执行**
+                       (str "需要客户端执行并回传结果: " name*)
+                       (reason-str (:reason ev)))
+             :responseSchema (or (:response-schema ev)
+                                 (if pending-frontend?
+                                   frontend-tool-response-schema
+                                   decision-response-schema))}
       (:message ev) (assoc :message (str (:message ev)))
       tc-id         (assoc :toolCallId (str tc-id))
-      pending-tool  (assoc :metadata {:pendingTool {:name (:name pending-tool)
+      pending-tool  (assoc :metadata {:kind (if pending-frontend? "frontend-tool" "approval")
+                                      :pendingTool {:name (:name pending-tool)
                                                     :args (:args pending-tool)}}))))
 
 (def ^:private subagent-outcome-message

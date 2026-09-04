@@ -198,10 +198,25 @@
     (= :cancelled (:status result)) :run/cancelled
     :else                           :run/finished))
 
-(defn- terminal-payload [t result throwable]
+(defn- terminal-payload
+  "终态事件的载荷。`frontend-names` 是**本 run 客户端声明的那些工具名**——暂停时
+   要靠它区分两类挂起：
+
+   | 挂起的是 | 客户端该回什么 |
+   |---|---|
+   | 服务端 `:sensitive` 工具 | **决策**（approved / rejected），活还在服务端等着干 |
+   | 客户端声明的前端工具 | **这次调用的结果**（ask-user 语义），活在客户端 |
+
+   两者在 wire 上曾经**逐字段同形**（都写「需要审批」、都给 decision 枚举），
+   客户端没有任何字段能分开；而路由的 resume 分支是两支完全不同的路，于是
+   「拒绝」落到前端工具那支就变成了一个**空字符串结果**，模型据此宣布成功
+   （feedbacks/2026-09-04-frontend-tool-pause-looks-like-an-approval.md）。"
+  [t result throwable frontend-names]
   (case t
     :run/paused   {:reason (:pause-reason result)
                    :pending-tool (:pending-tool result)
+                   :pending-frontend? (contains? (or frontend-names #{})
+                                                 (str (:name (:pending-tool result))))
                    :tool-calls-made (:tool-calls-made result)}
     :run/error    {:error (or (:error result)
                               (when throwable
@@ -211,12 +226,12 @@
     {:text (:text result) :tool-calls-made (:tool-calls-made result)}))
 
 (defn- finish-run!
-  [entry run-id em result throwable ^CompletableFuture done]
+  [entry run-id em result throwable ^CompletableFuture done & [frontend-names]]
   (locking (:lock entry)
     (let [t (terminal-type em result throwable)]
       (when (= :run/finished t)
         (event/ensure-text! em (str run-id "-final") (:text result)))
-      (event/finish! em t (terminal-payload t result throwable))
+      (event/finish! em t (terminal-payload t result throwable frontend-names))
       (reset! (:awaiting entry)
               (when (= :run/paused t)
                 {:run-id run-id
@@ -255,6 +270,9 @@
                            :transform (when-let [f (:event-transform rt)]
                                         (f {:run-id run-id :conversation-id conv-id}))})
         _ (event/seed-state! em state)   ;; 客户端发上来的那份，作为 delta 的基线
+        ;; 本 run 里哪些工具是**客户端声明**的——暂停时要靠它区分「等审批」与
+        ;; 「等客户端执行」两类挂起（见 `terminal-payload`）
+        fe-names (agui-tools/frontend-names tools)
         done (CompletableFuture.)
         a (-> ((:agent-fn rt) {:conversation-id conv-id
                                ;; 写共享状态的两把工具**闭包在本 run 的发射器上**
@@ -285,11 +303,11 @@
       (-> (case kind
             :chat   (agent/chat-async a message invoke-opts)
             :resume (agent/resume-async a decision payload invoke-opts))
-          (flt/fmap   (fn [result] (finish-run! entry run-id em result nil done) result))
-          (flt/fcatch (fn [t] (finish-run! entry run-id em nil t done) nil)))
+          (flt/fmap   (fn [result] (finish-run! entry run-id em result nil done fe-names) result))
+          (flt/fcatch (fn [t] (finish-run! entry run-id em nil t done fe-names) nil)))
       (catch Throwable t
         ;; 同步抛出的（如 resume 的暂停态校验）——照样落进事件流，不甩给调用方
-        (finish-run! entry run-id em nil t done)))
+        (finish-run! entry run-id em nil t done fe-names)))
     {:status :started :run-id run-id :conversation-id conv-id :since since}))
 
 (defn- request-stop!*
@@ -418,7 +436,9 @@
                   (let [t (terminal-type em result throwable)]
                     (when (= :run/finished t)
                       (event/ensure-text! em (str run-id "-final") (:text result)))
-                    (event/finish! em t (terminal-payload t result throwable)))
+                    ;; 不留痕的 run 没有客户端声明的工具（`/suggest` 用的是
+                    ;; `ack-tool`，不走前端工具那条路），故 frontend-names 为 nil
+                    (event/finish! em t (terminal-payload t result throwable nil)))
                   (.complete done (or result {})))]
     (event/emit! em :run/started {:kind :suggest :input {:message message}})
     (try
