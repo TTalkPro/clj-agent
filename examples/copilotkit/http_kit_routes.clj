@@ -41,13 +41,40 @@
 ;;; SSE
 ;;; ============================================================
 
-(def ^:private cors-headers
-  "浏览器在 :3000，runtime 在 :4002 —— 跨源。`credentials` 我们不用，所以
-   `*` 就够；真部署换成你的域名白名单。"
+(def ^:private allowed-origins
+  "开发期的前端源白名单：Next dev 默认起在 :3000，端口被占时它自己退到 :3002，
+   两个都得认。真部署换成你的域名。"
+  #{"http://localhost:3000"  "http://127.0.0.1:3000"
+    "http://localhost:3002"  "http://127.0.0.1:3002"})
+
+(def ^:private ^:dynamic cors-headers
+  "当前请求的 CORS 头；`handler` 在每次请求最外层按 Origin 绑一次（默认值是
+   没有 Origin 时的退化形态）。做成动态变量是为了不用把 request 穿到每一个
+   `json-response` 调用点上去。
+
+   **方法表里必须有 `DELETE`**：`DELETE /threads/:id` 不是简单请求，浏览器
+   先发预检，表里没有它整条删除线程的路由在浏览器侧根本走不通（服务端那段
+   cond 永远等不到请求）。"
   {"Access-Control-Allow-Origin" "*"
-   "Access-Control-Allow-Methods" "GET, POST, OPTIONS"
+   "Access-Control-Allow-Methods" "GET, POST, DELETE, OPTIONS"
    "Access-Control-Allow-Headers" "Content-Type, Last-Event-ID, X-CopilotKit-Runtime-Client-GQL-Version"
-   "Access-Control-Max-Age" "86400"})
+   "Access-Control-Max-Age" "86400"
+   "Vary" "Origin"})
+
+(defn- cors-for
+  "按请求的 Origin 算 CORS 头。
+
+   白名单内**回声 Origin 并给 `Allow-Credentials`**——`*` 与 credentials 互斥，
+   前端一旦带上 cookie，回 `*` 的响应浏览器直接判死。名单外退回 `*`（本例不用
+   credentials 时照常可用）。回声了 Origin 就得给 `Vary: Origin`，否则中间缓存
+   会把 A 源的响应喂给 B 源。"
+  [request]
+  (let [origin (get-in request [:headers "origin"])]
+    (if (contains? allowed-origins origin)
+      (assoc cors-headers
+             "Access-Control-Allow-Origin" origin
+             "Access-Control-Allow-Credentials" "true")
+      cors-headers)))
 
 
 (def ^:private sse-headers
@@ -198,11 +225,19 @@
         ;; 走 `/run` 这条路发上来。这时候不能起 agent——照上游的做法，回一对
         ;; `RUN_STARTED` / `RUN_FINISHED{result}` 就完了。
         proxied (get-in body [:forwardedProps :__proxiedMCPRequest])
-        {:keys [conversation-id message agui-tools resume]}
+        {:keys [conversation-id message agui-tools resume context parent-run-id]}
         (cond-> (codec/parse-run-input body)
           ;; 入站插件的挂点（对称于 `:event-transform`）：`agui.a2ui` 用它把
           ;; `forwardedProps.a2uiAction`（用户在生成出来的界面上点了什么）接进本轮输入
           input-transform (input-transform body))
+        ;; 前端注册的本轮上下文（`useAgentContext`）→ 追加的 system 段。
+        ;; **两条腿都要给**：起 run 与 resume 后的续跑是同一轮对话的两段，
+        ;; 只给前者的话，审批点完之后模型就突然不知道自己在看哪个页面了。
+        ctx-opts (cond-> nil
+                   (codec/context->prompt context)
+                   (assoc :extra-system-prompts [(codec/context->prompt context)])
+                   ;; 客户端声明的父 run：原样回到 `RUN_STARTED.parentRunId`
+                   parent-run-id (assoc :parent-run-id parent-run-id))
         pending (rt/awaiting runtime conversation-id)
         pending-name (get-in pending [:pending-tool :name])
         resume-entry (matching-resume resume pending)
@@ -230,28 +265,33 @@
                  (and resume-entry (contains? server-tool-names pending-name))
                  (rt/resume-run! runtime conversation-id
                                  (resume-decision resume-entry)
-                                 (when (map? (:payload resume-entry)) (:payload resume-entry)))
+                                 (when (map? (:payload resume-entry)) (:payload resume-entry))
+                                 ctx-opts)
 
                  ;; 前端工具被 resolve：载荷**即**结果（ask-user 语义）
                  resume-entry
                  (rt/resume-run! runtime conversation-id "reply"
                                  {:message (str (or (:payload resume-entry)
-                                                    (:content tool-result)))})
+                                                    (:content tool-result)))}
+                                 ctx-opts)
 
                  ;; 审批：挂起的是**服务端**工具 → 载荷是决策，工具还要真去执行
                  (and pending tool-result (contains? server-tool-names pending-name))
                  (rt/resume-run! runtime conversation-id
-                                 (decision-of (:content tool-result)) nil)
+                                 (decision-of (:content tool-result)) nil
+                                 ctx-opts)
 
                  ;; 前端工具：载荷**即**工具结果（ask-user 语义）
                  (and pending tool-result)
                  (rt/resume-run! runtime conversation-id "reply"
-                                 {:message (str (:content tool-result))})
+                                 {:message (str (:content tool-result))}
+                                 ctx-opts)
 
                  :else
                  (rt/start-run! runtime conversation-id message
-                                {:tools (mapv agui-tools/frontend-tool real-frontend-tools)
-                                 :discard-pause? stale-frontend-pause?}))]
+                                (merge ctx-opts
+                                       {:tools (mapv agui-tools/frontend-tool real-frontend-tools)
+                                        :discard-pause? stale-frontend-pause?})))]
     (cond
       (and proxied mcp-proxy)
       ((sse-frames [{:type "RUN_STARTED" :threadId conversation-id :runId (:runId body)}
@@ -350,8 +390,14 @@
             ;; copilotkitSuggest」。第二轮 LLM 由 `ack-tool` 的 `:return-direct`
             ;; 挡掉，不是靠 `:max-iterations`——后者只限制**工具轮**的次数，
             ;; 工具跑完那次「总结一下」的 LLM 调用照发（实测）
-            :opts {:tool-choice (if (seq tools) :required :auto)
-                   :max-iterations 1}})))
+            ;; 建议 run 也带前端上下文——CopilotKit 的 suggestion-engine 同样
+            ;; 把 `context` 发上来（`suggestion-engine.ts:270`），少了它建议就
+            ;; 脱离了用户正在看的那一页
+            :opts (cond-> {:tool-choice (if (seq tools) :required :auto)
+                           :max-iterations 1}
+                    (codec/context->prompt (:context body))
+                    (assoc :extra-system-prompts
+                           [(codec/context->prompt (:context body))]))})))
        request))))
 
 (defn handle-connect
@@ -494,32 +540,33 @@
 (defn handler
   [runtime agent-ids base-path server-tool-names & [opts]]
   (fn [request]
-    (let [path (subs (:uri request) (min (count base-path) (count (:uri request))))]
-      (cond
-        (= :options (:request-method request))
-        {:status 204 :headers cors-headers}
+    (binding [cors-headers (cors-for request)]
+     (let [path (subs (:uri request) (min (count base-path) (count (:uri request))))]
+       (cond
+         (= :options (:request-method request))
+         {:status 204 :headers cors-headers}
 
-        (re-find #"/info$" path)    (json-response (codec/run-info agent-ids opts))
-        (re-find #"/run$" path)     (handle-run runtime server-tool-names opts request)
-        (re-find #"/suggest$" path) (if-let [spec (:agent-spec opts)]
-                                      (handle-suggest spec request)
-                                      {:status 404 :headers cors-headers
-                                       :body "suggest not enabled"})
-        (re-find #"/connect$" path) (handle-connect runtime request)
-        ;; 不属于 AG-UI：应用自己的审批端点（见 handle-approve）
-        (re-find #"/approve$" path) (handle-approve runtime request)
-        (re-find #"/pending$" path)  (handle-pending runtime)
-        ;; 线程只读面：把已有的东西暴露出来（见 handle-threads）
-        (re-find #"/threads" path)
-        (if-let [meta-atom (:thread-meta opts)]
-          (handle-threads runtime (:memory opts) meta-atom (first agent-ids) path request)
-          {:status 404 :headers cors-headers :body "threads not enabled"})
-        ;; threadId 是路径段：/agent/:id/stop/:threadId
-        (re-find #"/stop(/|$)" path)
-        (handle-stop runtime request
-                     (some-> (re-find #"/stop/([^/]+)$" path) second
-                             java.net.URLDecoder/decode))
-        :else {:status 404 :headers cors-headers :body "not found"}))))
+         (re-find #"/info$" path)    (json-response (codec/run-info agent-ids opts))
+         (re-find #"/run$" path)     (handle-run runtime server-tool-names opts request)
+         (re-find #"/suggest$" path) (if-let [spec (:agent-spec opts)]
+                                       (handle-suggest spec request)
+                                       {:status 404 :headers cors-headers
+                                        :body "suggest not enabled"})
+         (re-find #"/connect$" path) (handle-connect runtime request)
+         ;; 不属于 AG-UI：应用自己的审批端点（见 handle-approve）
+         (re-find #"/approve$" path) (handle-approve runtime request)
+         (re-find #"/pending$" path)  (handle-pending runtime)
+         ;; 线程只读面：把已有的东西暴露出来（见 handle-threads）
+         (re-find #"/threads" path)
+         (if-let [meta-atom (:thread-meta opts)]
+           (handle-threads runtime (:memory opts) meta-atom (first agent-ids) path request)
+           {:status 404 :headers cors-headers :body "threads not enabled"})
+         ;; threadId 是路径段：/agent/:id/stop/:threadId
+         (re-find #"/stop(/|$)" path)
+         (handle-stop runtime request
+                      (some-> (re-find #"/stop/([^/]+)$" path) second
+                              java.net.URLDecoder/decode))
+         :else {:status 404 :headers cors-headers :body "not found"})))))
 
 ;;; ============================================================
 ;;; 启动
@@ -547,6 +594,9 @@
                                  (:tools agent-spec))]
      {:server (hk/run-server (handler runtime ["default"] base-path server-tool-names
                                       {:open-generative-ui? open-generative-ui?
+                                       ;; `/info` 的线程档能力位——挂了 `/threads`
+                                       ;; 才报（见 `codec/run-info` 的 :threadEndpoints）
+                                       :threads? (boolean threads?)
                                        ;; 这两位都是 `/info` 的能力位：前端据此才注册
                                        ;; 对应的 renderer（`codec/run-info` 的注释）
                                        :a2ui? a2ui?
