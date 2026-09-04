@@ -17,10 +17,11 @@
 
 | # | 标题 | 报的人 | 严重度 | 回没回 |
 |---|---|---|---|---|
-| [2026-09-04](2026-09-04-agui-drops-multimodal-content-parts.md) | AG-UI 层不认 `InputContent` 部件 —— 图片被 `(str content)` 压成 data URI 字符串喂给模型 | happy | 🔴 不报错，内容全丢 | ✅ 已收（`8977df4`，采纳报方随附的补丁）|
-| [2026-09-04](2026-09-04-info-does-not-advertise-multimodal.md) | `/info` 不宣告多模态能力 ⇒ 客户端没法 gate 附件 UI，只能盲发 | happy | 🟡 能力位缺一格 | ✅ 已修：`run-info` 收 `:multimodal`，**装配方传**、库不猜；demo 缺省 `image=false`（M2.7 无视觉），`CLJ_AGENT_VISION=1` 打开 |
-| [2026-09-04](2026-09-04-threads-delete-blocked-by-cors.md) | `/threads/:id` 的 **DELETE 跨源过不去**（`Allow-Methods` 只有 GET, POST, OPTIONS）⇒ 写端点等于不存在 | happy | 🟡 配了却用不了，浏览器只说 Failed to fetch | ✅ 已修（`6d467b8`）：`Allow-Methods` 加 `DELETE`，并把 `:3000/:3002` 做成回声白名单 + `Allow-Credentials` |
-| [2026-09-04](2026-09-04-run-finished-has-no-usage.md) | `RUN_FINISHED` 不带 `usage` ⇒ 客户端的 token 用量环恒空（keel 那边带） | happy | 🟢 不挡事，但每个接入方都要撞一次 | ✅ 已修：每次 LLM 往返记一笔累在根发射器，四条 run 终态都带 `usage[]`（含子 agent 的账）|
+| [2026-09-04](2026-09-04-agui-drops-multimodal-content-parts.md) | AG-UI 层不认 `InputContent` 部件 —— 图片被 `(str content)` 压成 data URI 字符串喂给模型 | happy | 🔴 不报错，内容全丢 | ✅ 已修（`8977df4`，采纳报方随附的补丁）· **报方已复测**（glm-5.3-flash 上端到端验通）|
+| [2026-09-04](2026-09-04-info-does-not-advertise-multimodal.md) | `/info` 不宣告多模态能力 ⇒ 客户端没法 gate 附件 UI，只能盲发 | happy | 🟡 能力位缺一格 | ✅ 已修：`run-info` 收 `:multimodal`，**装配方传**、库不猜；demo 缺省 `image=false`（M2.7 无视觉），`CLJ_AGENT_PROVIDER=zhipu CLJ_AGENT_MODEL=glm-5.3-flash CLJ_AGENT_VISION=1` 换有视觉的模型 · **报方已复测** |
+| [2026-09-04](2026-09-04-threads-delete-blocked-by-cors.md) | `/threads/:id` 的 **DELETE 跨源过不去**（`Allow-Methods` 只有 GET, POST, OPTIONS）⇒ 写端点等于不存在 | happy | 🟡 配了却用不了，浏览器只说 Failed to fetch | ✅ 已修（`6d467b8`）：`Allow-Methods` 加 `DELETE`，并把 `:3000/:3002` 做成回声白名单 + `Allow-Credentials` · **报方已复测**（删除钮装回去了）|
+| [2026-09-04](2026-09-04-run-finished-has-no-usage.md) | `RUN_FINISHED` 不带 `usage` ⇒ 客户端的 token 用量环恒空（keel 那边带） | happy | 🟢 不挡事，但每个接入方都要撞一次 | ✅ 已修：每次 LLM 往返记一笔累在根发射器，四条 run 终态都带 `usage[]`（含子 agent 的账）· **报方已复测**（`cachedInputTokens` 点亮了缓存段）|
+| [2026-09-04](2026-09-04-retest-all-four-green.md) | **回执**：四条全部复测通过（换 glm-5.3-flash 之后多模态那条才真验得出来）；顺带确认 `threadEndpoints.mutations` 与 `suggestions` 两格已可用 | happy | — 回执 | ✅ 收到，**本轮无新账** |
 
 > 背景：happy（ClojureScript + UIx 的 AG-UI 客户端）2026-09-03/04 拿
 > `examples/copilotkit/demo_server.clj`（`:4002`）做主力联调后端，逐页对着
