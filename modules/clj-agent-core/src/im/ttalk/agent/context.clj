@@ -24,7 +24,14 @@
    （`:conversation-id` 由循环钉、`:tool/call-id` 由工具调用侧钉）。要把 context
    当状态快照发给前端 / 落盘时，先把这些去掉——它们对消费方没有意义，且会让
    「context 有没有变」这个判断被框架自己的噪声搅浑。"
-  #{:conversation-id :tool/call-id})
+  #{:conversation-id :tool/call-id
+    ;; 嵌套委派用的观察者工厂（`subagent/manager` 在 worker 线程上钉的）。
+    ;; 它是个函数，`edn-safe?` 本来就会把它挡在快照外——列在这里是为了**说清它
+    ;; 的身份**：框架自己的路由件，不是用户的状态槽。
+    :subagent/observer
+    ;; 续跑那一批的钥匙（`react/resume-subagent` 钉、`delegate` 读）。只对那一批
+    ;; 有效，用完即摘——留着会让下一轮的委派误以为自己也在续跑
+    :subagent/resume})
 
 ;;; ============================================================
 ;;; 创建

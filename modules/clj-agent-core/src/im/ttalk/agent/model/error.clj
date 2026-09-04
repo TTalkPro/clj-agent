@@ -91,6 +91,11 @@
    - :transient   重试同一调用有意义（超时/限流/网络抖动）→ 工具级自动重试
                   （仅当工具声明 :retry；幂等前提）
    - :environment 模型修不了、重试无用（认证失效/配额/磁盘满）→ 屏障处暂停等人
+   - :subagent-suspended **不是失败**：委派出去的子 agent 停下来等人答复了
+     （`subagent/delegate` 抛的）→ 屏障处暂停，resume 时**续跑那个子 agent**
+     而不是重跑这次调用。单列一类是因为措辞会到用户眼前
+     （`RUN_FINISHED.outcome.interrupts[].reason`），借 `:environment` 会写成
+     「环境类错误」——而这压根不是错误
 
    判定顺序：
    1. ex-data 显式 :error-class（工具作者标注，最高优先级）

@@ -203,7 +203,12 @@
                    (catch Throwable t
                      (let [{:keys [message class]} (err/contain-throwable t)]
                        {:result (str "错误: " message)
-                        :error  {:class class :message message}}))))
+                        ;; **ex-data 一并带上**：工具作者用 `:error-class` 标注的
+                        ;; 那类异常，屏障处的路由分支往往还要读同一份 ex-data 里的
+                        ;; 别的键（`:subagent-suspended` 靠 `:spawn-id` 找到停着的
+                        ;; 那个子 agent）。只留 class/message 的话信息在这里就断了
+                        :error  (cond-> {:class class :message message}
+                                  (ex-data t) (assoc :data (ex-data t)))}))))
                (let [tool-var (get (:tool-vars reg) fn-key)]
                  (fn [req]
                    (let [exec (try (tool/invoke tool-var (:args req) (:context req))
