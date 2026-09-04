@@ -225,7 +225,7 @@
 
    `chat-async` / `resume-async` **立刻返回 deferred**（整轮跑在虚拟线程上），
    所以锁只握住「装配 + 派发」这一小段，不握住 LLM 往返。"
-  [rt entry kind {:keys [message decision payload tools opts]}]
+  [rt entry kind {:keys [message decision payload tools opts parent-run-id]}]
   (let [conv-id (:conversation-id entry)
         ;; **起跑前的水位**：run 一旦起跑就立刻发 `:run/started`，而 HTTP 层要等
         ;; 拿到返回值才订阅——中间这一段是真空。把水位交出去，调用方用它作
@@ -238,6 +238,10 @@
                            :conversation-id conv-id
                            :next-seq (next-seq-fn entry)
                            :sink (make-sink entry)
+                           ;; 会话锁交给发射器：取号 + 记账 + 投递在它里面一次做完
+                           ;; （见 `event/deliver!`）。`subscribe` 拿的也是这把，
+                           ;; 于是「重放完到注册完」那段照旧不会与扇出交错
+                           :gate (:lock entry)
                            :now (:now rt)
                            ;; 插件的 transform 是**有状态的**（要记住这一轮见过哪些
                            ;; tool-call），所以按 run 现造一个，不是全局共享一个
@@ -258,7 +262,12 @@
                           :done done :kind kind :started-at ((:now rt))})
     (event/emit! em :run/started (cond-> {:kind kind}
                                    message  (assoc :input {:message message})
-                                   decision (assoc :input {:decision decision :payload payload})))
+                                   decision (assoc :input {:decision decision :payload payload})
+                                   ;; 调用方声明的父 run（AG-UI 的
+                                   ;; `RunAgentInput.parentRunId`）。**原样带着走**：
+                                   ;; 我们不解释它，只让它出现在 `RUN_STARTED` 上，
+                                   ;; 客户端据此把这条 run 挂回它的父链
+                                   parent-run-id (assoc :parent-run-id parent-run-id)))
     (try
       (-> (case kind
             :chat   (agent/chat-async a message invoke-opts)
@@ -343,16 +352,23 @@
    时，正确的做法是丢掉它继续，而不是把会话永远卡住。**缺省仍是拒绝**（§4.4）：
    人工审批被静默丢掉是隐蔽的语义损失，要丢就显式说。
 
+   `:parent-run-id` —— 调用方声明「这一轮挂在哪条 run 下面」。我们**不解释**它
+   （不建父子索引、不做级联停止），只把它挂到 `:run/started` 上原样发出去：
+   AG-UI 的 `RUN_STARTED.parentRunId` 就是这么个用途，客户端拿它把这条 run 接回
+   父链。协议里它是可选的，没有就没有。
+
    `opts` 直通 `agent/chat-async`（`:system-prompt` / `:max-iterations` / `:tool-choice` …）；
    `:tools` 是本 run 追加的内联工具，会交给 `:agent-fn`。"
   ([rt conv-id message] (start-run! rt conv-id message nil))
-  ([rt conv-id message {:keys [tools discard-pause?] :as opts}]
+  ([rt conv-id message {:keys [tools discard-pause? parent-run-id] :as opts}]
    (when @(:closed? rt) (throw (ex-info "runtime 已关闭" {:conversation-id conv-id})))
    (let [entry (entry-of! rt conv-id)]
      (start-or-supersede! rt entry :chat
                           {:message message :tools tools
                            :discard-pause? discard-pause?
-                           :opts (dissoc opts :tools :discard-pause?)}))))
+                           :parent-run-id parent-run-id
+                           ;; 这三个是 runtime 自己的键，别漏进 chat-async 的 opts
+                           :opts (dissoc opts :tools :discard-pause? :parent-run-id)}))))
 
 (defn run-detached!
   "在一个**临时发射器**上跑一次 agent 调用——**不进注册表**：没有会话条目、
@@ -424,7 +440,8 @@
        (do (reset! (:awaiting entry) nil)
            (start-or-supersede! rt entry :resume
                                 {:decision decision :payload payload :tools tools
-                                 :opts (dissoc opts :tools)}))))))
+                                 :parent-run-id (:parent-run-id opts)
+                                 :opts (dissoc opts :tools :parent-run-id)}))))))
 
 (defn stop!
   "请求停止。**返回 true 只表示「取消已登记」，不表示「已经停了」**——JVM 上没有

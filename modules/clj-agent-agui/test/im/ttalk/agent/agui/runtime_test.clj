@@ -63,6 +63,28 @@
              (->> (memory/mem-get store "c1") (filter #(= :assistant (:role %))) last :content)))
       (rt/shutdown! r))))
 
+(deftest parent-run-id-test
+  (testing ":parent-run-id 落到 :run/started 上——AG-UI 的 RUN_STARTED.parentRunId
+            就这一次机会（RUN_FINISHED / RUN_ERROR 没有这一位）"
+    (let [r (sup/runtime {:provider (sup/provider [{:text "好"}])})
+          c (sup/collector)
+          _ (rt/subscribe r "c1" {:on-event (:on-event c)})]
+      (rt/start-run! r "c1" "hi" {:parent-run-id "parent-1"})
+      (sup/wait-for #(sup/terminal-event ((:events c))))
+      (let [started (->> ((:events c)) (filter #(= :run/started (:type %))) first)]
+        (is (= "parent-1" (:parent-run-id started))))
+      (rt/shutdown! r)))
+
+  (testing "不传就没有这个键——不是 nil 占位"
+    (let [r (sup/runtime {:provider (sup/provider [{:text "好"}])})
+          c (sup/collector)
+          _ (rt/subscribe r "c1" {:on-event (:on-event c)})]
+      (rt/start-run! r "c1" "hi")
+      (sup/wait-for #(sup/terminal-event ((:events c))))
+      (let [started (->> ((:events c)) (filter #(= :run/started (:type %))) first)]
+        (is (not (contains? started :parent-run-id))))
+      (rt/shutdown! r))))
+
 (deftest reconnect-since-test
   (testing "断线重连按 :since 补缺口——拼起来与全程在线逐字相同"
     (let [r (sup/runtime {:provider (sup/provider [{:text "一二三四五六七八"}] {:chunk-size 1 :delay-ms 5})})
