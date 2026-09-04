@@ -134,7 +134,10 @@
    ;; 配了 :on-pause 才启用「敏感工具自动暂停」
    :on-pause (fn [{:keys [pending-tool]}]
                (println "  [pause] 等审批:" (:name pending-tool)))
-   :system-prompt "你是一个中文助手。需要查天气就调用 get-weather 工具。"})
+   :system-prompt (str "你是一个中文助手。需要查天气就调用 get-weather 工具。"
+                       "涉及「共享状态」「待办列表」这类要让界面看见的数据时，"
+                       "用 AGUISendStateSnapshot 建立整份状态、"
+                       "用 AGUISendStateDelta 增量修改。")})
 
 (defn make-spec []
   ;; 插件是**一层包装**，不是配置项：不装就完全不存在于这份 spec 里
@@ -150,6 +153,18 @@
    `suggestions: false`，前端于是把 `copilotkitSuggest` 塞进 `/run` 的 tools
    里自己凑合——设计文档 §9.10 第 5 条那个「输入框敲了字发不出去」就是那么来的。"
   (not= "0" (System/getenv "CLJ_AGENT_SUGGEST")))
+
+(def state-tools?
+  "给模型两把**写共享状态**的工具（`AGUISendStateSnapshot` / `AGUISendStateDelta`）
+   —— **默认开**，`CLJ_AGENT_STATE=0` 关掉。
+
+   读面（`/threads/:id/state` + 事件缓冲里的 `:state/snapshot`）本来就有；缺的一直
+   是写的那半边，于是那条链永远不启动、状态页恒空
+   （feedbacks/2026-09-04-agui-no-shared-state-tools-or-delta.md）。
+
+   开着会**改变模型看见的工具列表**（多两把），所以这是装配方的决定，不是库的
+   缺省；`/info` 的 `capabilities.state` 跟着这一位报，报了就得真写得动。"
+  (not= "0" (System/getenv "CLJ_AGENT_STATE")))
 
 (def threads?
   "线程只读面（`/threads*`）——**默认开**。把已有的东西暴露出来：会话表 +
@@ -177,7 +192,7 @@
   (= "1" (System/getenv "CLJ_AGENT_VISION")))
 
 (defn- plugin-opts [spec]
-  (cond-> {:suggestions? suggest? :threads? threads?
+  (cond-> {:suggestions? suggest? :threads? threads? :state-tools? state-tools?
            ;; 只报真支持的：输出侧我们一样都不产（不生成图片 / 音频）
            :multimodal {:input {:image vision? :pdf false :audio false :video false}
                         :output {:image false :audio false}}
@@ -248,6 +263,9 @@
      (println (if threads?
                 "  · /threads 线程只读面：开"
                 "  · /threads 线程只读面：关（CLJ_AGENT_THREADS=0）"))
+     (println (if state-tools?
+                "  · 共享状态：开（模型可发 STATE_SNAPSHOT / STATE_DELTA）"
+                "  · 共享状态：关（CLJ_AGENT_STATE=1 打开）"))
      (println (if vision?
                 "  · 多模态输入：报 image=true（CLJ_AGENT_VISION=1）"
                 "  · 多模态输入：报 image=false（MiniMax-M2.7 无视觉；CLJ_AGENT_VISION=1 打开）"))

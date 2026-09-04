@@ -31,6 +31,7 @@
             [clojure.string :as str]
             [im.ttalk.agent.agui.codec :as codec]
             [im.ttalk.agent.agui.runtime :as rt]
+            [im.ttalk.agent.agui.state :as agui-state]
             [im.ttalk.agent.agui.tools :as agui-tools]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.simple-agent :as agent]
@@ -225,7 +226,7 @@
         ;; 走 `/run` 这条路发上来。这时候不能起 agent——照上游的做法，回一对
         ;; `RUN_STARTED` / `RUN_FINISHED{result}` 就完了。
         proxied (get-in body [:forwardedProps :__proxiedMCPRequest])
-        {:keys [conversation-id message agui-tools resume context parent-run-id]}
+        {:keys [conversation-id message agui-tools resume context parent-run-id state]}
         (cond-> (codec/parse-run-input body)
           ;; 入站插件的挂点（对称于 `:event-transform`）：`agui.a2ui` 用它把
           ;; `forwardedProps.a2uiAction`（用户在生成出来的界面上点了什么）接进本轮输入
@@ -291,7 +292,10 @@
                  (rt/start-run! runtime conversation-id message
                                 (merge ctx-opts
                                        {:tools (mapv agui-tools/frontend-tool real-frontend-tools)
-                                        :discard-pause? stale-frontend-pause?})))]
+                                        :discard-pause? stale-frontend-pause?
+                                        ;; 共享状态的基线：客户端那份原样交给
+                                        ;; runtime，后续 delta 对着它算
+                                        :state state})))]
     (cond
       (and proxied mcp-proxy)
       ((sse-frames [{:type "RUN_STARTED" :threadId conversation-id :runId (:runId body)}
@@ -470,6 +474,26 @@
      :createdAt (iso-now (or (:created-at m) (:last-active st)))
      :updatedAt (iso-now (:last-active st))}))
 
+(defn- fold-state
+  "缓冲里的状态事件折成**当前值**：最后一条快照 + 其后的所有 delta。
+
+   ⚠️ 只取最后一条快照是不够的（这里原来就是那么写的）——有了 `STATE_DELTA`
+   之后，「改完再读」会读到改之前的值：增量根本没算进去。实测过：加完第二条
+   待办，读面还停在第一条。
+
+   ⚠️ 缓冲是**有界**的（`rt/buffered-events`，缺省 512 条）。快照被挤出去之后
+   这里只剩下一串 delta，折出来的就是残的 —— 与「事件缓冲不是真相店」这条既有
+   性质同源（真相在客户端那份 state 里，我们只做尽力而为的只读面）。没有任何
+   状态事件时返回 nil，与从前一致。"
+  [events]
+  (reduce (fn [st ev]
+            (case (:type ev)
+              :state/snapshot (:state ev)
+              :state/delta    (agui-state/apply-ops st (:delta ev))
+              st))
+          nil
+          events))
+
 (defn handle-threads
   "`/threads*` —— **把已有的东西暴露出来**，不是新建一套存储：
 
@@ -512,10 +536,7 @@
       (json-response {:events (codec/events->agui (rt/buffered-events runtime thread-id))})
 
       (re-find #"/threads/[^/]+/state$" path)
-      (json-response {:state (some->> (rt/buffered-events runtime thread-id)
-                                      (filter #(= :state/snapshot (:type %)))
-                                      last
-                                      :state)})
+      (json-response {:state (fold-state (rt/buffered-events runtime thread-id))})
 
       (re-find #"/threads/[^/]+/archive$" path)
       (do (swap! meta-atom assoc-in [thread-id :archived] true)
@@ -582,10 +603,12 @@
   ([port agent-spec base-path] (start! port agent-spec base-path nil))
   ([port agent-spec base-path {:keys [event-transform input-transform open-generative-ui?
                                       a2ui? suggestions? mcp-proxy threads? multimodal
-                                      parallel-tools? max-iterations]}]
+                                      parallel-tools? max-iterations state-tools?]}]
    (let [runtime (rt/runtime (cond-> {:agent-fn (agui-tools/agent-fn agent-spec)
                                       ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled）
-                                      :on-concurrent :supersede}
+                                      :on-concurrent :supersede
+                                      ;; 模型写共享状态的两把工具（见 rt/runtime）
+                                      :state-tools? (boolean state-tools?)}
                                ;; 事件流插件（如 agui.a2ui / copilotkit.genui）；不传就完全不存在
                                event-transform (assoc :event-transform event-transform)))
          ;; 服务端工具名：用来把「前端同名声明」认成**渲染意图**而不是新工具
@@ -605,6 +628,10 @@
                                        ;; （工具引擎是不是并行的、循环上限是多少）
                                        :parallel-tools? parallel-tools?
                                        :max-iterations max-iterations
+                                       ;; 装了写状态的工具才报 state 能力位——
+                                       ;; 读面一直都在，但没有写的那一半，报 true
+                                       ;; 就是谎报（模型根本写不动）
+                                       :state? (boolean state-tools?)
                                        ;; 这两位都是 `/info` 的能力位：前端据此才注册
                                        ;; 对应的 renderer（`codec/run-info` 的注释）
                                        :a2ui? a2ui?
