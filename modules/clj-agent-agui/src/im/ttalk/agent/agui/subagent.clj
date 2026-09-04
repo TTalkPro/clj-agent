@@ -47,6 +47,15 @@
    在这里偷偷截一刀只会让两处说法不一致。"
   [outcome]
   (cond
+    ;; **挂起不是失败**：AG-UI 为它留了 `outcome.type = "suspended"`，报成
+    ;; SUBAGENT_ERROR 前端会画成红条。`interruptIds` 要与父那条
+    ;; `RUN_FINISHED.outcome.interrupts[].id` 用同一套 id（都取 pending 工具的
+    ;; tool-call id，见 `codec/interrupt-id`），客户端才对得上号
+    (contains? outcome :suspended)
+    {:outcome :suspended
+     :interrupt-ids (keep (fn [k] (some-> (get-in outcome [:suspended k :tool-call :id]) str))
+                          [:pending-tool])}
+
     ;; **`:ok` 的值就是协议里那个 `SUBAGENT_FINISHED.result`**——以前扔掉了。
     ;; 它已经经由 `delegate/safe-result-str` 进过工具结果的正文，所以这里带上
     ;; 不是新的暴露面，只是把协议那一位填上（脱敏若要做，在 delegate 那层统一做）
@@ -72,10 +81,15 @@
    10 路并发共用一个实例会共用 `:current-message`，token 于是交错进同一条消息
    （设计文档 §3.3 契约 4）。
 
-   **嵌套（子 agent 再委派）本层不接线**：事件层支持（`subagent-emitter` 认父 lane，
-   有测试钉住），但要让子 agent 自己的 `delegate-tool` 拿到这条 lane 的工厂，
-   `:subagent-fn` 得能收到它——那是 `delegate` 的签名变更，等真实需求
-   （设计文档 §7.5 同款判据）。"
+   **嵌套（子 agent 再委派）已接线**：观察者多交出一个 `:child-observer`
+   ——以本 lane 为父再造的同一个工厂。`subagent/manager` 在 worker 线程上把它钉进
+   子 agent 的 ToolContext（`:subagent/observer`），子 agent 里那把 `delegate-tool`
+   在 handler 期取用（工具声明里显式给的 `:observer` 优先）。于是孙子 lane 开在
+   这条 lane 底下，`parentSubagentRunId` 有值。
+
+   **没有走 `:subagent-fn` 的签名变更**：那条路走不通——`subagent-fn` 在 lane 还不
+   存在时就被调了（handler → subagent-fn → spec → spawn → observer-of → lane）。
+   ToolContext 这条路顺序才对：lane 先造，agent 后建。"
   [parent]
   (fn [{:keys [id attempt name task parent-tool-call-id]}]
     (let [lane (event/subagent-emitter parent {:subagent-run-id (lane-id id attempt)})]
@@ -90,4 +104,9 @@
                                 :parent-message-id
                                 (when parent-tool-call-id
                                   (event/tool-parent-message parent parent-tool-call-id))}))
-       :settle!   (fn [outcome] (event/finish-subagent! lane (finish-of outcome)))})))
+       :settle!   (fn [outcome] (event/finish-subagent! lane (finish-of outcome)))
+       ;; **嵌套**：以本 lane 为父再造一个工厂，交给 manager 钉进子 agent 的
+       ;; ToolContext。子 agent 里那把 `delegate-tool` 于是把孙子 lane 开在这条
+       ;; lane 底下，`SUBAGENT_STARTED.parentSubagentRunId` 也就有值了。
+       ;; 事件层本来就认父 lane（`subagent-emitter` 读父 tag），差的一直是这根线。
+       :child-observer (observer-factory lane)})))

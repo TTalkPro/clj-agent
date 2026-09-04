@@ -540,13 +540,15 @@
    **这两个类型都不进 `terminal-types`**：那个集合是 run 的终态，`expand` 靠它决定
    「终态不过 transform」。lane 的收尾必须过 transform——它得受父 run 终态守卫的管，
    否则父 run 收口之后还能补出一条 `SUBAGENT_FINISHED`。这里的幂等靠自己标记。"
-  [em {:keys [outcome error result]}]
+  [em {:keys [outcome error result interrupt-ids]}]
   (when-not (terminal-of em)
     (close-lanes! em)                  ;; 嵌套：内层 lane 先于外层收口
     (close-open! em true)
     (if error
       (emit! em :subagent/error {:error error})
       (emit! em :subagent/finished (cond-> {:outcome (or outcome :success)}
-                                     (some? result) (assoc :result result))))
+                                     (some? result) (assoc :result result)
+                                     (seq interrupt-ids) (assoc :interrupt-ids
+                                                                (vec interrupt-ids)))))
     (swap! (:state em) assoc :terminal (if error :subagent/error :subagent/finished))
     nil))

@@ -9,7 +9,8 @@
             [im.ttalk.agent.agui.subagent :as subagent]
             [im.ttalk.agent.agui.support :as sup]
             [im.ttalk.agent.simple-agent :as agent]
-            [im.ttalk.agent.subagent.delegate :as delegate]))
+            [im.ttalk.agent.subagent.delegate :as delegate]
+            [im.ttalk.agent.tool :refer [deftool]]))
 
 ;;; ============================================================
 ;;; 端到端
@@ -144,6 +145,146 @@
                  (set (map (fn [[_ evs]] (apply str (map :text evs))) by-lane))))
           (is (every? (fn [[_ evs]] (= 1 (count (set (map :message-id evs))))) by-lane)
               "一条 lane 一个 message-id——共用发射器的话这里就串了"))))))
+
+(deftest nested-delegation-test
+  (testing "子 agent 再委派：孙 lane 开在父 lane 底下，parentSubagentRunId 有值。
+
+            接线在三处：观察者交出 `:child-observer`（以本 lane 为父的同一个工厂）→
+            `manager/do-run` 把它钉进子 agent 的 ToolContext（`:subagent/observer`）→
+            子 agent 里那把 `delegate-tool` 在 **handler 期**取用。
+
+            走不通的那条路是改 `:subagent-fn` 的签名：它在 lane 还不存在时就被调了
+            （handler → subagent-fn → spec → spawn → observer-of → lane）。"
+    (let [inner-spec (fn [_ _]
+                       {:provider (sup/provider [{:text "孙子答完了"}])
+                        :memory false})
+          mid-spec (fn [_ _]
+                     {:provider (sup/provider
+                                 [{:text nil :tool-calls [{:id "tc-inner" :name "dig"
+                                                           :args {:task "里层"}}]}
+                                  {:text "中层汇总"}])
+                      :memory false
+                      ;; ⭐ 这把工具**没有** :observer——全靠 ToolContext 那条线
+                      :tools [(delegate/delegate-tool
+                               {:name "dig" :subagent-name "digger-inner"
+                                :subagent-fn inner-spec :timeout 10000})]})
+          r (rt/runtime
+             {:subagent-events? true
+              :agent-fn
+              (fn [{:keys [conversation-id tools subagent-observer]}]
+                (agent/create-agent
+                 {:provider (sup/provider
+                             [{:text nil :tool-calls [{:id "tc-outer" :name "dig"
+                                                       :args {:task "外层"}}]}
+                              {:text "都查完了"}])
+                  :memory false :conversation-id conversation-id
+                  :tools (conj (vec tools)
+                               (delegate/delegate-tool
+                                {:name "dig" :subagent-name "digger-outer"
+                                 :subagent-fn mid-spec
+                                 :observer subagent-observer
+                                 :timeout 10000}))}))})
+          events (run-once! r)
+          starts (filterv #(= :subagent/started (:type %)) events)
+          by-name (into {} (map (juxt :name identity)) starts)
+          outer (by-name "digger-outer")
+          inner (by-name "digger-inner")]
+
+      (is (= 2 (count starts)) "两层委派 = 两条 lane")
+      (is (nil? (:parent-subagent-run-id outer)) "外层挂在 run 上，没有父 lane")
+      (is (= (:subagent-run-id outer) (:parent-subagent-run-id inner))
+          "⭐ 里层的父就是外层那条 lane——以前这一位恒为 nil")
+
+      (testing "协议侧：parentSubagentRunId 只出现在嵌套那条上"
+        (let [agui (into {} (map (juxt :name identity))
+                         (mapv codec/->agui starts))]
+          (is (nil? (get-in agui ["digger-outer" :parentSubagentRunId])))
+          (is (= (:subagent-run-id outer)
+                 (get-in agui ["digger-inner" :parentSubagentRunId])))))
+
+      (testing "孙子的文本带的是**里层**那条 lane 的归属"
+        (let [inner-text (->> events
+                              (filter #(and (= :message/delta (:type %))
+                                            (= (:subagent-run-id inner) (:subagent-run-id %))))
+                              (map :text)
+                              (apply str))]
+          (is (= "孙子答完了" inner-text))))
+
+      (testing "契约不变：seq 无洞、终态恰好一个且在最后"
+        (is (= (range (count events)) (mapv :seq events)))
+        (is (= :run/finished (:type (last events))))))))
+
+(deftool ^:private danger-tool
+  "危险操作（敏感，会触发审批暂停）"
+  [[what :string "做什么"]]
+  {:sensitive true}
+  (str "已执行:" what))
+
+(deftest suspended-subagent-test
+  (testing "子 agent 撞上敏感工具 → **挂起不是失败**：父跟着停下等人，人批准之后
+            续跑的是**停着的那一个**，不是重开一个新的。
+
+            AG-UI 为这条留了 `SUBAGENT_FINISHED.outcome = suspended`；报成
+            SUBAGENT_ERROR 前端会画成红条。"
+    (let [parent-provider (sup/provider
+                           [{:text nil :tool-calls [{:id "tc-1" :name "dig" :args {:task "去干"}}]}
+                            {:text "父：都办完了"}])
+          sub-fn (fn [_ _]
+                   {:provider (sup/provider
+                               [{:text nil :tool-calls [{:id "sub-tc" :name "danger-tool"
+                                                         :args {:what "删库"}}]}
+                                {:text "子 agent：批准后干完了"}])
+                    :memory false
+                    :tools [#'danger-tool]
+                    :on-pause (fn [_] nil)})
+          r (rt/runtime
+             {:subagent-events? true
+              :agent-fn (fn [{:keys [conversation-id tools subagent-observer]}]
+                          (agent/create-agent
+                           {:provider parent-provider :memory false
+                            :conversation-id conversation-id
+                            :on-pause (fn [_] nil)
+                            :tools (conj (vec tools)
+                                         (delegate/delegate-tool
+                                          {:name "dig" :subagent-name "digger"
+                                           :subagent-fn sub-fn
+                                           :observer subagent-observer
+                                           :timeout 10000}))}))})
+          c (sup/collector)
+          _ (rt/subscribe r "c1" {:on-event (:on-event c)})]
+      (rt/start-run! r "c1" "去办")
+      (sup/wait-for #(sup/terminal-event ((:events c))) 30000)
+
+      (testing "第一段：子 agent 挂起，父收口成 interrupt"
+        (let [fin (first (filter #(= :subagent/finished (:type %)) ((:events c))))
+              paused (first (filter #(= :run/paused (:type %)) ((:events c))))]
+          (is (= :suspended (:outcome fin)) "不是 :success 也不是走 :subagent/error")
+          (is (= {:type "SUBAGENT_FINISHED"
+                  :subagentRunId (:subagent-run-id fin)
+                  :outcome {:type "suspended" :interruptIds ["sub-tc"]}}
+                 (codec/->agui fin)))
+          (is (some? paused))
+          (testing "⭐ interruptIds 与父那条 interrupt 的 id 是**同一套**——
+                    客户端靠它把子 agent 那张卡片与审批条对上号"
+            (is (= (get-in (codec/->agui fin) [:outcome :interruptIds])
+                   (mapv :id (get-in (codec/->agui paused) [:outcome :interrupts])))))
+          (testing "审批条问的是**子 agent 里那把敏感工具**，不是委派工具本身"
+            (is (= "danger-tool"
+                   (get-in (codec/->agui paused)
+                           [:outcome :interrupts 0 :metadata :pendingTool :name]))))))
+
+      (testing "第二段：批准之后**续跑那一个**，产出回到父的工具结果"
+        (let [before (count ((:events c)))]
+          (rt/resume-run! r "c1" "approved" nil)
+          (sup/wait-for (fn [] (some #(= :run/finished (:type %)) ((:events c)))) 30000)
+          (let [tail (drop before ((:events c)))]
+            (is (= "子 agent：批准后干完了"
+                   (:content (first (filter #(= :tool/result (:type %)) tail))))
+                "重开一个新的会把人刚才的答复扔了、token 再烧一遍")
+            (is (empty? (filter #(= :subagent/started (:type %)) tail))
+                "⭐ 没有第二次 SUBAGENT_STARTED——续的是停着的那条 lane")
+            (is (= :run/finished (:type (last tail)))))))
+      (rt/shutdown! r))))
 
 (deftest switch-off-changes-nothing-test
   (testing "开关关着：一条 lane 事件都没有，也没有任何归属字段"

@@ -171,11 +171,22 @@
 
     :subagent/finished
     (let [oc (or (:outcome ev) :success)]
-      (if (= :success oc)
+      (cond
+        ;; 挂起：停下来等人，不是跑完也不是跑崩。`interruptIds` 让客户端把这张
+        ;; 卡片与父 run 那条 interrupt 对上号
+        (= :suspended oc)
+        (cond-> {:type "SUBAGENT_FINISHED" :subagentRunId (:subagent-run-id ev)
+                 :outcome {:type "suspended"}}
+          (seq (:interrupt-ids ev))
+          (assoc-in [:outcome :interruptIds] (vec (:interrupt-ids ev))))
+
+        (= :success oc)
         (cond-> {:type "SUBAGENT_FINISHED" :subagentRunId (:subagent-run-id ev)
                  :outcome {:type "success"}}
           ;; 可选的完成载荷，语义同 `RUN_FINISHED.result`
           (some? (:result ev)) (assoc :result (:result ev)))
+
+        :else
         {:type "SUBAGENT_ERROR" :subagentRunId (:subagent-run-id ev)
          :message (get subagent-outcome-message oc "子 agent 未正常结束")
          :code (name oc)}))
@@ -199,6 +210,16 @@
     :activity/delta    {:type "ACTIVITY_DELTA" :messageId message-id
                         :activityType (:activity-type ev)
                         :patch (:patch ev)}
+    ;; **不逐条打 `subagentRunId`**：协议留了这一位（一条快照可能混着多个生产者的
+    ;; 消息），但在我们的架构里没有东西可归属——快照取自**父会话的 ChatMemory**
+    ;; （`runtime/subscribe` 的 resync 分支），而子 agent 缺省 `:memory false`
+    ;; （`subagent/manager` 的 do-run），跑在自己那份一次性 store 里，产出以**工具
+    ;; 结果字符串**回到父历史，不是以消息落进去。父历史里每一条都是父自己的。
+    ;;
+    ;; 唯一的例外是用户显式给子 agent 传了与父同一个 store —— 那时子的消息确实会
+    ;; 混进来，但我们也无从知道哪条是谁写的（中立消息没有 lane 字段，落库那一步
+    ;; 也不认识 lane）。要做得给 memory filter 加「写入时打标」，成本不小而只覆盖
+    ;; 一个反常用法。**故意不做**，别下次审计又把它列成缺口。
     :run/resync     {:type "MESSAGES_SNAPSHOT"
                      :messages (into [] (map-indexed (fn [i m] (message->agui m i)))
                                      (:messages ev))}
