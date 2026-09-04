@@ -94,6 +94,24 @@
                   :owner   (:owner spec)
                   :parent-tool-call-id (:parent-tool-call-id spec)})))
 
+(defn- run-result
+  "子 agent 一段执行的结果 → manager 的 outcome。
+
+   **`:paused` 不是失败**：子 agent 撞上敏感工具停下来等人，与「跑崩了」是两回事。
+   AG-UI 为它留了专门的收尾形状（`SUBAGENT_FINISHED.outcome` 的 suspended 那支），
+   报成 `SUBAGENT_ERROR` 前端就会画成红条。
+
+   挂起时把 **agent 实例本身**带出来：resume 要恢复的是**这一个**状态机
+   （它的 `state-atom` / PauseStore 里存着暂停快照），重新 `create-agent` 出来的
+   那个不认得这次暂停。"
+  [agent resp rfn]
+  (case (:status resp)
+    :completed {:ok (rfn resp)}
+    :paused    {:suspended {:agent agent
+                            :pending-tool (:pending-tool resp)
+                            :reason (:pause-reason resp)}}
+    {:error {:status (:status resp) :detail resp}}))
+
 (defn- do-run
   "在独立线程中创建并运行子 agent，返回 {:ok result-str} 或 {:error reason}。
    使用延迟 require 避免与 client 的循环依赖（manager 在 client 之后加载）。
@@ -111,14 +129,24 @@
             config (merge {:memory false
                            :conversation-id (str "sub-" (java.util.UUID/randomUUID))}
                           subagent-config)
+            ;; **嵌套委派的接线**：观察者可以给出一个「以自己为父」的子工厂
+            ;; （`:child-observer`）。把它钉进子 agent 的 ToolContext，子 agent
+            ;; 里那把 `delegate-tool` 在 handler 里取用（`delegate` 的
+            ;; `:observer` 缺省回落到这个键），于是孙子 lane 认得它的父 lane。
+            ;;
+            ;; ⚠️ 这**不是**「让调用方的 ambient 状态穿过边界」——那条禁令
+            ;; （`spawn-worker!` 不用 `bound-fn*`）针对的是隐式继承；这里是
+            ;; 观察者**显式交出来**、经 config 显式传进去的一件东西。
+            config (cond-> config
+                     (:child-observer observer)
+                     (update :tool-context assoc
+                             :subagent/observer (:child-observer observer)))
             agent  (create-agent config)
             ;; :decorate 抛异常 → safe-call 返回 nil → 退回未装饰的 agent。
             ;; 「观察挂不上」不该等于「子 agent 跑不了」。
             agent  (or (safe-call (:decorate observer) agent) agent)
             resp   (chat-fn agent prompt (:chat-opts observer))]
-        (if (= :completed (:status resp))
-          {:ok (rfn resp)}
-          {:error {:status (:status resp) :detail resp}}))
+        (run-result agent resp rfn))
       (catch Throwable t
         {:error {:crashed true :message (.getMessage t)}}))))
 
@@ -153,7 +181,11 @@
                  (safe-call (:start! observer))
                  (let [outcome (do-run spec observer)]
                    (deliver result-promise outcome)
-                   (finish! id result-promise (if (:ok outcome) :done :failed) outcome))
+                   (finish! id result-promise
+                            (cond (:ok outcome)        :done
+                                  (:suspended outcome) :suspended
+                                  :else                :failed)
+                            outcome))
                  (catch Throwable t
                    (let [err {:error {:crashed true :message (.getMessage t)}}]
                      (deliver result-promise err)
@@ -264,11 +296,61 @@
     {:error :not-found}))
 
 (defn drop!
-  "从注册表移除（running 时先 kill）。"
+  "从注册表移除（running 时先 kill）。
+
+   ⚠️ **挂起的条目不能这么摘**——它存着等人答复的那个 agent 实例，摘了就没法
+   resume 了。委派工具的 `finally` 因此要先看状态（见 `delegate/run-sync`）。"
   [id]
   (kill! id)
   (swap! registry dissoc id)
   nil)
+
+(defn suspended?
+  "该子 agent 是否挂起在等人（`:paused` 的那种，不是失败）。"
+  [id]
+  (= :suspended (:status (get @registry id))))
+
+(defn resume!
+  "恢复一个挂起的子 agent，返回与 `await!` 同形的 outcome
+   （`{:ok s}` / `{:error r}` / `{:suspended …}`——**可以再次挂起**：一轮里连着
+   两个敏感工具是正常的）。
+
+   `decision` / `payload` 直通 `simple-agent/resume`（`:approved` / `:rejected`
+   / `:reply`）。恢复的是**挂起时那一个 agent 实例**（`run-result` 带出来的），
+   不是重新 create 一个——后者不认得这次暂停。
+
+   `observer` 可选：resume 发生在**新的一条 run** 里，事件要发进新那条流，所以
+   观察者得现给（lane id 仍由 spawn id 决定，故 `subagentRunId` 跨 resume 不变
+   ——AG-UI 说的「通过相同的 subagentRunId 恢复执行」正是这个意思）。"
+  [id decision payload & [observer]]
+  (let [entry (get @registry id)]
+    (if-not (= :suspended (:status entry))
+      {:error :not-suspended}
+      (let [agent (get-in entry [:result :suspended :agent])
+            rfn   (or (:result-fn (:spec entry)) :text)]
+        (try
+          (require 'im.ttalk.agent.simple-agent)
+          (let [resume-fn (resolve 'im.ttalk.agent.simple-agent/resume)
+                agent (or (safe-call (:decorate observer) agent) agent)
+                _ (safe-call (:start! observer))
+                resp (resume-fn agent decision (cond-> {}
+                                                 payload (assoc :payload payload)
+                                                 (:chat-opts observer) (merge (:chat-opts observer))))
+                outcome (run-result agent resp rfn)]
+            (swap! registry update id merge
+                   {:status (cond (:ok outcome) :done
+                                  (:suspended outcome) :suspended
+                                  :else :failed)
+                    :result outcome
+                    :finished-at (now-ms)})
+            (safe-call (:settle! observer) outcome)
+            outcome)
+          (catch Throwable t
+            (let [err {:error {:crashed true :message (.getMessage t)}}]
+              (swap! registry update id merge {:status :failed :result err
+                                               :finished-at (now-ms)})
+              (safe-call (:settle! observer) err)
+              err)))))))
 
 (defn clear-all!
   "清空整个注册表（kill 所有 running 的子 agent）。测试/重置用。"
