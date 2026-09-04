@@ -28,6 +28,7 @@
   (:require [im.ttalk.agent.agui.emit :as emit]
             [im.ttalk.agent.agui.event :as event]
             [im.ttalk.agent.agui.subagent :as subagent]
+            [im.ttalk.agent.agui.tools :as agui-tools]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.streaming :as streaming]
@@ -40,6 +41,7 @@
 (def ^:private defaults
   {:on-concurrent     :reject     ;; | :supersede
    :subagent-events?  false
+   :state-tools?      false
    :buffer-size       512
    :idle-ttl-ms       (* 30 60 1000)
    :supersede-wait-ms 5000
@@ -96,6 +98,11 @@
    - `:idle-ttl-ms`       空闲会话驱逐（缺省 30min；有 run / 有订阅者 / 暂停中的不驱逐）
    - `:supersede-wait-ms` supersede 时等旧 run 收尾的上限（缺省 5s）
    - `:now`               `(fn [] ms)`，可注入（测试）
+   - `:state-tools?`      给模型两把写共享状态的工具（缺省 **false**）。开了之后
+                          `agui.tools/state-tools` 的 `AGUISendStateSnapshot` /
+                          `AGUISendStateDelta` 进每个 run 的工具表，模型于是写得动
+                          共享状态。**缺省关**：它改变模型看见的工具列表，装配方
+                          该显式点头；`/info` 的 `capabilities.state` 跟着报
    - `:subagent-events?`  子 agent lane 的事件（缺省 **false**）。开了之后
                           `:agent-fn` 会多收到一个 `:subagent-observer`，把它交给
                           `delegate-tool` 的 `:observer`，委派期间的 token / 工具调用
@@ -225,7 +232,7 @@
 
    `chat-async` / `resume-async` **立刻返回 deferred**（整轮跑在虚拟线程上），
    所以锁只握住「装配 + 派发」这一小段，不握住 LLM 往返。"
-  [rt entry kind {:keys [message decision payload tools opts parent-run-id]}]
+  [rt entry kind {:keys [message decision payload tools opts parent-run-id state]}]
   (let [conv-id (:conversation-id entry)
         ;; **起跑前的水位**：run 一旦起跑就立刻发 `:run/started`，而 HTTP 层要等
         ;; 拿到返回值才订阅——中间这一段是真空。把水位交出去，调用方用它作
@@ -247,9 +254,15 @@
                            ;; tool-call），所以按 run 现造一个，不是全局共享一个
                            :transform (when-let [f (:event-transform rt)]
                                         (f {:run-id run-id :conversation-id conv-id}))})
+        _ (event/seed-state! em state)   ;; 客户端发上来的那份，作为 delta 的基线
         done (CompletableFuture.)
         a (-> ((:agent-fn rt) {:conversation-id conv-id
-                               :tools (vec tools)
+                               ;; 写共享状态的两把工具**闭包在本 run 的发射器上**
+                               ;; ——它们要往这一条流里发 STATE_*，而 var 是进程级的，
+                               ;; 装不进 run。开关关着就一把都不加
+                               :tools (cond-> (vec tools)
+                                        (get-in rt [:cfg :state-tools?])
+                                        (into (agui-tools/state-tools em)))
                                ;; 开关关着就是 nil——`delegate-tool` 于是走老路径。
                                ;; 「不塞就什么都不会发生」是这条链路每一跳的性质
                                :subagent-observer (when (get-in rt [:cfg :subagent-events?])
@@ -352,6 +365,9 @@
    时，正确的做法是丢掉它继续，而不是把会话永远卡住。**缺省仍是拒绝**（§4.4）：
    人工审批被静默丢掉是隐蔽的语义损失，要丢就显式说。
 
+   `:state` —— `RunAgentInput.state`，作为本 run 共享状态的**基线**装上（不发事件，
+   客户端本来就有这份）。后续 delta 对着它算，服务端与客户端才不会各算各的。
+
    `:parent-run-id` —— 调用方声明「这一轮挂在哪条 run 下面」。我们**不解释**它
    （不建父子索引、不做级联停止），只把它挂到 `:run/started` 上原样发出去：
    AG-UI 的 `RUN_STARTED.parentRunId` 就是这么个用途，客户端拿它把这条 run 接回
@@ -360,15 +376,16 @@
    `opts` 直通 `agent/chat-async`（`:system-prompt` / `:max-iterations` / `:tool-choice` …）；
    `:tools` 是本 run 追加的内联工具，会交给 `:agent-fn`。"
   ([rt conv-id message] (start-run! rt conv-id message nil))
-  ([rt conv-id message {:keys [tools discard-pause? parent-run-id] :as opts}]
+  ([rt conv-id message {:keys [tools discard-pause? parent-run-id state] :as opts}]
    (when @(:closed? rt) (throw (ex-info "runtime 已关闭" {:conversation-id conv-id})))
    (let [entry (entry-of! rt conv-id)]
      (start-or-supersede! rt entry :chat
                           {:message message :tools tools
                            :discard-pause? discard-pause?
                            :parent-run-id parent-run-id
-                           ;; 这三个是 runtime 自己的键，别漏进 chat-async 的 opts
-                           :opts (dissoc opts :tools :discard-pause? :parent-run-id)}))))
+                           :state state
+                           ;; 这四个是 runtime 自己的键，别漏进 chat-async 的 opts
+                           :opts (dissoc opts :tools :discard-pause? :parent-run-id :state)}))))
 
 (defn run-detached!
   "在一个**临时发射器**上跑一次 agent 调用——**不进注册表**：没有会话条目、
