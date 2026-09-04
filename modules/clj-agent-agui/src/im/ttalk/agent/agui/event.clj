@@ -57,9 +57,13 @@
    - :tag              可选。**merge 进本发射器发出的每一条事件**（`m` 优先）。
                        子 agent lane 的归属字段就是这么打上去的，见
                        `subagent-emitter`；run 自己的发射器不带 tag。"
-  [{:keys [run-id conversation-id next-seq sink now transform tag]}]
+  [{:keys [run-id conversation-id next-seq sink now transform tag gate]}]
   {:run-id run-id
    :tag tag
+   ;; **取号 / 记账 / 投递 三件事的那把锁**（见 `deliver!`）。调用方给会话锁，
+   ;; 不给就现造一个——不给的场合（`run-detached!`、单测手搓的发射器）本来就
+   ;; 只有一条线程在发。lane 继承父的这把锁，见 `subagent-emitter`。
+   :gate (or gate (Object.))
    :conversation-id conversation-id
    :next-seq next-seq
    :sink sink
@@ -72,6 +76,11 @@
                  :terminal nil
                  :any-text? false
                  :drops 0})
+   ;; 派生出去的子 agent lane（`subagent-emitter` 自己登记）。**父认子**这一向是
+   ;; 收尾要用的：run 终态之前得先把还开着的 lane 收掉，否则客户端看到的是一条
+   ;; 没有闭合的 `SUBAGENT_STARTED`（AG-UI 要求每个开过的子代理在 `RUN_FINISHED`
+   ;; 前关闭，只有 `RUN_ERROR` 豁免）。`silenced?` 那一向是子认父，两向不重复。
+   :children (atom [])
    :finalize (atom {:stop-requested? false})})
 
 (defn request-stop!
@@ -83,6 +92,10 @@
 (defn stop-requested? [em] (:stop-requested? @(:finalize em)))
 
 (defn terminal-of [em] (:terminal @(:state em)))
+
+(defn started?
+  "本 lane 是否宣告过自己（发过 `:subagent/started`）。run 自己的发射器恒为 false。"
+  [em] (boolean (:started? @(:state em))))
 (defn text-emitted?
   "本 run 是否已经产出过任何文本（流式 token 或整块补发都算）。"
   [em] (:any-text? @(:state em)))
@@ -100,7 +113,7 @@
 
 (defn- track!
   "按事件类型维护开集合。纯内部记账，不产生事件。"
-  [state {:keys [type message-id tool-call-id]}]
+  [state {:keys [type message-id tool-call-id parent-message-id]}]
   (case type
     :message/started (update state :open-messages assoc message-id {:delta? false})
     ;; **思维 delta 不进正文消息的开集合**：AG-UI 里思考是独立的 reasoning
@@ -108,7 +121,12 @@
     ;; `:message/ended`，前端于是收到一条从没开过的正文消息的结束
     :message/delta   (assoc-in state [:open-messages message-id :delta?] true)
     :message/ended   (update state :open-messages dissoc message-id)
-    :tool/started    (update state :open-tools assoc tool-call-id {:ended? false :result? false})
+    ;; **记下这次工具调用属于哪条正文消息**：`SUBAGENT_STARTED.parentMessageId`
+    ;; 要凭 tool-call-id 反查它（委派工具跑起来时正文消息早已收口，
+    ;; `current-message` 已经是 nil，只能靠这份记账）
+    :tool/started    (update state :open-tools assoc tool-call-id
+                             {:ended? false :result? false
+                              :parent-message-id parent-message-id})
     :tool/ended      (cond-> state
                        (get-in state [:open-tools tool-call-id])
                        (assoc-in [:open-tools tool-call-id :ended?] true))
@@ -116,18 +134,30 @@
     state))
 
 (defn- deliver!
-  "取号 → 记账 → 出口。**一个事件一个号**，transform 插进来的也一样。"
+  "取号 → 记账 → 出口。**一个事件一个号**，transform 插进来的也一样。
+
+   **三件事在同一把锁里做完**（`:gate`）。曾经是取号一次锁、投递另一次锁，中间
+   敞着一个窗口：子 agent 的 worker 线程与父 run 的线程可以这样交错——A 取到 9、
+   B 取到 10、**B 先投递**、A 再投递。号是对的，到达顺序不是。抓到过的现场里，
+   一条 `:subagent/started` 拿着 seq 18 落在 seq 17 的 `:run/finished` **后面**。
+
+   两个后果都不是「顺序不好看」这么轻：
+   - SSE 的 `id:` 用的就是这个号，浏览器重连原样回传成 `Last-Event-ID` → `:since`。
+     到达乱序会让客户端把水位记高，**后到的小号事件被当成已收，续传时直接跳过**；
+   - 契约 2「终态是这条 run 的最后一条」在 AG-UI 那侧是硬要求，终态之后再来一条
+     事件，标准客户端按协议违例处理。"
   [em ev]
-  (let [ev (assoc ev :seq ((:next-seq em)) :ts (or (:ts ev) ((:now em))))]
-    (swap! (:state em) (fn [st]
-                         (cond-> (track! st ev)
-                           (terminal? ev) (assoc :terminal (:type ev)))))
-    (try
-      ((:sink em) ev)
-      (catch Throwable t
-        (swap! (:state em) update :drops inc)
-        (log/warn "agui 事件 sink 抛异常（已兜住，run 不受影响）:" (.getMessage t))))
-    ev))
+  (locking (:gate em)
+    (let [ev (assoc ev :seq ((:next-seq em)) :ts (or (:ts ev) ((:now em))))]
+      (swap! (:state em) (fn [st]
+                           (cond-> (track! st ev)
+                             (terminal? ev) (assoc :terminal (:type ev)))))
+      (try
+        ((:sink em) ev)
+        (catch Throwable t
+          (swap! (:state em) update :drops inc)
+          (log/warn "agui 事件 sink 抛异常（已兜住，run 不受影响）:" (.getMessage t))))
+      ev)))
 
 (defn- expand
   "过 `:transform`（若有）。**终态不过**——契约 2「恰好一个终态且在最后」是靠
@@ -154,7 +184,11 @@
                      :ts ((:now em))}
                     (:tag em)          ;; lane 归属（run 的发射器无 tag，merge 空 map）
                     m)]
-    (reduce (fn [_ ev] (deliver! em ev)) nil (expand em base))))
+    ;; **`expand` 也在锁里**：lane 的终态守卫（`silenced?`）就长在它的 transform 上，
+    ;; 判完再投递，中间不能让父 run 插进来收口——否则「查的时候父还没终态、投的
+    ;; 时候已经有了」，事件照样漏在终态之后。锁是可重入的，`deliver!` 再拿一次无妨。
+    (locking (:gate em)
+      (reduce (fn [_ ev] (deliver! em ev)) nil (expand em base)))))
 
 ;;; ---- 文本消息：自动开合 ----
 
@@ -166,6 +200,14 @@
   message-id)
 
 (defn current-message [em] (:current-message @(:state em)))
+
+(defn tool-parent-message
+  "某次工具调用所属的正文消息 id（`:tool/started` 时记下的）。
+
+   工具还开着（没到 `:tool/result`）才查得到——子 agent 的 `start!` 正是在工具
+   执行期间调的，所以够用。"
+  [em tool-call-id]
+  (get-in @(:state em) [:open-tools tool-call-id :parent-message-id]))
 
 ;;; ---- 思考块：独立的一条消息，自动开合 ----
 
@@ -271,12 +313,41 @@
               :error {:class (if stopped? :cancelled :provider-error)
                       :message (if stopped? "stop_requested" "missing_terminal_event")}}))))
 
+(declare finish-subagent!)
+
+(defn- close-lanes!
+  "把还开着的子 agent lane 收掉。**必须排在自己的终态之前**。
+
+   为什么非做不可：lane 的事件受 `silenced?` 管——父一旦有终态，lane 后面的
+   `SUBAGENT_FINISHED` 会在取号前被整条吞掉（那是契约 2 该有的行为）。于是
+   `:supersede` 掐掉一轮、而子 agent 还在跑时，客户端收到的是一条**永远不闭合的**
+   `SUBAGENT_STARTED`——AG-UI 明写每个开过的子代理必须在 `RUN_FINISHED` 前关闭
+   （只有 `RUN_ERROR` 豁免，异常中断是预期行为）。正路是收口前主动关，不是靠静音。
+
+   停止意图取自**父**（`stop-requested?` 是 run 级的）：被停掉就是 `killed`，
+   否则是「父先结束了」。递归：内层 lane 先于外层关。"
+  [em]
+  (doseq [lane @(:children em)]
+    ;; **只关宣告过的 lane**：没发过 `SUBAGENT_STARTED` 的，客户端根本不知道它
+    ;; 存在，补一条收尾等于凭空冒出一个未声明的子代理（协议允许「无生命周期
+    ;; 事件的归属」，但反过来发个没有开场的收尾就是纯噪声）。
+    (when (and (started? lane) (not (terminal-of lane)))
+      (finish-subagent! lane
+                        (if (stop-requested? em)
+                          {:outcome :killed}
+                          {:error {:class :provider-error
+                                   :message "子 agent 未收尾：父 run 先结束了"}})))))
+
 (defn finish!
   "终态的**唯一出口**，幂等：第一次调用补关开着的块并发终态，之后一律 no-op。
 
-   §4.6 的「已有终态则什么都不补」因此是构造保证的——不是靠在每个发射点检查。"
+   §4.6 的「已有终态则什么都不补」因此是构造保证的——不是靠在每个发射点检查。
+
+   顺序：**先收子 lane，再关自己的块，最后发终态**。lane 的收尾属于父 run 终态
+   之前的事件；反过来先发终态，lane 就被静音了（见 `close-lanes!`）。"
   [em type m]
   (when-not (terminal-of em)
+    (close-lanes! em)
     (close-open! em (not= :run/paused type))
     (emit! em type m)))
 
@@ -305,21 +376,27 @@
    交错的 lane 污染。"
   [parent {:keys [subagent-run-id]}]
   (let [silenced (atom 0)
-        parent-tag (get-in parent [:tag :subagent-run-id])]
-    (assoc (emitter
-            {:run-id          (:run-id parent)          ;; lane 仍属于父 run
-             :conversation-id (:conversation-id parent)
-             :next-seq        (:next-seq parent)        ;; 契约 1
-             :sink            (:sink parent)
-             :now             (:now parent)
-             :transform       (fn [ev]
-                                (if (silenced? parent)
-                                  (do (swap! silenced inc) [])
-                                  [ev]))
-             :tag             (cond-> {:subagent-run-id subagent-run-id}
-                                parent-tag (assoc :parent-subagent-run-id parent-tag))})
-           :parent parent
-           :silenced silenced)))
+        parent-tag (get-in parent [:tag :subagent-run-id])
+        lane (assoc (emitter
+                     {:run-id          (:run-id parent)          ;; lane 仍属于父 run
+                      :conversation-id (:conversation-id parent)
+                      :next-seq        (:next-seq parent)        ;; 契约 1
+                      :sink            (:sink parent)
+                      :now             (:now parent)
+                      :transform       (fn [ev]
+                                         (if (silenced? parent)
+                                           (do (swap! silenced inc) [])
+                                           [ev]))
+                      ;; **与父共用同一把锁**：契约 2 的守卫要跨父子原子，
+                      ;; 各拿各的锁等于没锁
+                      :gate            (:gate parent)
+                      :tag             (cond-> {:subagent-run-id subagent-run-id}
+                                         parent-tag (assoc :parent-subagent-run-id parent-tag))})
+                    :parent parent
+                    :silenced silenced)]
+    ;; **父认子**：收口时要凭这份名单把还开着的 lane 关掉（见 `close-lanes!`）
+    (swap! (:children parent) conj lane)
+    lane))
 
 (defn lane-id
   "本发射器的 lane id；run 自己的发射器为 nil。消息 id 要靠它分道（契约 4）。"
@@ -339,27 +416,36 @@
    （`react/invoke-one` 钉的）。同一批里几个委派并发时，这是唯一能把 lane 挂回
    正确那张工具卡片的依据——从「开着的工具」里猜，多路并发下必然挂错。
    协议里它是可选字段，取不到就空着。"
-  [em {:keys [name task parent-tool-call-id]}]
+  [em {:keys [name task parent-tool-call-id parent-message-id]}]
+  (swap! (:state em) assoc :started? true)
   (emit! em :subagent/started
          (cond-> {}
            name                (assoc :name name)
            task                (assoc :task task)
-           parent-tool-call-id (assoc :parent-tool-call-id parent-tool-call-id))))
+           parent-tool-call-id (assoc :parent-tool-call-id parent-tool-call-id)
+           ;; 包住那次工具调用的正文消息——协议里可选，取不到就空着。
+           ;; 有它前端才能把子 agent 的折叠组挂进正确那条消息（AG-UI 还要求
+           ;; 工具调用的归属与其 parentMessageId 的归属一致）
+           parent-message-id   (assoc :parent-message-id parent-message-id))))
 
 (defn finish-subagent!
   "lane 收尾的**唯一出口**，幂等：补关 lane 自己开着的块，再发一条收尾事件。
 
-   `m` = `{:outcome :success | :killed | :timeout}` 或 `{:error <canonical error>}`。
-   有 `:error` 走 `:subagent/error`，否则走 `:subagent/finished`。
+   `m` = `{:outcome :success | :killed | :timeout :result <any>}` 或
+   `{:error <canonical error>}`。有 `:error` 走 `:subagent/error`，否则走
+   `:subagent/finished`；`:result` 是协议里那个可选的完成载荷
+   （`SUBAGENT_FINISHED.result`，语义同 `RUN_FINISHED.result`）。
 
    **这两个类型都不进 `terminal-types`**：那个集合是 run 的终态，`expand` 靠它决定
    「终态不过 transform」。lane 的收尾必须过 transform——它得受父 run 终态守卫的管，
    否则父 run 收口之后还能补出一条 `SUBAGENT_FINISHED`。这里的幂等靠自己标记。"
-  [em {:keys [outcome error]}]
+  [em {:keys [outcome error result]}]
   (when-not (terminal-of em)
+    (close-lanes! em)                  ;; 嵌套：内层 lane 先于外层收口
     (close-open! em true)
     (if error
       (emit! em :subagent/error {:error error})
-      (emit! em :subagent/finished {:outcome (or outcome :success)}))
+      (emit! em :subagent/finished (cond-> {:outcome (or outcome :success)}
+                                     (some? result) (assoc :result result))))
     (swap! (:state em) assoc :terminal (if error :subagent/error :subagent/finished))
     nil))

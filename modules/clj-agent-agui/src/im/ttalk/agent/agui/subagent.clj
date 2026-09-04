@@ -47,7 +47,10 @@
    在这里偷偷截一刀只会让两处说法不一致。"
   [outcome]
   (cond
-    (contains? outcome :ok)      {:outcome :success}
+    ;; **`:ok` 的值就是协议里那个 `SUBAGENT_FINISHED.result`**——以前扔掉了。
+    ;; 它已经经由 `delegate/safe-result-str` 进过工具结果的正文，所以这里带上
+    ;; 不是新的暴露面，只是把协议那一位填上（脱敏若要做，在 delegate 那层统一做）
+    (contains? outcome :ok)      {:outcome :success :result (:ok outcome)}
     (= :killed  (:error outcome)) {:outcome :killed}
     (= :timeout (:error outcome)) {:outcome :timeout}
 
@@ -80,5 +83,11 @@
        :chat-opts {:on-token (emit/token-fn lane)}
        :start!    (fn [] (event/start-subagent!
                           lane {:name name :task task
-                                :parent-tool-call-id parent-tool-call-id}))
+                                :parent-tool-call-id parent-tool-call-id
+                                ;; 凭 tool-call-id 反查它属于哪条正文消息——委派
+                                ;; 工具跑起来时那条消息早已收口，`current-message`
+                                ;; 已是 nil，只能靠 `:open-tools` 那份记账
+                                :parent-message-id
+                                (when parent-tool-call-id
+                                  (event/tool-parent-message parent parent-tool-call-id))}))
        :settle!   (fn [outcome] (event/finish-subagent! lane (finish-of outcome)))})))

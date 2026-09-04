@@ -201,9 +201,35 @@
 ;;; outcome 翻译（manager 的形状 → 事件层的形状）
 ;;; ============================================================
 
+(deftest subagent-attribution-anchors-test
+  (testing "SUBAGENT_STARTED 与 TOOL_CALL_START 锚在同一条 assistant 消息上"
+    (let [events (run-once! (delegating-runtime {:subagent-events? true :sub-text "三条事实"}))
+          started (first (filter #(= :subagent/started (:type %)) events))
+          tool-started (first (filter #(= :tool/started (:type %)) events))
+          later-text (first (filter #(and (= :message/started (:type %))
+                                          (nil? (:subagent-run-id %)))
+                                    events))]
+      (is (some? (:parent-message-id tool-started))
+          "TOOL_CALL_START 的锚点——前端靠它把工具卡片挂进那条 assistant 消息")
+      (is (= (:parent-message-id tool-started) (:parent-message-id started))
+          "AG-UI 要求工具调用的归属与其 parentMessageId 的归属一致，两处得是同一条消息")
+      (is (not= (:message-id later-text) (:parent-message-id tool-started))
+          "锚的是**发起这次调用的那一轮**（模型没说话、直接调工具），
+           不是后面那轮总结的文本消息——所以这个 id 上没有 TEXT_MESSAGE_*，
+           与上游参考实现（demo-agents/src/openai.ts:81 无条件锚）一致")))
+
+  (testing "SUBAGENT_FINISHED 带上子 agent 的产出"
+    (let [events (run-once! (delegating-runtime {:subagent-events? true :sub-text "三条事实"}))
+          fin (first (filter #(= :subagent/finished (:type %)) events))]
+      (is (some? (:result fin)))
+      (is (= {:type "SUBAGENT_FINISHED" :subagentRunId (:subagent-run-id fin)
+              :outcome {:type "success"} :result (:result fin)}
+             (codec/->agui fin))))))
+
 (deftest finish-of-translates-manager-outcomes-test
   (let [finish-of #'subagent/finish-of]
-    (is (= {:outcome :success} (finish-of {:ok "结果"})))
+    (is (= {:outcome :success :result "结果"} (finish-of {:ok "结果"}))
+        ":ok 的值就是协议里的 SUBAGENT_FINISHED.result——以前扔掉了")
     (is (= {:outcome :killed}  (finish-of {:error :killed})))
     (is (= {:outcome :timeout} (finish-of {:error :timeout})))
     (is (= :provider-error (get-in (finish-of {:error {:crashed true :message "NPE"}})

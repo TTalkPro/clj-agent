@@ -57,11 +57,22 @@
    的 `start → args → end`（结果在工具真跑完之后由 `:iteration` 链发）。"
   [em]
   (fn [response _meta]
-    (event/end-message! em (:text response))
-    (doseq [tc (response/response-tool-calls response)]
-      (event/emit! em :tool/started {:tool-call-id (:id tc) :name (:name tc)})
-      (event/emit! em :tool/args {:tool-call-id (:id tc) :args (:args tc)})
-      (event/emit! em :tool/ended {:tool-call-id (:id tc)}))))
+    ;; **先把本轮的消息 id 捞出来**（`end-message!` 会把 `current-message` 清成
+    ;; nil），拿它当工具调用的 `parentMessageId`——前端靠这一位把工具卡片挂进那条
+    ;; assistant 消息；AG-UI 还要求工具调用的子 agent 归属与其 parentMessageId 的
+    ;; 归属一致，锚点为空就无从谈起。
+    ;;
+    ;; **无条件锚**（同上游参考实现 `demo-agents/src/openai.ts:81`）：这一轮模型
+    ;; 不说话、直接调工具是常态，那条 assistant 消息在历史里照样存在（带 tool_calls
+    ;; 没有 content），只是没有 TEXT_MESSAGE_* 事件。按「出过文本才锚」判，恰恰是
+    ;; 最常见的那种工具轮拿不到锚点。
+    (let [parent-mid (event/current-message em)]
+      (event/end-message! em (:text response))
+      (doseq [tc (response/response-tool-calls response)]
+        (event/emit! em :tool/started (cond-> {:tool-call-id (:id tc) :name (:name tc)}
+                                        parent-mid (assoc :parent-message-id parent-mid)))
+        (event/emit! em :tool/args {:tool-call-id (:id tc) :args (:args tc)})
+        (event/emit! em :tool/ended {:tool-call-id (:id tc)})))))
 
 (defn iteration-filter
   "`:iteration` 链上的采集 filter。

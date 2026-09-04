@@ -227,6 +227,112 @@
         (is (zero? (event/drops lane)) "silenced 与 drops 是两码事")
         (is (= :run/finished (:type (last @out))))))))
 
+(defn- session-emitter
+  "照 runtime 那样接线：取号与出口**各自**拿会话锁，发射器再拿同一把当 `:gate`。
+   —— 只有把三件事并进一次锁，并发下的到达顺序才等于取号顺序。"
+  []
+  (let [lock (Object.) n (atom -1) out (atom [])]
+    {:lock lock :out out
+     :em (event/emitter {:run-id "r1" :conversation-id "c1"
+                         :next-seq #(locking lock (swap! n inc))
+                         :sink     #(locking lock (swap! out conj %))
+                         :gate lock
+                         :now (constantly 1000)})}))
+
+(deftest arrival-order-equals-seq-order-test
+  (testing "并发发射：到达顺序 = 取号顺序。
+
+            取号一次锁、投递另一次锁的话中间敞着窗口——A 取到 9、B 取到 10、
+            B 先投递、A 再投递。SSE 的 `id:` 用的就是这个号，浏览器重连原样回传
+            成 Last-Event-ID → :since；到达乱序会让客户端把水位记高，**后到的
+            小号事件被当成已收，续传时直接跳过**。"
+    (let [{:keys [em out]} (session-emitter)
+          threads (mapv (fn [t]
+                          (Thread. ^Runnable
+                                   (fn [] (dotimes [i 60]
+                                            (event/emit! em :message/delta
+                                                         {:message-id (str "m" t) :text (str i)})))))
+                        (range 8))]
+      (doseq [^Thread t threads] (.start t))
+      (doseq [^Thread t threads] (.join t))
+      (let [seqs (mapv :seq @out)]
+        (is (= 480 (count seqs)))
+        (is (= (sort seqs) seqs) "到达顺序必须与号一致")
+        (is (= (range 480) seqs) "无洞无重")))))
+
+(deftest nothing-arrives-after-terminal-test
+  (testing "契约 2：终态是最后一条——lane 与父 run 并发时也成立。
+
+            守卫 `silenced?` 长在 lane 的 transform 上，判完到投出去之间不能让父
+            run 插进来收口，否则「查的时候父还没终态、投的时候已经有了」。"
+    (dotimes [_ 20]
+      (let [{:keys [em out]} (session-emitter)
+            lane (event/subagent-emitter em {:subagent-run-id "sa-1"})
+            _ (event/start-subagent! lane {:name "researcher"})
+            spam (Thread. ^Runnable
+                          (fn [] (dotimes [i 200]
+                                   (event/emit! lane :message/delta
+                                                {:message-id "sa-1-m0" :text (str i)}))))]
+        (.start spam)
+        (event/finish! em :run/finished {:text "父 run 先收口"})
+        (.join spam)
+        (let [evs @out
+              term-idx (.indexOf ^java.util.List (mapv event/terminal? evs) true)]
+          (is (nat-int? term-idx))
+          (is (= (dec (count evs)) term-idx) "终态之后一条都不许有")
+          (is (= (sort (map :seq evs)) (map :seq evs))))))))
+
+(deftest lane-closed-before-run-terminal-test
+  (testing "父 run 收口前，还开着的 lane 被主动关掉——AG-UI 要求每个开过的子代理
+            在 RUN_FINISHED 前关闭。靠 `silenced?` 是不行的：那只是把 lane 的
+            收尾吞掉，客户端看到的是一条永远不闭合的 SUBAGENT_STARTED"
+    (let [{:keys [em out]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/emit! em :run/started {})
+      (event/start-subagent! lane {:name "researcher"})
+      (event/begin-message! lane "sa-1-m0")
+      (event/emit-token! lane :token "查到一半")
+      ;; 子 agent 还开着，父 run 直接收口（:supersede / stop 就是这个形状）
+      (event/finish! em :run/finished {:text "被打断了"})
+      (let [types (mapv :type @out)]
+        (is (= 1 (count (filter #(= :subagent/error (:type %)) @out)))
+            "开着的 lane 补一条收尾")
+        (is (< (.indexOf types :subagent/error) (.indexOf types :run/finished))
+            "**必须排在 run 终态之前**——反过来就被 silenced? 吞了")
+        (is (= (range (count @out)) (map :seq @out)) "补出来的事件照样占号，无洞")
+        (is (= :run/finished (:type (last @out))) "终态仍是最后一条")
+        (is (some #(and (= :message/ended (:type %)) (= "sa-1" (:subagent-run-id %))) @out)
+            "lane 自己开着的正文消息也一并补关"))))
+
+  (testing "被 stop / supersede 掐掉时，收尾说的是 killed 而不是「父先结束了」"
+    (let [{:keys [em out]} (run-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/start-subagent! lane {:name "researcher"})
+      (event/request-stop! em)
+      (event/finish! em :run/cancelled {})
+      (let [fin (first (filter #(= :subagent/finished (:type %)) @out))]
+        (is (= :killed (:outcome fin))
+            "中立事件说 killed；译成 SUBAGENT_ERROR + code=killed 是 codec 的事"))))
+
+  (testing "没宣告过自己的 lane 不补收尾——凭空冒出个未声明的子代理是纯噪声"
+    (let [{:keys [em out]} (run-emitter)
+          _lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/emit! em :run/started {})
+      (event/finish! em :run/finished {:text "父 run 跑完了"})
+      (is (empty? (filter #(#{:subagent/started :subagent/finished :subagent/error} (:type %))
+                          @out)))))
+
+  (testing "嵌套：内层先于外层收口"
+    (let [{:keys [em out]} (run-emitter)
+          outer (event/subagent-emitter em {:subagent-run-id "sa-1"})
+          inner (event/subagent-emitter outer {:subagent-run-id "sa-2"})]
+      (event/start-subagent! outer {:name "analyst"})
+      (event/start-subagent! inner {:name "researcher"})
+      (event/finish! em :run/finished {})
+      (let [closes (filterv #(#{:subagent/finished :subagent/error} (:type %)) @out)]
+        (is (= ["sa-2" "sa-1"] (mapv :subagent-run-id closes))
+            "内层先关，外层后关")))))
+
 (deftest lane-isolation-test
   (testing "契约 4：一条 lane 一个发射器实例，交错的 token 不进同一条消息"
     (let [{:keys [em out]} (run-emitter)
