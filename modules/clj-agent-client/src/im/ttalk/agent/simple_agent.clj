@@ -404,6 +404,11 @@
     (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
     run-id))
 
+(def default-max-iterations
+  "工具循环的缺省上限。提成常量是为了**装配方能如实上报**——`/info` 的
+   `capabilities.execution.maxIterations` 要报这个数，抄一份魔数过去迟早对不上。"
+  10)
+
 (def ^:private loop-passthrough-keys
   "循环认识、由调用方逐次决定的键——**四个入口共用一份透传**。
 
@@ -430,7 +435,8 @@
                  :callbacks callbacks-with-meta
                  :on-env-error (env-error-policy agent opts)
                  :max-iterations (or (:max-iterations opts)
-                                     (:max-iterations (:settings agent)) 10)}
+                                     (:max-iterations (:settings agent))
+                                     default-max-iterations)}
           (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
           (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))
         (passthrough opts))))
