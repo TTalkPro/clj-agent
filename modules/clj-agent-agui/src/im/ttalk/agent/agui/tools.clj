@@ -13,7 +13,9 @@
 
    **前端标记走 metadata 而不是 map 里的键**：那个 map 去掉 `:handler` 之后
    整个发给模型，多一个 `:agui/frontend` 就是往 wire 上塞私货；metadata 不序列化。"
-  (:require [im.ttalk.agent.agui.emit :as emit]
+  (:require [cheshire.core :as json]
+            [im.ttalk.agent.agui.emit :as emit]
+            [im.ttalk.agent.agui.event :as event]
             [im.ttalk.agent.simple-agent :as agent]))
 
 (set! *warn-on-reflection* true)
@@ -36,6 +38,64 @@
       parameters  (assoc :parameters parameters)
       (:strict agui-tool) (assoc :strict (:strict agui-tool)))
     {::frontend true}))
+
+(defn- coerce-json
+  "模型可能把对象/数组发成 **JSON 字符串**——解一层。解不出集合就返回 nil，
+   由调用方回一句能自纠的错，而不是把字符串当状态发出去。
+
+   ⭐ 这一手是刚需，不是防御性编程：快照发成字符串之后，客户端那边是一坨转义
+   引号，而且**后续每条 delta 都打不上**（patch 打在字符串上）——上游客户端
+   `state = snapshot` 直接替换，不防这一手。整条链静默失效，一个字都不报。"
+  [v]
+  (cond
+    (coll? v) v
+    (string? v) (let [parsed (try (json/parse-string v true) (catch Exception _ nil))]
+                  (when (coll? parsed) parsed))
+    :else nil))
+
+(defn state-tools
+  "给模型两把**写共享状态**的工具，闭包在本 run 的发射器上。
+
+   名字照抄上游（`CopilotKit/packages/runtime/src/agent/index.ts` 的
+   `AGUISendStateSnapshot` / `AGUISendStateDelta`）——第三种叫法只会逼每个前端
+   再写一层适配。
+
+   为什么必须是**内联工具**而不是 `deftool` 的 var：它们要往**这一条 run 的
+   发射器**上发事件，而 var 是进程级的。闭包是唯一能把 run 绑进去的形状
+   （同 `delegate-tool` 的 `:observer`）。
+
+   读面（`/threads/:id/state`）本来就有；缺的一直是这半边——没有写的入口，
+   那条链永远不启动。"
+  [em]
+  [{:name "AGUISendStateSnapshot"
+    :description (str "把**整份**共享状态发给前端（整体替换）。"
+                      "首次建立状态、或结构大改时用这个；只改一两个字段用 "
+                      "AGUISendStateDelta 更省。")
+    :parameters {:type "object"
+                 :properties {:snapshot {:type "object"
+                                         :description "完整的状态对象（不是 JSON 字符串）"}}
+                 :required ["snapshot"]}
+    :handler (fn [args _ctx]
+               (if-let [snap (coerce-json (or (:snapshot args) (get args "snapshot")))]
+                 (do (event/emit-state-snapshot! em snap)
+                     "共享状态已整体更新")
+                 "snapshot 必须是一个状态**对象**（不是字符串、不是数组），请重发"))}
+
+   {:name "AGUISendStateDelta"
+    :description (str "用 JSON Patch（RFC 6902）增量修改共享状态。"
+                      "op 取 add / remove / replace，path 是 JSON Pointer，"
+                      "例如给列表追加：{\"op\":\"add\",\"path\":\"/todos/-\",\"value\":…}。")
+    :parameters {:type "object"
+                 :properties {:delta {:type "array"
+                                      :description "RFC 6902 操作数组"
+                                      :items {:type "object"}}}
+                 :required ["delta"]}
+    :handler (fn [args _ctx]
+               (let [ops (coerce-json (or (:delta args) (get args "delta")))]
+                 (if (sequential? ops)
+                   (do (event/emit-state-delta! em (vec ops))
+                       "共享状态已增量更新")
+                   "delta 必须是一个 JSON Patch **操作数组**，请重发")))}])
 
 (defn frontend?
   [tool]
