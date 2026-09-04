@@ -13,6 +13,8 @@
    `delta` 是 **JSON 字符串**不是对象——这类地方猜错了前端不会报错，只会静默
    少渲染一块。"
   (:require [cheshire.core :as json]
+            [clojure.string :as str]
+            [im.ttalk.agent.model.content :as content]
             [im.ttalk.agent.model.message :as msg]))
 
 (set! *warn-on-reflection* true)
@@ -75,7 +77,10 @@
   "中立事件 → AG-UI 事件 map。返回 nil = 该事件在 AG-UI 里没有对应物（丢弃）。"
   [{:keys [type run-id conversation-id message-id tool-call-id] :as ev}]
   (case type
-    :run/started    {:type "RUN_STARTED" :threadId conversation-id :runId run-id}
+    ;; `parentRunId` 只有 `RUN_STARTED` 有这一位（`RUN_FINISHED` / `RUN_ERROR`
+    ;; 都没有），所以父链的声明就这一次机会
+    :run/started    (cond-> {:type "RUN_STARTED" :threadId conversation-id :runId run-id}
+                      (:parent-run-id ev) (assoc :parentRunId (str (:parent-run-id ev))))
     :run/finished   {:type "RUN_FINISHED" :threadId conversation-id :runId run-id}
     ;; AG-UI 没有 cancelled：按「结束了，但带原因」发，前端照常收口
     :run/cancelled  {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
@@ -129,13 +134,16 @@
              :name (or (:name ev) "subagent")}
       (:task ev)                   (assoc :description (:task ev))
       (:parent-subagent-run-id ev) (assoc :parentSubagentRunId (:parent-subagent-run-id ev))
-      (:parent-tool-call-id ev)    (assoc :parentToolCallId (:parent-tool-call-id ev)))
+      (:parent-tool-call-id ev)    (assoc :parentToolCallId (:parent-tool-call-id ev))
+      (:parent-message-id ev)      (assoc :parentMessageId (:parent-message-id ev)))
 
     :subagent/finished
     (let [oc (or (:outcome ev) :success)]
       (if (= :success oc)
-        {:type "SUBAGENT_FINISHED" :subagentRunId (:subagent-run-id ev)
-         :outcome {:type "success"}}
+        (cond-> {:type "SUBAGENT_FINISHED" :subagentRunId (:subagent-run-id ev)
+                 :outcome {:type "success"}}
+          ;; 可选的完成载荷，语义同 `RUN_FINISHED.result`
+          (some? (:result ev)) (assoc :result (:result ev)))
         {:type "SUBAGENT_ERROR" :subagentRunId (:subagent-run-id ev)
          :message (get subagent-outcome-message oc "子 agent 未正常结束")
          :code (name oc)}))
@@ -184,10 +192,13 @@
 (defn message->agui
   "中立消息 → AG-UI 消息。
 
-   `:id` 是**合成的**：中立消息没有 id（design 文档 §6.7），这里按位置合成。
-   `replace-tool-results` / `heal-dangling` 会让位置漂，所以合成 id 只保证
-   「同一次快照内部自洽」，不保证跨快照稳定——那条要框架给中立消息加可选 `:id`
-   才能真解决，先按验收项撞一次再定。"
+   `:id` **优先用消息自己的**——ChatMemory 落库时补的那个（`msg/ensure-id`），
+   跨快照稳定。没有才按位置合成（`m-<idx>`）：那只保证「同一次快照内部自洽」，
+   `replace-tool-results` / `heal-dangling` 一让位置漂，同一条消息在两次快照里
+   就是两个 id。走内置 store 的都有 id，退路是留给第三方 store 的。
+
+   **与事件流的 message-id 不是一个 id 空间**（那边是 `<run-id>-mN`）——合成一个
+   要让发射器的 id 流进 `response->neutral`，那是 core 依赖 agui 的方向，不做。"
   ([m] (message->agui m 0))
   ([m idx]
    (let [base {:id (or (:id m) (str "m-" idx)) :role (name (:role m))}]
@@ -252,6 +263,53 @@
 ;;; 入站：RunAgentInput
 ;;; ============================================================
 
+(defn- part-value
+  "AG-UI 部件里取值：`source` 有 `data` / `url` 两档，另有已废弃的扁平 `binary`
+   变体（`{type:\"binary\", mimeType, data|url}`）。三种都接，取到什么就交给
+   `content/file-part` 自己去分辨。"
+  [{:keys [source] :as part}]
+  (let [get* (fn [m k] (or (get m k) (get m (name k))))
+        src  (or source part)]
+    {:value (or (get* src :value) (get* src :data) (get* src :url))
+     :mime  (or (get* src :mimeType) (get* src :mime_type) (get* src :mediaType))}))
+
+(defn agui-content->neutral
+  "AG-UI 的 `InputContent` 数组 → 中立多模态部件（`im.ttalk.agent.model.content`）。
+
+   **字符串原样返回。** 纯文本消息的形状一个字都不能变 —— 客户端也是这么做的
+   （没附件就不升成数组），两边一致，`\"你好\"` 这种消息才不会平白走部件路径。
+
+   映射（协议侧 → 中立侧）：
+
+   | AG-UI | 中立 |
+   | --- | --- |
+   | `{type:\"text\", text}` | `{:type :text :text …}` |
+   | `{type:\"image\"/\"audio\"/\"video\"/\"document\", source:{type:\"data\", value, mimeType}}` | `{:type :file :media-type … :data …}` |
+   | 同上但 `source.type = \"url\"` | `{:type :file :media-type … :url …}` |
+
+   image / audio / video / document 在中立层**不各立一类**，统一是 `:file` +
+   media-type（与 Vercel AI SDK 的部件模型一致）—— wire 层按 media type 的顶层
+   类别分派，新格式不用加新类型。
+
+   ⚠ 不做这一跳的话，部件数组会被 `(str content)` 压成一坨字符串喂给模型：
+   **不报错，只是内容全丢**，比报错难查得多。"
+  [content*]
+  (if-not (sequential? content*)
+    content*
+    (mapv (fn [part]
+            (let [get*  (fn [m k] (or (get m k) (get m (name k))))
+                  kind  (str (get* part :type))
+                  {:keys [value mime]} (part-value part)
+                  fname (get* (or (get* part :metadata) {}) :filename)]
+              (case kind
+                "text" (content/text-part (or (get* part :text) ""))
+                ;; 认不出的类型也当文件走 —— 协议以后加了新类型（比如 3d、
+                ;; sheet），照样把数据带下去，总好过整条丢掉
+                (content/file-part value (cond-> {}
+                                           mime  (assoc :media-type mime)
+                                           fname (assoc :filename fname))))))
+          content*)))
+
 (defn parse-run-input
   "AG-UI `RunAgentInput` → 我们的 run 参数。
 
@@ -265,16 +323,58 @@
 
    `resume` 是 interrupt 协议的答复数组（`{interruptId, status, payload}`）：
    上一条 run 以 `outcome:\"interrupt\"` 收口，客户端把人的决定放在**下一次 run
-   的请求体**里带回来——协议里没有单独的审批端点，就是这一条。"
-  [{:keys [threadId runId messages tools state forwardedProps resume]}]
+   的请求体**里带回来——协议里没有单独的审批端点，就是这一条。
+
+   `context` 是前端注册的**本轮环境说明**（`useAgentContext`，每次 run 都随请求
+   体重发）——渲染成 system 段的活在 `context->prompt`。
+
+   `parentRunId` 是可选的父 run 声明（嵌套 run）。我们**不解释它**，只原样回到
+   `RUN_STARTED.parentRunId` 上。⚠️ CopilotKit 的 JS 客户端在发出去之前会把这个
+   字段解构掉（`@ag-ui/client` 的 dist 里对它只有一处引用，就是丢弃那处），
+   所以走 CopilotKit 这条路它恒为 nil——留着是为别的 AG-UI SDK 与自建客户端。"
+  [{:keys [threadId runId messages tools state context forwardedProps resume parentRunId]}]
   (let [last-user (last (filter #(= "user" (or (:role %) (get % "role"))) messages))]
     {:conversation-id threadId
      :run-id runId
-     :message (or (:content last-user) (get last-user "content"))
+     ;; 多模态：客户端可能发 InputContent 数组，翻成中立部件再往下走
+     ;; （不翻的话下面 (str …) 会把它压成一坨字符串，内容全丢且不报错）
+     :message (agui-content->neutral (or (:content last-user) (get last-user "content")))
      :agui-tools (vec tools)
+     :parent-run-id parentRunId
      :state state
+     :context (vec context)
      :resume (vec resume)
      :forwarded-props forwardedProps}))
+
+(defn context->prompt
+  "AG-UI `RunAgentInput.context` → 一段 system 文本。返回 nil = 这轮没有上下文。
+
+   条目是 `{description, value}`（`ContextSchema`，两个都是字符串）。前端
+   `useAgentContext({description, value})` 注册，客户端**每次 run 都重发全量**
+   ——所以它天然是 turn 级的：这一轮带就有，下一轮不带就没了。落到我们这边的
+   出口是 `chat-async` 的 `:extra-system-prompts`（**追加**，不覆盖 agent 人设），
+   同样不进 ChatMemory。
+
+   `value` 按 schema 是字符串，但 `useAgentContext` 收的是 `JsonSerializable`，
+   路上谁 stringify 由客户端版本决定——所以这里两种都认，非字符串按 JSON 打平。
+
+   开头那句抬头是给模型的**出处说明**：不写的话这几行会被当成用户指令，而它们
+   其实是页面状态。"
+  [context]
+  (let [lines (->> context
+                   (keep (fn [c]
+                           (let [desc (or (:description c) (get c "description"))
+                                 v (if (contains? c :value) (:value c) (get c "value"))
+                                 v-str (cond
+                                         (string? v) v
+                                         (nil? v) nil
+                                         :else (json/generate-string v))]
+                             (when (seq (str v-str))
+                               (str "- " (if (seq (str desc)) (str desc " ") "") v-str)))))
+                   vec)]
+    (when (seq lines)
+      (str "以下是前端在本轮提供的上下文（AG-UI context，非用户输入）：\n"
+           (str/join "\n" lines)))))
 
 (defn messages->thread-messages
   "中立消息 → `/threads/:id/messages` 的形状。
@@ -317,7 +417,10 @@
                       tool-calls (or (:toolCalls m) (get m "toolCalls"))
                       tc-id (or (:toolCallId m) (get m "toolCallId"))]
                   (case (str role)
-                    "user"      (msg/user (str content))
+                    ;; user 可能是多模态部件数组 —— 先翻，再决定要不要 str
+                    ;; （system / tool 在协议里只有纯文本）
+                    "user"      (msg/user (let [c (agui-content->neutral content)]
+                                            (if (sequential? c) c (str c))))
                     "system"    (msg/system (str content))
                     "developer" (msg/system (str content))
                     "tool"      (when tc-id (msg/tool-result tc-id nil (str content)))
@@ -347,9 +450,9 @@
    给数组不会报错，只会把下标当成 agent id，于是前端去请求 `/agent/0/run`。
    这条是**联调时才照出来的**：单测和 live 脚本都不碰 `/info`。
 
-   只声明我们真支持的——**不谎报能力位**（`intelligence` / `inspectorMetadata` /
-   `threadEndpoints` 是 CopilotKit 云产品的东西，我们没有就是没有；不写这些键
-   等于告诉客户端「没有」，它会走降级路径）。
+   只声明我们真支持的——**不谎报能力位**（`intelligence` / `inspectorMetadata`
+   是 CopilotKit 云产品的东西，我们没有就是没有；不写这些键等于告诉客户端
+   「没有」，它会走降级路径）。
 
    `className` 客户端不解释，只在调试面板显示。
 
@@ -360,7 +463,7 @@
    **`approveWithEdits` 不报**——改参数再执行我们还没实现，不谎报。"
   ([agent-ids] (run-info agent-ids nil))
   ([agent-ids {:keys [version descriptions capabilities open-generative-ui? a2ui?
-                      suggestions?]}]
+                      suggestions? threads?]}]
    (cond->
     {:version (or version "clj-agent-agui/0.3")
      :mode "sse"
@@ -393,4 +496,21 @@
      ;; agent 生效」的按 agent 限定（上游 #5369），而我们的 a2ui 是 runtime 级的
      ;; `:event-transform`，对所有 agent 一视同仁；客户端把缺省的 `agents` 解释成
      ;; 「对每个 agent 都生效」（`agent-registry.ts:249`），正是这个意思
-     a2ui? (assoc :a2ui {:enabled true}))))
+     a2ui? (assoc :a2ui {:enabled true})
+
+     ;; 线程面：**只在 web 层真挂了 `/threads` 时才报**。客户端把这四位当成
+     ;; 「这个 runtime 有没有这一档端点」的开关，缺省即降级：
+     ;;   `list`      GET /threads —— `use-threads.tsx:283` 读它，false 就不拉列表
+     ;;   `inspect`   GET /threads/:id/{messages,events,state} —— Inspector 的
+     ;;               线程详情（`web-inspector` 18336/18364）据此才让你点开
+     ;;   `mutations` 改名 / 归档 / DELETE /threads/:id —— `use-threads.tsx:285`
+     ;;   `realtimeMetadata` **报 false**：那是 `/threads/subscribe` 的实时推送，
+     ;;               Intelligence（云产品）的东西，我们如实 404，客户端降级轮询
+     ;;               （报 true 会让 `CopilotChat.tsx:285` 去等一条永远不来的流）
+     ;; 不报这个键 = 客户端 `threadEndpoints` 为 `undefined`，Inspector 的
+     ;; `areThreadEndpointsAvailable()` 判 `typeof undefined === "object"` 为假，
+     ;; 整个线程面对着我们是锁着的——四条路由明明都在跑（联调实测）。
+     threads? (assoc :threadEndpoints {:list true
+                                       :inspect true
+                                       :mutations true
+                                       :realtimeMetadata false}))))

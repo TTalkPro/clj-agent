@@ -3,6 +3,7 @@
    ——`toolCallName` 不是 `name`、`TOOL_CALL_ARGS.delta` 是 **JSON 字符串**。
    这类地方猜错了前端不报错，只会静默少渲染一块，所以钉死。"
   (:require [cheshire.core :as json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [im.ttalk.agent.agui.codec :as codec]
             [im.ttalk.agent.model.message :as msg]))
@@ -155,7 +156,9 @@
           "改参数再执行还没实现")
       (is (nil? (:inspectorMetadata info)))
       (is (nil? (:intelligence info)))
-      (is (false? (:suggestions info))))
+      (is (false? (:suggestions info)))
+      (is (nil? (:threadEndpoints info))
+          "web 层没挂 /threads 就不报这一档——客户端据此降级"))
 
     (testing "插件能力位缺省全 false，且不发 a2ui 对象"
       (is (false? (:openGenerativeUIEnabled info)))
@@ -179,6 +182,63 @@
     (let [both (codec/run-info ["default"] {:a2ui? true :open-generative-ui? true})]
       (is (true? (:a2uiEnabled both)))
       (is (true? (:openGenerativeUIEnabled both))))))
+
+(deftest inbound-context-test
+  (testing "RunAgentInput.context 被解出来——之前整个丢掉，前端 useAgentContext
+            注册的东西从来没进过模型"
+    (let [parsed (codec/parse-run-input
+                  {:threadId "t1" :runId "r1"
+                   :messages [{:id "m1" :role "user" :content "在看哪一页？"}]
+                   :context [{:description "当前页面是" :value "/orders/42"}]})]
+      (is (= [{:description "当前页面是" :value "/orders/42"}] (:context parsed)))))
+
+  (testing "渲染成 system 段：带出处抬头，一条一行"
+    (let [p (codec/context->prompt [{:description "当前页面是" :value "/orders/42"}
+                                    {:description "选中的行" :value "3"}])]
+      (is (str/includes? p "AG-UI context，非用户输入")
+          "不写抬头模型会把页面状态当成用户指令")
+      (is (str/includes? p "- 当前页面是 /orders/42"))
+      (is (str/includes? p "- 选中的行 3"))))
+
+  (testing "value 非字符串按 JSON 打平——schema 说是 string，但
+            useAgentContext 收的是 JsonSerializable，路上谁 stringify 看客户端版本"
+    (is (str/includes? (codec/context->prompt [{:description "购物车" :value {:items 2}}])
+                       "{\"items\":2}")))
+
+  (testing "没有上下文就是 nil——调用方据此**不传** :extra-system-prompts，
+            而不是塞一段空抬头进 system"
+    (is (nil? (codec/context->prompt [])))
+    (is (nil? (codec/context->prompt nil)))
+    (is (nil? (codec/context->prompt [{:description "空的" :value ""}]))
+        "值为空的条目没有信息量，整条丢")))
+
+(deftest parent-run-id-test
+  (testing "入站解出来"
+    (is (= "parent-1" (:parent-run-id (codec/parse-run-input
+                                       {:threadId "t1" :runId "r2"
+                                        :parentRunId "parent-1"
+                                        :messages [{:id "m1" :role "user" :content "hi"}]}))))
+    (is (nil? (:parent-run-id (codec/parse-run-input {:threadId "t1" :runId "r2"})))))
+
+  (testing "出站只挂在 RUN_STARTED 上——协议里 RUN_FINISHED / RUN_ERROR 没有这一位"
+    (is (= {:type "RUN_STARTED" :threadId "t1" :runId "r1" :parentRunId "parent-1"}
+           (codec/->agui (assoc base :type :run/started :parent-run-id "parent-1"))))
+    (is (= {:type "RUN_STARTED" :threadId "t1" :runId "r1"}
+           (codec/->agui (assoc base :type :run/started)))
+        "没有父 run 就不发这个键，而不是发 null")
+    (is (nil? (:parentRunId (codec/->agui (assoc base :type :run/finished
+                                                 :parent-run-id "parent-1")))))))
+
+(deftest thread-endpoints-flag-test
+  (testing "挂了 /threads 才报 :threadEndpoints，且 realtimeMetadata 如实为 false"
+    (let [te (:threadEndpoints (codec/run-info ["default"] {:threads? true}))]
+      (is (= {:list true :inspect true :mutations true :realtimeMetadata false} te))
+      (is (false? (:realtimeMetadata te))
+          "/threads/subscribe 我们如实 404，报 true 会让客户端等一条永远不来的流")))
+
+  (testing "缺省不报——不写这个键 = 告诉客户端「没有」，Inspector 的线程面锁着"
+    (is (nil? (:threadEndpoints (codec/run-info ["default"]))))
+    (is (nil? (:threadEndpoints (codec/run-info ["default"] {:threads? false}))))))
 
 (deftest reasoning-is-a-first-class-message-test
   (testing "思考块走 AG-UI 的 reasoning 消息，不再是 CUSTOM"
@@ -242,3 +302,80 @@
           "扁的 {id,name,args}——事件流那套是 {id,type,function:{name,arguments}}")
       (is (= "tc1" (:toolCallId (nth out 2))))
       (is (nil? (:toolCalls (first out))) "没有工具调用就不发这个键"))))
+
+;;; ============================================================
+;;; 多模态：AG-UI InputContent → 中立部件
+;;; ============================================================
+
+(deftest agui-content->neutral-test
+  (testing "纯文本原样返回 —— 形状一变，每个下游都得先学会拆部件才能收一句「你好」"
+    (is (= "你好" (codec/agui-content->neutral "你好")))
+    (is (nil? (codec/agui-content->neutral nil))))
+
+  (testing "text 部件"
+    (is (= [{:type :text :text "这张图里是什么？"}]
+           (codec/agui-content->neutral [{:type "text" :text "这张图里是什么？"}]))))
+
+  (testing "内联 image：source.type=data → :file + :data + media-type + 文件名"
+    (is (= [{:type :file :media-type "image/png" :data "AAA" :filename "dot.png"}]
+           (codec/agui-content->neutral
+            [{:type "image"
+              :source {:type "data" :value "AAA" :mimeType "image/png"}
+              :metadata {:filename "dot.png"}}]))))
+
+  (testing "远端 url：走 :url 而不是 :data"
+    (let [[p] (codec/agui-content->neutral
+               [{:type "image" :source {:type "url" :value "https://x/a.png"
+                                        :mimeType "image/png"}}])]
+      (is (= "https://x/a.png" (:url p)))
+      (is (nil? (:data p)))))
+
+  (testing "document / audio / video 在中立层不各立一类，统一 :file + media-type"
+    (is (= :file (:type (first (codec/agui-content->neutral
+                                [{:type "document"
+                                  :source {:type "data" :value "JVBER"
+                                           :mimeType "application/pdf"}}])))))
+    (is (= "application/pdf"
+           (:media-type (first (codec/agui-content->neutral
+                                [{:type "document"
+                                  :source {:type "data" :value "JVBER"
+                                           :mimeType "application/pdf"}}]))))))
+
+  (testing "字符串 key 也认（JSON 没经 keywordize 时）"
+    (is (= [{:type :text :text "hi"}]
+           (codec/agui-content->neutral [{"type" "text" "text" "hi"}]))))
+
+  (testing "混排：正文 + 图片，顺序不变"
+    (let [ps (codec/agui-content->neutral
+              [{:type "text" :text "看图"}
+               {:type "image" :source {:type "data" :value "AAA" :mimeType "image/png"}}])]
+      (is (= [:text :file] (mapv :type ps))))))
+
+(deftest parse-run-input-translates-multimodal-test
+  (testing "/run 取最后一条 user 消息 —— 多模态那条要翻成部件，不能 str 成一坨"
+    (let [{:keys [message]}
+          (codec/parse-run-input
+           {:threadId "t1" :runId "r1"
+            :messages [{:role "user"
+                        :content [{:type "text" :text "这是什么"}
+                                  {:type "image"
+                                   :source {:type "data" :value "AAA" :mimeType "image/png"}}]}]})]
+      (is (vector? message))
+      (is (= [:text :file] (mapv :type message)))))
+
+  (testing "纯文本那条不受影响"
+    (is (= "你好" (:message (codec/parse-run-input
+                             {:threadId "t1" :runId "r1"
+                              :messages [{:role "user" :content "你好"}]}))))))
+
+(deftest agui->messages-translates-user-content-test
+  (testing "/suggest 那条路同理：user 的部件数组要翻，system / tool 仍是纯文本"
+    (let [[u s] (codec/agui->messages
+                 [{:role "user" :content [{:type "text" :text "看图"}
+                                          {:type "image"
+                                           :source {:type "data" :value "AAA"
+                                                    :mimeType "image/png"}}]}
+                  {:role "system" :content "你是助手"}])]
+      (is (= :user (:role u)))
+      (is (= [:text :file] (mapv :type (:content u))))
+      (is (= "你是助手" (:content s))))))
