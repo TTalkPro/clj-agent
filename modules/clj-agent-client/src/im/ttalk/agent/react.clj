@@ -134,7 +134,12 @@
                 (catch Throwable t
                   (let [{:keys [message class]} (err/contain-throwable t)]
                     {:value (str "错误: " message)
-                     :error {:class class :message message}})))]
+                     ;; **ex-data 一并带上**：屏障处的路由分支可能要读工具作者标注的
+                     ;; 那几个键（`:subagent-suspended` 就靠里面的 `:spawn-id` 找到
+                     ;; 停着的那个子 agent）。只留 class/message 的话，那条信息在
+                     ;; 这里就断了
+                     :error (cond-> {:class class :message message}
+                              (ex-data t) (assoc :data (ex-data t)))})))]
       ;; 完成即触发（并行下批内顺序不确定；需确定顺序请读 :records）
       (when on-tool-result
         (try (on-tool-result (name fn-key) value) (catch Throwable _ nil)))
@@ -219,11 +224,12 @@
      :errors   (into []
                      (keep (fn [{:keys [tc error]}]
                              (when error
-                               {:id      (:id tc)
-                                :name    (:name tc)
-                                :class   (:class error)
-                                :message (:message error)
-                                :tc      tc})))
+                               (cond-> {:id      (:id tc)
+                                        :name    (:name tc)
+                                        :class   (:class error)
+                                        :message (:message error)
+                                        :tc      tc}
+                                 (:data error) (assoc :data (:data error))))))
                      results)
      :context  context}))
 
@@ -269,7 +275,7 @@
    一次（:reject / {:reply} 不触发）；并行下批内触发顺序不确定。
 
    返回: {:messages [...] :records [...] :context 新ctx
-          :errors [{:id :name :class :message :tc} ...]}
+          :errors [{:id :name :class :message :tc :data?} ...]}
    :errors 为本批失败调用及其故障类别（重试耗尽后仍失败的才出现在此），
    供屏障处策略路由（环境类 → 暂停等人，见 run-tool-loop）。"
   ([chat-client tool-calls gate tool-context init-records]
@@ -475,6 +481,35 @@
                                                 "已取消（上一轮工具调用未审批/未恢复）")
                               dangling))))))
 
+(defn- subagent-pause
+  "委派出去的子 agent 挂起 → 父也停下来等人（批已执行完，只有挂起那几个没结果）。
+
+   与 `env-pause` 的分工：那个是「工具坏了、修好再重跑」，这个是「子 agent 在等人、
+   人答完接着往下跑」。所以 resume 的语义也不同——不是 `:retry`（重跑），而是把
+   决定**送进那个停着的子 agent**（见 `resume-subagent`）。
+
+   `:by-call` 是 tool-call id → spawn id 的对照表：同一批里几个委派并发挂起时，
+   人的答复要落到正确那一个上，猜不得。
+
+   `:pending-tool` 取**子 agent 里那把敏感工具**（不是委派工具本身）——用户要审批的
+   是「子 agent 想做什么」，`SUBAGENT_STARTED` 那张卡片下面显示的也是它。"
+  [suspended batch-messages records remaining tctx]
+  (let [by-call (into {} (map (fn [e] [(:id (:tc e)) (:spawn-id (:data e))])) suspended)
+        first-e (first suspended)]
+    {:status :paused
+     :pause-reason (str "子 agent 等待人工答复: "
+                        (clojure.string/join "; " (map :message suspended)))
+     :loop-state {:phase          :subagent-suspended
+                  :batch-messages batch-messages
+                  :suspended-calls (mapv :tc suspended)
+                  :by-call        by-call
+                  :remaining      remaining
+                  :records        records}
+     :pending-tool (or (:pending-tool (:data first-e))
+                       {:name (:name first-e) :args (:args (:tc first-e)) :tool-call (:tc first-e)})
+     :tool-calls-made records
+     :tool-context tctx}))
+
 (defn- env-pause
   "构造环境类错误的暂停返回值（屏障处策略钩子，S2）。
    批次已执行完且结果/写折叠均已落定；暂停发生在「结果交给模型之前」。
@@ -660,8 +695,15 @@
                               _ (vreset! records* records)
                               _ (vswap! remaining* dec)
                               env-errors (when (= :pause (:on-env-error policy))
-                                           (filterv #(= :environment (:class %)) errors))]
+                                           (filterv #(= :environment (:class %)) errors))
+                              ;; **不看 `:on-env-error` 策略**：那是「环境坏了要不要
+                              ;; 停」的选择，而子 agent 挂起是人已经被叫住了，没得选
+                              suspended (filterv #(= :subagent-suspended (:class %)) errors)]
                           (cond
+                            ;; 屏障处第一支：委派出去的子 agent 在等人答复
+                            (seq suspended)
+                            (subagent-pause suspended messages records @remaining* context)
+
                             ;; 屏障处策略钩子：环境类失败 → 带一致快照暂停等人
                             (seq env-errors)
                             (env-pause env-errors messages records @remaining* context)
@@ -820,6 +862,55 @@
   (let [by-id (into {} (map (juxt :tool-call-id identity)) retry-messages)]
     (mapv #(or (get by-id (:tool-call-id %)) %) orig-messages)))
 
+(defn- resume-subagent
+  "从 `:subagent-suspended` 暂停恢复：人的答复要送进**那个停着的子 agent**。
+
+   与 `resume-env` 的形状一样（重跑挂起那几个调用、结果按 id 替换进原批次消息），
+   但**语义相反**：那边是「环境修好了，把工具重跑一遍」；这边重跑的是同一个委派
+   工具，而它认出 ToolContext 里的 `:subagent/resume` 之后**不会重开子 agent**，
+   而是把决定送进停着的那个（`delegate/resume-target` → `mgr/resume!`）。
+   重开等于把人刚才的答复扔了、token 再烧一遍。
+
+   `:observer` 从 opts 的 context 里拿——续跑发生在**新的一条 run** 上，事件要进
+   新那条流；lane id 仍由 spawn id 决定，所以 `subagentRunId` 跨 resume 不变。
+
+   续跑之后还可能再次挂起（子 agent 一轮里连着两个敏感工具），那时照样落回同一个
+   `subagent-pause`，人再答一次。"
+  [chat-client {:keys [batch-messages suspended-calls by-call remaining records]}
+   decision opts run loop-fn]
+  (let [tctx (or (:context opts) (ctx/create))
+        gate (:tool-gate opts)
+        callbacks (or (:callbacks opts) {})
+        policy {:on-env-error (or (:on-env-error opts) :pause)}
+        chat-opts (build-chat-opts chat-client opts)
+        ;; 决定 + 对照表钉进 ToolContext，委派工具在 handler 里认它
+        tctx (assoc tctx :subagent/resume {:decision decision
+                                           :payload (:payload opts)
+                                           :by-call by-call
+                                           :observer (:subagent/observer tctx)})]
+    (-> (run (fn []
+               (let [response (response/make-response :tool-calls suspended-calls)
+                     batch-opts {:gate nil
+                                 :tool-context tctx
+                                 :records records
+                                 :on-tool-result (:on-tool-result callbacks)}
+                     {:keys [messages records context errors]}
+                     (if-let [tm (:tool-manager chat-client)]
+                       (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
+                       (execute-batch chat-client suspended-calls nil tctx records
+                                      (:on-tool-result callbacks)))]
+                 {:merged (replace-tool-results batch-messages messages)
+                  :records records
+                  ;; **续跑用的钥匙不留在 context 里**：它只对这一批有效，
+                  ;; 折进长期 context 会让下一轮的委派误以为自己也在续跑
+                  :context (dissoc context :subagent/resume)
+                  :suspended (filterv #(= :subagent-suspended (:class %)) errors)})))
+        (flt/fbind (fn [{:keys [merged records context suspended]}]
+                     (if (seq suspended)
+                       (subagent-pause suspended merged records remaining context)
+                       (loop-fn chat-client merged remaining records context
+                                gate chat-opts callbacks policy)))))))
+
 (defn- resume-env
   "从 :env-retry 暂停恢复（批已执行、环境类失败）。
    decision :retry   → 环境已修复：重跑失败调用，结果按 id 替换进原批次消息；
@@ -866,8 +957,9 @@
   [chat-client loop-state decision opts run loop-fn]
   (let [continuation
         (fn []
-          (if (= :env-retry (:phase loop-state))
-            (resume-env chat-client loop-state decision opts run loop-fn)
+          (case (:phase loop-state)
+            :env-retry          (resume-env chat-client loop-state decision opts run loop-fn)
+            :subagent-suspended (resume-subagent chat-client loop-state decision opts run loop-fn)
             (resume-approval chat-client loop-state decision opts run loop-fn)))
         tctx (or (:context opts) (ctx/create))
         max-iter (or (:max-iterations opts)
