@@ -581,7 +581,8 @@
   ([port agent-spec] (start! port agent-spec "/api/copilotkit" nil))
   ([port agent-spec base-path] (start! port agent-spec base-path nil))
   ([port agent-spec base-path {:keys [event-transform input-transform open-generative-ui?
-                                      a2ui? suggestions? mcp-proxy threads?]}]
+                                      a2ui? suggestions? mcp-proxy threads? multimodal
+                                      parallel-tools? max-iterations]}]
    (let [runtime (rt/runtime (cond-> {:agent-fn (agui-tools/agent-fn agent-spec)
                                       ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled）
                                       :on-concurrent :supersede}
@@ -597,6 +598,13 @@
                                        ;; `/info` 的线程档能力位——挂了 `/threads`
                                        ;; 才报（见 `codec/run-info` 的 :threadEndpoints）
                                        :threads? (boolean threads?)
+                                       ;; 多模态能力位：**装配方说了算**，库不猜
+                                       ;; （见 `codec/run-info` 的 :multimodal）
+                                       :multimodal multimodal
+                                       ;; 同上：这两格也只有装配方知道
+                                       ;; （工具引擎是不是并行的、循环上限是多少）
+                                       :parallel-tools? parallel-tools?
+                                       :max-iterations max-iterations
                                        ;; 这两位都是 `/info` 的能力位：前端据此才注册
                                        ;; 对应的 renderer（`codec/run-info` 的注释）
                                        :a2ui? a2ui?

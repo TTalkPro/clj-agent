@@ -46,10 +46,34 @@
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.pause :as pause]
             [im.ttalk.agent.provider.minimax :as minimax]
+            [im.ttalk.agent.provider.zhipu :as zhipu]
+            ;; 只为读 `default-max-iterations`——`/info` 的 execution 那一格要如实
+            ;; 报循环上限，抄一份魔数过来迟早对不上
+            [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :refer [deftool]]))
 
-(def auth-token (or (System/getenv "MINIMAX_API_KEY")
-                    (System/getenv "MINIMAX_AUTH_TOKEN")))
+(def provider-id
+  "挂哪个 provider —— `CLJ_AGENT_PROVIDER=zhipu` 换成智谱（读 `ZHIPU_API_KEY`），
+   缺省 minimax（读 `MINIMAX_API_KEY`）。
+
+   为什么值得有这个开关：MiniMax-M2.7 **没有视觉**，多模态那条链路端到端验不了
+   （AG-UI 翻译、wire 编码都通，断在模型）。换一个有视觉的模型才走得完最后一公里。"
+  (keyword (or (System/getenv "CLJ_AGENT_PROVIDER") "minimax")))
+
+(def model
+  "模型名 —— `CLJ_AGENT_MODEL` 覆盖，缺省用该 provider 的 `default-model`。"
+  (or (System/getenv "CLJ_AGENT_MODEL")
+      (case provider-id
+        :zhipu zhipu/default-model
+        minimax/default-model)))
+
+(def auth-token
+  "当前 provider 的 key。**智谱这条路不用显式传**——`zhipu/create-provider` 自己
+   从 `ZHIPU_API_KEY` 读；这里取出来只为启动时检查「配没配」。"
+  (case provider-id
+    :zhipu (System/getenv "ZHIPU_API_KEY")
+    (or (System/getenv "MINIMAX_API_KEY")
+        (System/getenv "MINIMAX_AUTH_TOKEN"))))
 
 (def genui?
   "Open Generative UI 插件（`copilotkit.genui`，本目录下）——**默认不装**。
@@ -98,8 +122,10 @@
   (str "数据库已清空（confirm=" confirm "）"))
 
 (defn- base-spec []
-  {:provider (minimax/create-provider {:api-key auth-token})
-   :model minimax/default-model
+  {:provider (case provider-id
+               :zhipu (zhipu/create-provider {:api-key auth-token})
+               (minimax/create-provider {:api-key auth-token}))
+   :model model
    :max-tokens 1024
    :tools [#'get-weather #'wipe-database]
    ;; 跨 run 共享：历史归 ChatMemory，暂停快照归 PauseStore
@@ -130,8 +156,38 @@
    ChatMemory + 事件缓冲，前端于是有了线程列表。`CLJ_AGENT_THREADS=0` 关掉。"
   (not= "0" (System/getenv "CLJ_AGENT_THREADS")))
 
+(def vision?
+  "这台运行时收不收图片——**装配方说了算**，库不猜（见 `codec/run-info` 的
+   `:multimodal`）。缺省 **false**，因为**缺省**挂的 `MiniMax-M2.7` 没有视觉：
+   实测直接打它的 anthropic 兼容端点、带标准 `image` 块，模型自己回「我看不到
+   任何图片」，thinking 里说「没有提供任何图片链接或图片描述」——那个端点把
+   image 块静默丢了。
+
+   所以缺省报 false 不是保守，是如实：AG-UI 那一跳的翻译（`codec/agui-content->neutral`）
+   与 wire 那一跳（`wire/anthropic` / `wire/openai` 都认 `:file` 部件）都是通的，
+   断在模型。换成有视觉的模型时 `CLJ_AGENT_VISION=1` 打开，例如：
+
+       CLJ_AGENT_PROVIDER=zhipu CLJ_AGENT_MODEL=glm5.3-flash CLJ_AGENT_VISION=1
+
+   ⛔ 刻意**不按模型名自动推断**：同一个 provider 下有视觉的没视觉的都有，
+   猜错了就是谎报能力位（见 feedbacks/2026-09-04-info-does-not-advertise-multimodal.md）。
+
+   为什么值得报这一格：不报，客户端只能**盲发**——要么永远摆一颗回形针（点了
+   才发现发过去没用），要么永远不摆（有能力也用不上）。"
+  (= "1" (System/getenv "CLJ_AGENT_VISION")))
+
 (defn- plugin-opts [spec]
-  (cond-> {:suggestions? suggest? :threads? threads?}
+  (cond-> {:suggestions? suggest? :threads? threads?
+           ;; 只报真支持的：输出侧我们一样都不产（不生成图片 / 音频）
+           :multimodal {:input {:image vision? :pdf false :audio false :video false}
+                        :output {:image false :audio false}}
+           ;; **本 demo 没注入 ToolCallingManager**，走的是缺省的 Sequential 引擎
+           ;; ——同轮多个 tool-call 顺序执行，所以如实报 false。要并行就给
+           ;; `create-agent` 传一个自建的 `:chat-client`，里面挂
+           ;; `react/virtual-thread-tool-calling-manager`，这里跟着改成 true
+           :parallel-tools? false
+           ;; 没设就是框架缺省——从常量读，不在这儿抄一个数
+           :max-iterations (or (:max-iterations spec) agent/default-max-iterations)}
     genui? (assoc :event-transform (genui/event-transform)
                   :open-generative-ui? true)
     ;; 两个插件都装时，事件流各过一遍：外层先跑 a2ui，再把结果逐条喂给 genui
@@ -169,7 +225,9 @@
   ([] (start! 4002))
   ([port]
    (when-not auth-token
-     (println "需要 MINIMAX_API_KEY（或旧变量 MINIMAX_AUTH_TOKEN）")
+     (println (case provider-id
+                :zhipu "需要 ZHIPU_API_KEY"
+                "需要 MINIMAX_API_KEY（或旧变量 MINIMAX_AUTH_TOKEN）"))
      (System/exit 1))
    ;; **spec 只建一次**：`make-spec` 会去连 MCP server（`tools/list`），
    ;; 建两次就连两次
@@ -177,6 +235,7 @@
          s (routes/start! port spec "/api/copilotkit" (plugin-opts spec))]
      (reset! state s)
      (println (str "clj-agent AG-UI runtime 已启动: http://localhost:" port "/api/copilotkit"))
+     (println (str "  · provider/model：" (name provider-id) " / " model))
      (println (if genui?
                 "  · Open Generative UI 插件：已装（generateSandboxedUi）"
                 "  · Open Generative UI 插件：未装（CLJ_AGENT_GENUI=1 打开）"))
@@ -189,6 +248,9 @@
      (println (if threads?
                 "  · /threads 线程只读面：开"
                 "  · /threads 线程只读面：关（CLJ_AGENT_THREADS=0）"))
+     (println (if vision?
+                "  · 多模态输入：报 image=true（CLJ_AGENT_VISION=1）"
+                "  · 多模态输入：报 image=false（MiniMax-M2.7 无视觉；CLJ_AGENT_VISION=1 打开）"))
      (println (if (seq mcp-servers)
                 (str "  · MCP：已接 " (count mcp-servers) " 个 server "
                      (mapv :url mcp-servers))
