@@ -489,10 +489,16 @@
    再交给 `useCapabilities`）。我们报的这三位都是真的：会暂停等人
    （`supported`）、敏感工具要审批（`approvals`）、走 AG-UI 的 interrupt 协议
    （`interrupts`：`RUN_FINISHED outcome=interrupt` + 收 `resume[]`）。
-   **`approveWithEdits` 不报**——改参数再执行我们还没实现，不谎报。"
+   **`approveWithEdits` 不报**——改参数再执行我们还没实现，不谎报。
+
+   `multimodal` 是**装配方传进来的**，本 ns 不猜：能不能收图取决于两件事——
+   wire 认不认部件（`wire/anthropic` / `wire/openai` 都认）**且模型本身有视觉**，
+   而后一条 codec 这层判不了。⛔ 也别按「provider 是谁」硬编码：同一个 provider
+   下 `MiniMax-M2.7` 没视觉、`qwen-vl` 有。不传就不报这一格——客户端据此把附件
+   入口收起来，比摆一颗点了才发现没用的回形针强。"
   ([agent-ids] (run-info agent-ids nil))
   ([agent-ids {:keys [version descriptions capabilities open-generative-ui? a2ui?
-                      suggestions? threads?]}]
+                      suggestions? threads? multimodal parallel-tools? max-iterations]}]
    (cond->
     {:version (or version "clj-agent-agui/0.3")
      :mode "sse"
@@ -501,10 +507,36 @@
                           [id {:name id
                                :className "CljAgent"
                                :description (get descriptions id "")
-                               :capabilities (or capabilities
-                                                 {:humanInTheLoop {:supported true
-                                                                   :approvals true
-                                                                   :interrupts true}})}]))
+                               :capabilities
+                               (cond-> (or capabilities
+                                           (cond->
+                                            {:humanInTheLoop {:supported true
+                                                              :approvals true
+                                                              :interrupts true}
+                                             ;; AG-UI 的出口就是 SSE，token 逐个发
+                                             ;; ——这一格是本层的事实，与模型无关
+                                             :transport {:streaming true}
+                                             :tools
+                                             {:supported true
+                                              ;; `RunAgentInput.tools` 里的前端工具
+                                              ;; 我们认（`agui-tools/frontend-tool`）
+                                              :clientProvided true
+                                              ;; **取决于装配时注入的 ToolCallingManager**：
+                                              ;; 缺省引擎（Sequential）全程内联，是串行；
+                                              ;; 要并行得注入 `virtual-thread-tool-calling-manager`。
+                                              ;; 不传即 false —— 缺省构建下那就是实情
+                                              :parallelCalls (boolean parallel-tools?)}
+                                             ;; 我们发 REASONING_* 一族（`:reasoning/started`
+                                             ;; → `:message/thinking` → `:reasoning/ended`）。
+                                             ;; **读作「模型出思考我们就送到」，不是
+                                             ;; 「模型一定有思考」**——后者本层判不了，
+                                             ;; 同 `multimodal` 那一格的分工
+                                             :reasoning {:supported true :streaming true}}
+                                             ;; 循环上限：装配方传，别在这儿抄一份缺省值
+                                             ;; （`simple-agent/default-max-iterations`）
+                                             max-iterations
+                                             (assoc :execution {:maxIterations max-iterations})))
+                                 multimodal (assoc :multimodal multimodal))}]))
                    agent-ids)
      :audioFileTranscriptionEnabled false
      ;; 报 true 客户端才会走 `/suggest` 那条无状态路；报 false（或不报）它就把
@@ -519,27 +551,35 @@
      ;; `a2uiInfo?.enabled ?? a2uiEnabled ?? false`（`agent-registry.ts:1351`）——
      ;; 扁平那个是给老客户端的兼容位，对象那个才是新的真相源
      :a2uiEnabled (boolean a2ui?)
-     :telemetryDisabled true}
+     :telemetryDisabled true
+
+     ;; 线程面。四位分别对着客户端的四个读取点：
+     ;;   `list`      GET /threads —— `use-threads.tsx:283` 读它，false 就不拉列表
+     ;;   `inspect`   GET /threads/:id/{messages,events,state} —— Inspector 的
+     ;;               线程详情（`web-inspector` 18336/18364）据此才让你点开
+     ;;   `mutations` 改名 / 归档 / DELETE /threads/:id —— `use-threads.tsx:285`
+     ;;   `realtimeMetadata` **恒 false**：那是 `/threads/subscribe` 的实时推送，
+     ;;               Intelligence（云产品）的东西，我们如实 404，客户端降级轮询
+     ;;               （报 true 会让 `CopilotChat.tsx:285` 去等一条永远不来的流）
+     ;;
+     ;; **无论开关开还是关，这个键都发**——关的时候发一份全 false，而不是省略。
+     ;; 省略与「明确说没有」在客户端那儿是两码事：`undefined` 只能理解成「这台
+     ;; 没说」，于是它只好盲发一枪 `/threads` 拿 404 当答案（happy 的 TASK.md 就
+     ;; 明写了「那一枪故意保留：不是所有运行时都声明 threadEndpoints」）。而
+     ;; **「探测式能力发现」正是 `/info` 该消灭的东西**——同 usage 那条反馈里的
+     ;; 「别在 /info 里留想象空间」。
+     ;;
+     ;; 这也不违反「不谎报能力位」：那条禁的是**报了没有的**，不是禁「如实说没有」。
+     ;; 全 false 与省略在协议语义上等价（`list !== false` 两边都判否），差别只在
+     ;; 客户端要不要多打一枪才知道。
+     :threadEndpoints {:list (boolean threads?)
+                       :inspect (boolean threads?)
+                       :mutations (boolean threads?)
+                       :realtimeMetadata false}}
 
      ;; 对象只在开着时发，与上游一致。**不带 `agents`**——那是「A2UI 只对某几个
      ;; agent 生效」的按 agent 限定（上游 #5369），而我们的 a2ui 是 runtime 级的
      ;; `:event-transform`，对所有 agent 一视同仁；客户端把缺省的 `agents` 解释成
      ;; 「对每个 agent 都生效」（`agent-registry.ts:249`），正是这个意思
-     a2ui? (assoc :a2ui {:enabled true})
+     a2ui? (assoc :a2ui {:enabled true}))))
 
-     ;; 线程面：**只在 web 层真挂了 `/threads` 时才报**。客户端把这四位当成
-     ;; 「这个 runtime 有没有这一档端点」的开关，缺省即降级：
-     ;;   `list`      GET /threads —— `use-threads.tsx:283` 读它，false 就不拉列表
-     ;;   `inspect`   GET /threads/:id/{messages,events,state} —— Inspector 的
-     ;;               线程详情（`web-inspector` 18336/18364）据此才让你点开
-     ;;   `mutations` 改名 / 归档 / DELETE /threads/:id —— `use-threads.tsx:285`
-     ;;   `realtimeMetadata` **报 false**：那是 `/threads/subscribe` 的实时推送，
-     ;;               Intelligence（云产品）的东西，我们如实 404，客户端降级轮询
-     ;;               （报 true 会让 `CopilotChat.tsx:285` 去等一条永远不来的流）
-     ;; 不报这个键 = 客户端 `threadEndpoints` 为 `undefined`，Inspector 的
-     ;; `areThreadEndpointsAvailable()` 判 `typeof undefined === "object"` 为假，
-     ;; 整个线程面对着我们是锁着的——四条路由明明都在跑（联调实测）。
-     threads? (assoc :threadEndpoints {:list true
-                                       :inspect true
-                                       :mutations true
-                                       :realtimeMetadata false}))))

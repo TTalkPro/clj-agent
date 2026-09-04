@@ -157,8 +157,9 @@
       (is (nil? (:inspectorMetadata info)))
       (is (nil? (:intelligence info)))
       (is (false? (:suggestions info)))
-      (is (nil? (:threadEndpoints info))
-          "web 层没挂 /threads 就不报这一档——客户端据此降级"))
+      (is (= {:list false :inspect false :mutations false :realtimeMetadata false}
+             (:threadEndpoints info))
+          "没挂 /threads 也要**明说没有**，不是省略——见 thread-endpoints-flag-test"))
 
     (testing "插件能力位缺省全 false，且不发 a2ui 对象"
       (is (false? (:openGenerativeUIEnabled info)))
@@ -270,6 +271,49 @@
     (is (some? (:usage (codec/->agui (assoc base :type :run/paused
                                             :usage [{:input-tokens 1}])))))))
 
+(deftest capability-slots-test
+  (testing "本层的事实照报：SSE 流式、认前端工具、送 reasoning"
+    (let [caps (get-in (codec/run-info ["default"]) [:agents "default" :capabilities])]
+      (is (= {:streaming true} (:transport caps)))
+      (is (true? (get-in caps [:tools :supported])))
+      (is (true? (get-in caps [:tools :clientProvided]))
+          "RunAgentInput.tools 里的前端工具我们认")
+      (is (= {:supported true :streaming true} (:reasoning caps))
+          "读作「模型出思考我们就送到」，不是「模型一定有思考」")))
+
+  (testing "parallelCalls 取决于装配时的 ToolCallingManager——缺省引擎是串行，
+            不传即 false，那是缺省构建下的实情，不是保守"
+    (is (false? (get-in (codec/run-info ["default"])
+                        [:agents "default" :capabilities :tools :parallelCalls])))
+    (is (true? (get-in (codec/run-info ["default"] {:parallel-tools? true})
+                       [:agents "default" :capabilities :tools :parallelCalls]))))
+
+  (testing "execution 只在装配方给了循环上限时报——本 ns 不抄一份缺省值"
+    (is (nil? (get-in (codec/run-info ["default"])
+                      [:agents "default" :capabilities :execution])))
+    (is (= {:maxIterations 6} (get-in (codec/run-info ["default"] {:max-iterations 6})
+                                      [:agents "default" :capabilities :execution]))))
+
+  (testing "装配方整份传 :capabilities 就整份接管（既有语义没变）"
+    (let [caps (get-in (codec/run-info ["default"] {:capabilities {:自定义 true}})
+                       [:agents "default" :capabilities])]
+      (is (= {:自定义 true} caps)))))
+
+(deftest multimodal-capability-test
+  (testing "装配方传了才报——库自己不猜（wire 认部件 ≠ 模型有视觉）"
+    (let [mm {:input {:image true :pdf true :audio false :video false}
+              :output {:image false :audio false}}
+          info (codec/run-info ["default"] {:multimodal mm})]
+      (is (= mm (get-in info [:agents "default" :capabilities :multimodal])))
+      (is (some? (get-in info [:agents "default" :capabilities :humanInTheLoop]))
+          "多模态是**加一格**，不是把原来那族顶掉")
+      (is (some? (get-in info [:agents "default" :capabilities :transport]))
+          "其余几格也还在")))
+
+  (testing "不传就不报这一格——客户端据此把附件入口收起来，好过盲发"
+    (is (nil? (get-in (codec/run-info ["default"])
+                      [:agents "default" :capabilities :multimodal])))))
+
 (deftest thread-endpoints-flag-test
   (testing "挂了 /threads 才报 :threadEndpoints，且 realtimeMetadata 如实为 false"
     (let [te (:threadEndpoints (codec/run-info ["default"] {:threads? true}))]
@@ -277,9 +321,18 @@
       (is (false? (:realtimeMetadata te))
           "/threads/subscribe 我们如实 404，报 true 会让客户端等一条永远不来的流")))
 
-  (testing "缺省不报——不写这个键 = 告诉客户端「没有」，Inspector 的线程面锁着"
-    (is (nil? (:threadEndpoints (codec/run-info ["default"]))))
-    (is (nil? (:threadEndpoints (codec/run-info ["default"] {:threads? false}))))))
+  (testing "**关着也发，发一份全 false**——不是省略。
+
+            省略与「明确说没有」在客户端那儿是两码事：`undefined` 只能理解成
+            「这台没说」，于是它只好盲发一枪 `/threads` 拿 404 当答案（happy 的
+            TASK.md 明写「那一枪故意保留：不是所有运行时都声明 threadEndpoints」）。
+            探测式能力发现正是 `/info` 该消灭的东西。"
+    (let [off {:list false :inspect false :mutations false :realtimeMetadata false}]
+      (is (= off (:threadEndpoints (codec/run-info ["default"]))))
+      (is (= off (:threadEndpoints (codec/run-info ["default"] {:threads? false}))))
+      (is (false? (get-in (codec/run-info ["default"]) [:threadEndpoints :list]))
+          "客户端读的是 `list !== false`——显式 false 与省略同样判否，
+           差别只在它要不要多打一枪才知道"))))
 
 (deftest reasoning-is-a-first-class-message-test
   (testing "思考块走 AG-UI 的 reasoning 消息，不再是 CUSTOM"
