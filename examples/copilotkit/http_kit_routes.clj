@@ -181,6 +181,48 @@
     (some? payload)                           (decision-of payload)
     :else                                     "approved"))
 
+(defn- payload-text
+  "`resume[].payload` → 交给模型的文本。
+
+   **优先拆 `result`**：我们自己在 `responseSchema` 里就是这么要的
+   （`{\"result\": …}`，见 `codec` 的 `frontend-tool-response-schema`），客户端照
+   schema 填回来的就是这个形状。不拆的话模型读到的是一层没有意义的包装。
+
+   其余 map 走 JSON —— `(str m)` 会印成 Clojure 字面量（`{:result \"x\"}`），
+   模型那边是没见过的方言。"
+  [payload]
+  (cond
+    (nil? payload) nil
+    (map? payload) (let [r (or (:result payload) (get payload "result"))]
+                     (if (some? r) (str r) (json/generate-string payload)))
+    :else (str payload)))
+
+(defn- frontend-reply
+  "前端工具那支的 resume 载荷 → 交给模型的**工具结果文本**。
+
+   ⛔ 不能直接 `(str payload)`：取消时协议里 `payload` 本来就可以缺席，`str` 一下
+   得到的是**空字符串**——那成了「这次调用的结果」，模型读到一个空结果反而宣布
+   「已成功执行」，拒绝往成功的方向被吃掉（实测，见 feedbacks/
+   2026-09-04-frontend-tool-pause-looks-like-an-approval.md）。
+
+   所以 `status` 是一等字段，**先看它**（同 `resume-decision` 的口径）：取消就明说
+   没执行，让模型知道这一步作废；有载荷才当结果。"
+  [resume-entry tool-result]
+  (let [text (payload-text (:payload resume-entry))
+        content (:content tool-result)]
+    (cond
+      ;; **取消的框子不能丢**：载荷只是「为什么」，不是「结果」。丢了框子模型会
+      ;; 把它当成执行结果；丢了载荷则丢掉用户给的理由——两个都要
+      (= "cancelled" (:status resume-entry))
+      (str "用户取消了这次调用，该工具**未执行**，没有结果。"
+           (when text (str "用户说明：" text)))
+
+      (some? text) text
+      (some? content) (str content)
+      ;; resolved 但什么都没带：客户端认为「执行完了、没有返回值」——如实说，
+      ;; 别让模型把空串当成内容
+      :else "该工具已在客户端执行完成，但没有返回任何结果。")))
+
 (defn- matching-resume
   "本次请求里、针对**当前这条**暂停的 resume 条目。
 
@@ -272,8 +314,7 @@
                  ;; 前端工具被 resolve：载荷**即**结果（ask-user 语义）
                  resume-entry
                  (rt/resume-run! runtime conversation-id "reply"
-                                 {:message (str (or (:payload resume-entry)
-                                                    (:content tool-result)))}
+                                 {:message (frontend-reply resume-entry tool-result)}
                                  ctx-opts)
 
                  ;; 审批：挂起的是**服务端**工具 → 载荷是决策，工具还要真去执行
