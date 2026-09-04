@@ -53,7 +53,7 @@
           (doseq [m new-msgs]
             (jdbc/execute! tx
               ["INSERT INTO chat_messages (conversation_id, content) VALUES (?, ?)"
-               conv-id (pr-str (msg/normalize m))])))))
+               conv-id (pr-str (msg/ensure-id (msg/normalize m)))])))))
     nil)
   (mem-clear [_ conv-id]
     (locking conn

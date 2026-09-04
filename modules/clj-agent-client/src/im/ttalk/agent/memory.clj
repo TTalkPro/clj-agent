@@ -23,7 +23,9 @@
 
 (defprotocol ChatMemory
   (mem-get   [this conv-id] "返回该会话的中立消息列表（无则 [])")
-  (mem-add   [this conv-id msgs] "追加中立消息列表")
+  (mem-add   [this conv-id msgs]
+    "追加中立消息列表。**实现方要给消息补 `:id`**（`msg/ensure-id`）——
+     落库是消息获得身份的时刻，跨快照的稳定 id 全靠这一步（见 message ns）。")
   (mem-clear [this conv-id] "清空该会话"))
 
 ;;; ============================================================
@@ -35,7 +37,7 @@
   (mem-get [_ conv-id]
     (get @state conv-id []))
   (mem-add [_ conv-id new-msgs]
-    (let [norm (mapv msg/normalize new-msgs)]
+    (let [norm (mapv (comp msg/ensure-id msg/normalize) new-msgs)]
       (swap! state update conv-id (fnil into []) norm))
     nil)
   (mem-clear [_ conv-id]

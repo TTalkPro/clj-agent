@@ -11,6 +11,13 @@
 ;;; P2: store
 ;;; ============================================================
 
+(defn- no-ids
+  "去掉 `:id` 再比。落库时 store 会补一个（`msg/ensure-id`，跨快照稳定的那个），
+   所以「存进去的和构造出来的逐字相等」这类断言要先把它摘掉——身份本身另有
+   `ids-are-stable-and-unique-test` 钉着。"
+  [ms]
+  (mapv #(dissoc % :id) ms))
+
 (deftest in-memory-basic
   (let [s (mem/in-memory-store)]
     (testing "空会话返回 []"
@@ -19,12 +26,12 @@
       (mem/mem-add s "c1" [(msg/user "a")])
       (mem/mem-add s "c1" [(msg/assistant "b")])
       (mem/mem-add s "c2" [(msg/user "x")])
-      (is (= [(msg/user "a") (msg/assistant "b")] (mem/mem-get s "c1")))
-      (is (= [(msg/user "x")] (mem/mem-get s "c2"))))
+      (is (= [(msg/user "a") (msg/assistant "b")] (no-ids (mem/mem-get s "c1"))))
+      (is (= [(msg/user "x")] (no-ids (mem/mem-get s "c2")))))
     (testing "clear"
       (mem/mem-clear s "c1")
       (is (= [] (mem/mem-get s "c1")))
-      (is (= [(msg/user "x")] (mem/mem-get s "c2"))))))
+      (is (= [(msg/user "x")] (no-ids (mem/mem-get s "c2")))))))
 
 (deftest in-memory-normalizes-legacy
   (let [s (mem/in-memory-store)]
@@ -35,7 +42,7 @@
   (let [s (mem/windowed (mem/in-memory-store) {:max-messages 2})]
     (mem/mem-add s "c" [(msg/user "1") (msg/assistant "2") (msg/user "3")])
     (testing "只返回尾部 2 条，底层仍完整"
-      (is (= [(msg/assistant "2") (msg/user "3")] (mem/mem-get s "c"))))))
+      (is (= [(msg/assistant "2") (msg/user "3")] (no-ids (mem/mem-get s "c")))))))
 
 (deftest windowed-preserves-system-and-drops-orphan-tool
   (let [s (mem/windowed (mem/in-memory-store) {:max-messages 1})]
@@ -71,16 +78,36 @@
         晴 (resp/make-response :text "晴" :tool-calls nil)]
     (testing "首轮：terminal 看到 [user]，回复被存"
       (let [{:keys [seen]} (run-filter store [(msg/user "北京天气?")] tc 晴)]
-        (is (= [(msg/user "北京天气?")] seen))))
+        (is (= [(msg/user "北京天气?")] (no-ids seen)))))
     (testing "次轮：只传 delta，terminal 看到完整历史（含上一轮回复）"
       (let [{:keys [seen]} (run-filter store [(msg/user "明天呢?")] tc 晴)]
-        (is (= [(msg/user "北京天气?") (msg/assistant "晴") (msg/user "明天呢?")] seen))))))
+        (is (= [(msg/user "北京天气?") (msg/assistant "晴") (msg/user "明天呢?")]
+               (no-ids seen)))))))
 
 (deftest memory-filter-stores-reply
   (let [store (mem/in-memory-store)]
     (run-filter store [(msg/user "hi")] {:conversation-id "s2"}
                  (resp/make-response :text "你好" :tool-calls nil))
-    (is (= [(msg/user "hi") (msg/assistant "你好")] (mem/mem-get store "s2")))))
+    (is (= [(msg/user "hi") (msg/assistant "你好")] (no-ids (mem/mem-get store "s2"))))))
+
+(deftest ids-are-stable-and-unique-test
+  (testing "落库即获得身份：每条一个 `:id`，读多少次都是同一个，条条不同。
+
+            以前 AG-UI 的 MESSAGES_SNAPSHOT / /threads/:id/messages 只能按下标
+            合成 id，而 heal-dangling / replace-tool-results 会让位置漂——同一条
+            消息在两次快照里拿到不同 id，前端据此做的增量更新就错位。"
+    (let [s (mem/in-memory-store)]
+      (mem/mem-add s "c" [(msg/user "a") (msg/assistant "b")])
+      (mem/mem-add s "c" [(msg/user "c")])
+      (let [ids (mapv :id (mem/mem-get s "c"))]
+        (is (every? string? ids))
+        (is (= 3 (count (set ids))) "条条不同")
+        (is (= ids (mapv :id (mem/mem-get s "c"))) "再读一次还是同一批 id"))))
+
+  (testing "调用方自带 `:id` 就不覆盖——重放 / 迁移进来的历史保住原身份"
+    (let [s (mem/in-memory-store)]
+      (mem/mem-add s "c" [(assoc (msg/user "a") :id "外面给的")])
+      (is (= ["外面给的"] (mapv :id (mem/mem-get s "c")))))))
 
 (deftest memory-filter-stores-tool-calls
   (let [store (mem/in-memory-store)

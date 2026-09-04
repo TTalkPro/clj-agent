@@ -14,6 +14,16 @@
     :tool-calls [{:id \"c1\" :name \"get_weather\" :args {:city \"北京\"}}]}
    {:role :tool :tool-call-id \"c1\" :name \"get_weather\" :content \"晴 22°C\"}
 
+   消息可带 **:id**（可选）：**进 ChatMemory 时由 store 补上**（`ensure-id`），
+   一旦落库就不再变。它解决的是**跨快照稳定**：AG-UI 的 `MESSAGES_SNAPSHOT` 与
+   `/threads/:id/messages` 以前只能按下标合成 id（`m-0`/`m-1`…），而
+   `heal-dangling` / `replace-tool-results` 会让位置漂——同一条消息在两次快照里
+   拿到不同的 id，前端据此做的增量更新就错位。
+
+   **它与事件流里的 message-id 不是一个 id 空间**（那边是 `<run-id>-mN`，由发射器
+   在流式过程中现给）。要合成一个是另一件事：得让发射器的 id 流进 `response->neutral`，
+   而那是 core 依赖 agui 的方向，不做。
+
    约束：
    - role 用 keyword（:system/:user/:assistant/:tool）
    - tool-call: {:id 字符串 :name 字符串 :args map}
@@ -143,6 +153,15 @@
 ;;; ============================================================
 ;;; 兼容：legacy 字符串-role map → 中立
 ;;; ============================================================
+
+(defn ensure-id
+  "没有 `:id` 就补一个（有则原样返回）。
+
+   **在 store 的 `mem-add` 里调**——「落库」正是消息获得身份的时刻：早于此
+   （构造函数里）会毁掉中立消息的值语义（`(= (msg/assistant \"hi\") …)` 这类
+   等值断言当场碎），晚于此就没有稳定可言。"
+  [m]
+  (if (:id m) m (assoc m :id (str "msg-" (random-uuid)))))
 
 (defn normalize
   "把可能是 legacy 形态（role 为字符串）的消息规范化为中立消息。
