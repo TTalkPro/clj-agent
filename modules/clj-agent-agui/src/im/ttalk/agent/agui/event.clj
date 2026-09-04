@@ -75,6 +75,11 @@
                  :current-reasoning nil  ;; 开着的思考块（独立 message-id）
                  :terminal nil
                  :any-text? false
+                 ;; 本 run 的 token 用量，一次 LLM 往返一条（`record-usage!`）。
+                 ;; **累在根发射器上**：lane 的用量也算这条 run 的账，AG-UI 把
+                 ;; `usage` 挂在 `RUN_FINISHED` 上、且是数组，正是为「一轮里换过
+                 ;; 模型 / 有子 agent」准备的
+                 :usage []
                  :drops 0})
    ;; 派生出去的子 agent lane（`subagent-emitter` 自己登记）。**父认子**这一向是
    ;; 收尾要用的：run 终态之前得先把还开着的 lane 收掉，否则客户端看到的是一条
@@ -92,6 +97,29 @@
 (defn stop-requested? [em] (:stop-requested? @(:finalize em)))
 
 (defn terminal-of [em] (:terminal @(:state em)))
+
+(defn- root-of
+  "顺着 `:parent` 找到 run 自己的发射器（lane 的祖先）。"
+  [em]
+  (if-let [p (:parent em)] (recur p) em))
+
+(defn record-usage!
+  "记一次 LLM 往返的用量。**不发事件**——它在终态那条上一次性带出去。
+
+   `m` 形如 `{:model \"…\" :provider \"…\" :input-tokens n :output-tokens k
+   :total-tokens t :cache-read-tokens c}`（中立命名，`response/normalize-usage`
+   的形状）；译成 AG-UI 的 `inputTokens`/`outputTokens`/… 是 codec 的事。
+
+   全空（provider 没报 usage）就不记——宁可不给这一格，也不给一排 0 让客户端
+   把「没数据」画成「用了 0 个 token」。"
+  [em m]
+  (when (some some? ((juxt :input-tokens :output-tokens :total-tokens) m))
+    (swap! (:state (root-of em)) update :usage conj m))
+  nil)
+
+(defn usage-of
+  "本 run 至今记下的用量条目（根发射器上的那份）。"
+  [em] (:usage @(:state (root-of em))))
 
 (defn started?
   "本 lane 是否宣告过自己（发过 `:subagent/started`）。run 自己的发射器恒为 false。"
@@ -349,7 +377,10 @@
   (when-not (terminal-of em)
     (close-lanes! em)
     (close-open! em (not= :run/paused type))
-    (emit! em type m)))
+    ;; 用量搭终态这班车走（AG-UI 只在 `RUN_FINISHED` / `RUN_ERROR` 上有这一位）。
+    ;; **排在 `close-lanes!` 之后**：子 agent 的那几笔账也才算进来
+    (emit! em type (let [u (usage-of em)]
+                     (cond-> m (seq u) (assoc :usage u))))))
 
 ;;; ============================================================
 ;;; 子 agent lane

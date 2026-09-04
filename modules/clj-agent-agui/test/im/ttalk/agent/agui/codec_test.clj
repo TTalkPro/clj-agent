@@ -229,6 +229,47 @@
     (is (nil? (:parentRunId (codec/->agui (assoc base :type :run/finished
                                                  :parent-run-id "parent-1")))))))
 
+(deftest run-finished-carries-usage-test
+  (testing "终态带 usage[]——客户端的用量环靠它，没有这一位就恒空"
+    (let [ev (assoc base :type :run/finished
+                    :usage [{:model "MiniMax-M2.7" :provider "minimax"
+                             :input-tokens 360 :output-tokens 158 :total-tokens 518}])]
+      (is (= {:type "RUN_FINISHED" :threadId "t1" :runId "r1"
+              :usage [{:provider "minimax" :model "MiniMax-M2.7"
+                       :inputTokens 360 :outputTokens 158 :totalTokens 518}]}
+             (codec/->agui ev)))))
+
+  (testing "是**数组**：一轮里换过模型 / 有子 agent，客户端按数组求和"
+    (let [u (:usage (codec/->agui (assoc base :type :run/finished
+                                         :usage [{:model "a" :input-tokens 1 :output-tokens 2}
+                                                 {:model "b" :input-tokens 3 :output-tokens 4}])))]
+      (is (= 2 (count u)))
+      (is (= ["a" "b"] (mapv :model u)))))
+
+  (testing "没有的位就不发——发 0 会被客户端当成「真的用了 0 个」求和进去"
+    (let [[u] (:usage (codec/->agui (assoc base :type :run/finished
+                                           :usage [{:input-tokens 10}])))]
+      (is (= {:inputTokens 10} u))))
+
+  (testing "缓存命中走 cachedInputTokens；写入/未命中协议里没有对应位，不硬塞"
+    (let [[u] (:usage (codec/->agui (assoc base :type :run/finished
+                                           :usage [{:input-tokens 1 :cache-read-tokens 800
+                                                    :cache-write-tokens 200}])))]
+      (is (= 800 (:cachedInputTokens u)))
+      (is (nil? (:cacheWriteTokens u)))))
+
+  (testing "没有用量就不带这个键"
+    (is (nil? (:usage (codec/->agui (assoc base :type :run/finished))))))
+
+  (testing "cancelled / paused / error 三条终态同样带——半途炸掉的那半轮也花了 token"
+    (is (some? (:usage (codec/->agui (assoc base :type :run/cancelled
+                                            :usage [{:input-tokens 1}])))))
+    (is (some? (:usage (codec/->agui (assoc base :type :run/error
+                                            :error {:message "x"}
+                                            :usage [{:input-tokens 1}])))))
+    (is (some? (:usage (codec/->agui (assoc base :type :run/paused
+                                            :usage [{:input-tokens 1}])))))))
+
 (deftest thread-endpoints-flag-test
   (testing "挂了 /threads 才报 :threadEndpoints，且 realtimeMetadata 如实为 false"
     (let [te (:threadEndpoints (codec/run-info ["default"] {:threads? true}))]

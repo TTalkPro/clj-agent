@@ -66,6 +66,11 @@
     ;; 不说话、直接调工具是常态，那条 assistant 消息在历史里照样存在（带 tool_calls
     ;; 没有 content），只是没有 TEXT_MESSAGE_* 事件。按「出过文本才锚」判，恰恰是
     ;; 最常见的那种工具轮拿不到锚点。
+    ;; 用量：provider 已经在 ChatResponse 上归一化好了（`response/normalize-usage`），
+    ;; 这里只是把每次往返记一笔，终态那条一次性带出去
+    (event/record-usage! em (assoc (:usage response)
+                                   :model (:model response)
+                                   :provider (some-> (:provider response) name)))
     (let [parent-mid (event/current-message em)]
       (event/end-message! em (:text response))
       (doseq [tc (response/response-tool-calls response)]

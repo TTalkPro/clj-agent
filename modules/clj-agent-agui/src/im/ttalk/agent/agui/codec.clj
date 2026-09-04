@@ -73,6 +73,34 @@
   {:killed  "子 agent 已被终止"
    :timeout "子 agent 超时"})
 
+(defn- usage->agui
+  "中立用量条目 → AG-UI 的 `usage[]` 条目。
+
+   键名逐个对着 `@ag-ui/core` 的 `RunFinishedEventSchema.usage`：`provider` /
+   `model` / `inputTokens` / `outputTokens` / `totalTokens` / `reasoningTokens` /
+   `cachedInputTokens`，**全部可选**。所以没有的位就不发——发一个 0 会被客户端
+   当成「真的用了 0 个」求和进去。
+
+   我们的 `:cache-write-tokens` / `:cache-miss-tokens` 在协议里没有对应位，
+   不硬塞（AG-UI 的事件 schema 是 passthrough，塞了也只是没人读的私货）。"
+  [u]
+  (cond-> {}
+    (:provider u)           (assoc :provider (str (:provider u)))
+    (:model u)              (assoc :model (str (:model u)))
+    (:input-tokens u)       (assoc :inputTokens (:input-tokens u))
+    (:output-tokens u)      (assoc :outputTokens (:output-tokens u))
+    (:total-tokens u)       (assoc :totalTokens (:total-tokens u))
+    (:cache-read-tokens u)  (assoc :cachedInputTokens (:cache-read-tokens u))))
+
+(defn- with-usage
+  "终态事件带上本 run 的用量（没有就不带这个键）。
+
+   **是数组**：一条 run 里可能换过模型、也可能有子 agent，客户端按数组求和
+   （happy 的 `usage-totals`、CopilotKit 的用量显示都是这么写的）。"
+  [agui ev]
+  (cond-> agui
+    (seq (:usage ev)) (assoc :usage (mapv usage->agui (:usage ev)))))
+
 (defn- agui-of
   "中立事件 → AG-UI 事件 map。返回 nil = 该事件在 AG-UI 里没有对应物（丢弃）。"
   [{:keys [type run-id conversation-id message-id tool-call-id] :as ev}]
@@ -81,19 +109,20 @@
     ;; 都没有），所以父链的声明就这一次机会
     :run/started    (cond-> {:type "RUN_STARTED" :threadId conversation-id :runId run-id}
                       (:parent-run-id ev) (assoc :parentRunId (str (:parent-run-id ev))))
-    :run/finished   {:type "RUN_FINISHED" :threadId conversation-id :runId run-id}
+    :run/finished   (with-usage {:type "RUN_FINISHED" :threadId conversation-id :runId run-id} ev)
     ;; AG-UI 没有 cancelled：按「结束了，但带原因」发，前端照常收口
-    :run/cancelled  {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
-                     :result {:status "cancelled"}}
-    :run/error      {:type "RUN_ERROR"
-                     :message (or (get-in ev [:error :message]) "run failed")
-                     :code (some-> (get-in ev [:error :class]) name)}
+    :run/cancelled  (with-usage {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
+                                 :result {:status "cancelled"}} ev)
+    ;; `RUN_ERROR` 在协议里同样有 `usage`——半途炸掉的那半轮 token 也是花掉的
+    :run/error      (with-usage {:type "RUN_ERROR"
+                                 :message (or (get-in ev [:error :message]) "run failed")
+                                 :code (some-> (get-in ev [:error :class]) name)} ev)
     ;; AG-UI 的一等暂停态：`RUN_FINISHED` + `outcome:"interrupt"`（interrupt 协议）。
     ;; 收口与告知是**同一条**事件——run 有终态（流可以关），outcome 又说清了
     ;; 「不是跑完了，是停在这儿等人」。客户端 `useInterrupt` / `useHumanInTheLoop`
     ;; 直接接管渲染，答复走下一次 run 的 `resume[]`（见 §5.2）。
-    :run/paused     {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
-                     :outcome {:type "interrupt" :interrupts [(interrupt-of ev)]}}
+    :run/paused     (with-usage {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
+                                 :outcome {:type "interrupt" :interrupts [(interrupt-of ev)]}} ev)
 
     :message/started {:type "TEXT_MESSAGE_START" :messageId message-id :role "assistant"}
     :message/delta   {:type "TEXT_MESSAGE_CONTENT" :messageId message-id :delta (:text ev)}

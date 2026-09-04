@@ -282,6 +282,31 @@
           (is (= (dec (count evs)) term-idx) "终态之后一条都不许有")
           (is (= (sort (map :seq evs)) (map :seq evs))))))))
 
+(deftest usage-rides-the-terminal-test
+  (testing "每次 LLM 往返记一笔，终态那条一次性带出去"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/record-usage! em {:model "m1" :input-tokens 10 :output-tokens 5})
+      (event/record-usage! em {:model "m1" :input-tokens 20 :output-tokens 7})
+      (event/finish! em :run/finished {:text "完"})
+      (is (empty? (filter :usage (butlast @out))) "中途不发用量事件")
+      (is (= [10 20] (mapv :input-tokens (:usage (last @out)))))))
+
+  (testing "provider 没报 usage 就不记——宁可没这一格，也不给一排 0"
+    (let [{:keys [em out]} (session-emitter)]
+      (event/record-usage! em {:model "m1"})
+      (event/record-usage! em nil)
+      (event/finish! em :run/finished {})
+      (is (nil? (:usage (last @out))))))
+
+  (testing "**子 agent 的账算在这条 run 上**：lane 的用量累到根发射器"
+    (let [{:keys [em out]} (session-emitter)
+          lane (event/subagent-emitter em {:subagent-run-id "sa-1"})]
+      (event/record-usage! em {:model "父" :input-tokens 1 :output-tokens 1})
+      (event/record-usage! lane {:model "子" :input-tokens 2 :output-tokens 2})
+      (event/finish! em :run/finished {})
+      (is (= ["父" "子"] (mapv :model (:usage (last @out)))))
+      (is (= 2 (count (event/usage-of lane))) "lane 上读到的也是根那一份"))))
+
 (deftest lane-closed-before-run-terminal-test
   (testing "父 run 收口前，还开着的 lane 被主动关掉——AG-UI 要求每个开过的子代理
             在 RUN_FINISHED 前关闭。靠 `silenced?` 是不行的：那只是把 lane 的
