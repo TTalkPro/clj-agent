@@ -108,6 +108,7 @@
                     即可 resume（跨重启 HITL；对话历史请配 SQLite ChatMemory）
    - :conversation-id 会话 ID（可选）
    - :max-iterations 最大工具循环次数（默认 10）
+   - :tool-context   装配期塞进 ToolContext 的种子 map（可选，见返回值注释）
    - :on-pause      (fn [{:keys [pending-tool reason]}])（可选）：**配置即启用
                     pause/resume**——声明 `deftool {:sensitive true}` 的工具在执行
                     前自动暂停，等 `resume`。暂停发生时本回调被触发。
@@ -163,6 +164,13 @@
                           (str "agent-" (java.util.UUID/randomUUID)))
      :callbacks       (or (:callbacks opts) {})
      :state-atom      (atom {:status :idle :paused-state nil :turn-count 0 :run-id nil})
+     ;; **装配期塞进 ToolContext 的种子**（每次 invoke 现铺，见 `tctx`）。
+     ;; 给的是「工具要用、但不该由模型经参数传」的东西——今天唯一的用法是
+     ;; 嵌套委派：`subagent/manager` 往这里塞 `:subagent/observer`，子 agent 里
+     ;; 那把 `delegate-tool` 于是能把自己的 lane 挂到父 lane 底下。
+     ;; ⚠️ 允许放活对象（函数之类）：它**不进状态快照**（`emit-state!` 按
+     ;; `edn-safe?` 滤）也**不进暂停快照**（`pause/strip-unserializable`）。
+     :tool-context    (:tool-context opts)
      :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error :on-pause])}))
 
 ;;; ============================================================
@@ -172,7 +180,8 @@
 (defn- store [agent] (:memory agent))
 
 (defn- tctx [agent]
-  (ctx/with-conversation-id (ctx/create) (:conversation-id agent)))
+  (ctx/with-conversation-id (ctx/create (:tool-context agent))
+                            (:conversation-id agent)))
 
 (defn- pause-save* [agent result]
   (when-let [ps (:pause-store agent)]
@@ -199,7 +208,11 @@
    结果），再钉上 conversation-id。此前这里用裸 (tctx agent)，暂停前累积的
    state slot 会被静默丢弃。"
   [agent paused]
-  (ctx/with-conversation-id (or (:tool-context paused) (ctx/create))
+  ;; `(:tool-context paused)` 是**恢复出来的累积 context**，
+  ;; `(:tool-context agent)` 是**装配期的种子**（活对象，落不进快照，见 create-agent）
+  ;; ——种子要盖在恢复值上面，否则跨 resume 的那一轮拿不到它。
+  (ctx/with-conversation-id (merge (or (:tool-context paused) (ctx/create))
+                                   (:tool-context agent))
                             (:conversation-id agent)))
 
 (defn- build-meta
