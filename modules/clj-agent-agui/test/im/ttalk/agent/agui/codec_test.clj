@@ -271,6 +271,30 @@
     (is (some? (:usage (codec/->agui (assoc base :type :run/paused
                                             :usage [{:input-tokens 1}])))))))
 
+(deftest state-events-test
+  (testing "STATE_DELTA 的字段就叫 delta（StateDeltaEventSchema），是 op 数组"
+    (is (= {:type "STATE_DELTA" :delta [{:op "add" :path "/a" :value 1}]}
+           (codec/->agui (assoc base :type :state/delta
+                                :delta [{:op "add" :path "/a" :value 1}])))))
+
+  (testing "STATE_SNAPSHOT 发的是**状态对象本身**，不是 JSON 字符串
+            —— 发成字符串客户端那边是一坨转义引号，且后续 delta 全打不上"
+    (let [ev (codec/->agui (assoc base :type :state/snapshot :state {:todos ["甲"]}))]
+      (is (= {:todos ["甲"]} (:snapshot ev)))
+      (is (map? (:snapshot ev)))))
+
+  (testing "lane 上产生的状态事件带归属（provenance），但状态本身是 run 级的"
+    (is (= "sa-1" (:subagentRunId (codec/->agui (assoc base :type :state/delta
+                                                       :delta [] :subagent-run-id "sa-1")))))))
+
+(deftest state-capability-test
+  (testing "装了写状态的工具才报——读面一直都在，但没有写的那一半，报 true 就是谎报"
+    (is (= {:snapshots true :deltas true}
+           (get-in (codec/run-info ["default"] {:state? true})
+                   [:agents "default" :capabilities :state])))
+    (is (nil? (get-in (codec/run-info ["default"])
+                      [:agents "default" :capabilities :state])))))
+
 (deftest capability-slots-test
   (testing "本层的事实照报：SSE 流式、认前端工具、送 reasoning"
     (let [caps (get-in (codec/run-info ["default"]) [:agents "default" :capabilities])]

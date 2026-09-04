@@ -150,6 +150,9 @@
                    :content (:content ev)}
 
     :state/snapshot {:type "STATE_SNAPSHOT" :snapshot (:state ev)}
+    ;; 增量：RFC 6902 的 op 数组，字段名就叫 `delta`（`StateDeltaEventSchema`）。
+    ;; 规范化（补数组、首条前补快照）在发射侧做完了，这层只搬运
+    :state/delta    {:type "STATE_DELTA" :delta (vec (:delta ev))}
 
     ;; 子 agent lane（AG-UI 0.0.59 起的 `SUBAGENT_*` 事件族）。
     ;; **这三个类型是老客户端的雷**：`@ag-ui/client` ≤ 0.0.57 在 HTTP transport 里
@@ -498,7 +501,8 @@
    入口收起来，比摆一颗点了才发现没用的回形针强。"
   ([agent-ids] (run-info agent-ids nil))
   ([agent-ids {:keys [version descriptions capabilities open-generative-ui? a2ui?
-                      suggestions? threads? multimodal parallel-tools? max-iterations]}]
+                      suggestions? threads? multimodal parallel-tools? max-iterations
+                      state?]}]
    (cond->
     {:version (or version "clj-agent-agui/0.3")
      :mode "sse"
@@ -532,6 +536,14 @@
                                              ;; 「模型一定有思考」**——后者本层判不了，
                                              ;; 同 `multimodal` 那一格的分工
                                              :reasoning {:supported true :streaming true}}
+                                             ;; 共享状态：**装了写状态的工具才报**
+                                             ;; （`agui.tools/state-tools`，runtime 的
+                                             ;; `:state-tools?` 开关）。读面
+                                             ;; （`/threads/:id/state`）一直都在，但
+                                             ;; 没有写的那一半，这一格报 true 就是
+                                             ;; 谎报——模型根本写不动
+                                             state?
+                                             (assoc :state {:snapshots true :deltas true})
                                              ;; 循环上限：装配方传，别在这儿抄一份缺省值
                                              ;; （`simple-agent/default-max-iterations`）
                                              max-iterations
