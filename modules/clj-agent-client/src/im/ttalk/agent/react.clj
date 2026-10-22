@@ -577,6 +577,28 @@
                            result))))]
     (step delta tctx 0)))
 
+(defn- chat-client-memory-store
+  "取 chat-client 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
+   没挂 memory filter → nil（此时工具结果本就不落库，直接返回也无需补）。"
+  [chat-client]
+  (some #(when (= :memory (:name %)) (:store %)) (:filters chat-client)))
+
+(defn- response->assistant-message
+  "把带 tool-calls 的响应还原成中立 assistant 消息。
+
+   有 memory filter 时这一步由 filter 侧补：本轮响应已落库，下一轮只要回传
+   工具结果 delta，历史自会拼成 assistant(tool_calls) → tool(results)。
+   但 `:memory false` 是合法的编排形态——子 Agent / 一次性调用都不该被迫落库。
+   这时循环自己必须把 assistant(tool_calls) 带上，否则下一轮只有孤立的
+   tool result，OpenAI / Anthropic / Responses 网关都会以 tool id 找不到拒绝。"
+  [response]
+  (let [text (response/response-text response)
+        calls (response/response-tool-calls response)
+        m (msg/assistant-tool-calls
+           (mapv (fn [{:keys [id name args]}] (msg/tool-call id name args)) calls)
+           (when (seq text) text))]
+    (msg/with-blocks m (response/response-replay-blocks response))))
+
 (defn- run-tool-loop*
   "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或暂停。
 
@@ -721,7 +743,11 @@
                              :return-direct true}
 
                             :else
-                            {:status :continue :messages messages :context context}))))))))))))
+                            (let [messages (if (chat-client-memory-store chat-client)
+                                             messages
+                                             (into [(response->assistant-message response)]
+                                                   messages))]
+                              {:status :continue :messages messages :context context})))))))))))))
         iteration-chain ((:iteration (flt/filter-hooks chat-client)) iteration-terminal)]
     (drive iteration-chain remaining* delta tctx)))
 
@@ -736,12 +762,6 @@
   [chat-client delta remaining records tctx gate chat-opts callbacks policy]
   (run-tool-loop* chat-client delta remaining records tctx gate chat-opts callbacks policy
                   {:chat-fn async-chat-call :drive drive-async}))
-
-(defn- chat-client-memory-store
-  "取 chat-client 上 memory filter 绑定的 store（filter 刻意暴露 :store）。
-   没挂 memory filter → nil（此时工具结果本就不落库，直接返回也无需补）。"
-  [chat-client]
-  (some #(when (= :memory (:name %)) (:store %)) (:filters chat-client)))
 
 (defn- persist-direct-messages!
   "return-direct 收尾时补落库工具结果消息。

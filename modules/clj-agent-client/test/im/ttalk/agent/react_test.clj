@@ -167,6 +167,26 @@
         ;; user, assistant(tool-calls), tool-result, assistant(text)
         (is (= 4 (count stored)))))))
 
+(deftest invoke-without-memory-carries-assistant-tool-calls-test
+  (testing ":memory false 时下一轮 delta 也要带 assistant(tool_calls)"
+    (let [received (atom [])
+          cm {:chat-fn (fn [msgs _]
+                         (swap! received conj msgs)
+                         (if (= 1 (count @received))
+                           (response/make-response
+                            :text nil
+                            :tool-calls [{:id "tc1" :name "simple-echo" :args {:text "hi"}}])
+                           (response/make-response :text "done")))}
+          chat-client (build [#'simple-echo] cm nil)]
+      (agent-loop/invoke chat-client nil
+        [{:role :user :content "echo hi"}]
+        {:context (context/create)})
+      (is (= 2 (count @received)))
+      (let [[first-call second-call] @received]
+        (is (= [:user] (mapv :role first-call)))
+        (is (= [:assistant :tool] (mapv :role second-call)))
+        (is (= "tc1" (:tool-call-id (second second-call))))))))
+
 (deftest invoke-system-prompts-test
   (let [received-opts (atom nil)
         cm {:chat-fn (fn [_msgs opts]

@@ -18,6 +18,12 @@ v0.3 追加整合（2026-10-22）：provider 层补齐第三个主流协议栈
 挡到门外（实测迟到 10 秒、委派工具先超时）。修法与验收见
 `docs/subagent-event-attribution-design.md`（§3.5 补注 + S5）。
 
+同日另修一个 **`:memory false` 的工具循环残账**：无 memory filter 时，工具循环
+下一轮只回传了 tool result，没有把上一轮的 `assistant(tool_calls)` 带上。
+OpenAI Chat / Anthropic Messages / OpenAI Responses 三条协议栈在网关侧都会以
+「tool id not found」拒绝。现在无记忆循环会自己补上这条 assistant 消息；
+有 memory 的历史形状不变。
+
 v0.3 的主线：工具阶段 MapReduce 化（S1/S2）、HITL 持久化与 Timeline、
 Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超时内建化、
 缺省引擎串行化。设计与动机见 `docs/agent-loop-concurrency-design.md`（§9 为实施设计）。
