@@ -10,6 +10,14 @@ v0.3 追加整合（2026-10-22）：provider 层补齐第三个主流协议栈
 `function_call` 回放与异步路径都已内建。共享 HTTP 客户端固定 HTTP/1.1，
 以兼容 LiteGate 等本地网关（JDK 默认 HTTP/2 upgrade 会被网关直接断连）。
 
+同日修掉两处**既有**的顺序缺陷（agui / client，与 provider 整合无关，但卡着
+提交门禁）：子 agent 的 lane 终态事件（`SUBAGENT_FINISHED`）会**间歇性丢失**——
+① worker 的 `deliver` 早于 `settle!`，父 run 可能先收口，lane 终态被「父 run
+终态后丢弃」的守卫吞掉；② `agui.runtime` 的 `launch!` 在**会话锁内**发起
+`chat-async`，provider 同步时整轮连工具调用都在锁内跑完，子 agent 的事件全被
+挡到门外（实测迟到 10 秒、委派工具先超时）。修法与验收见
+`docs/subagent-event-attribution-design.md`（§3.5 补注 + S5）。
+
 v0.3 的主线：工具阶段 MapReduce 化（S1/S2）、HITL 持久化与 Timeline、
 Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超时内建化、
 缺省引擎串行化。设计与动机见 `docs/agent-loop-concurrency-design.md`（§9 为实施设计）。

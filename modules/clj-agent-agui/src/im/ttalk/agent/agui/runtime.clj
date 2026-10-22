@@ -243,10 +243,18 @@
   nil)
 
 (defn- launch!
-  "在会话锁内起一个 run。`kind` = `:chat` | `:resume`。
+  "在会话锁内**装配**一个 run，返回 `{:dispatch (fn []) :result {...}}`。
+   `kind` = `:chat` | `:resume`。
 
-   `chat-async` / `resume-async` **立刻返回 deferred**（整轮跑在虚拟线程上），
-   所以锁只握住「装配 + 派发」这一小段，不握住 LLM 往返。"
+   **发起（`chat-async` / `resume-async`）必须放到锁外**——`dispatch` 就是干这个的。
+   原因：`chat-async` 只在 **provider 是异步** 时才真的立刻返回；provider 是同步的
+   （测试里的桩、本地小模型）时，`run-tool-loop-async` 的 deferred 链**当场续完**，
+   整轮——连工具调用——就在调用线程上跑完。那一轮里子 agent 的 lane 事件要发进
+   同一条流，而取号 + 投递要拿**会话锁**（发射器的 `:gate` 就是它）。锁被握着不放，
+   lane 的事件就全被挡在门外：实测 lane 事件迟到 10 秒，委派工具先超时，
+   `SUBAGENT_FINISHED` 永远发不出去（终态守卫会把迟到的 lane 事件整条吞掉）。
+
+   所以：**装配在锁内（认领 run 槽位 + 发 `:run/started`），发起在锁外。**"
   [rt entry kind {:keys [message decision payload tools opts parent-run-id state]}]
   (let [conv-id (:conversation-id entry)
         ;; **起跑前的水位**：run 一旦起跑就立刻发 `:run/started`，而 HTTP 层要等
@@ -299,16 +307,17 @@
                                    ;; 我们不解释它，只让它出现在 `RUN_STARTED` 上，
                                    ;; 客户端据此把这条 run 挂回它的父链
                                    parent-run-id (assoc :parent-run-id parent-run-id)))
-    (try
-      (-> (case kind
-            :chat   (agent/chat-async a message invoke-opts)
-            :resume (agent/resume-async a decision payload invoke-opts))
-          (flt/fmap   (fn [result] (finish-run! entry run-id em result nil done fe-names) result))
-          (flt/fcatch (fn [t] (finish-run! entry run-id em nil t done fe-names) nil)))
-      (catch Throwable t
-        ;; 同步抛出的（如 resume 的暂停态校验）——照样落进事件流，不甩给调用方
-        (finish-run! entry run-id em nil t done fe-names)))
-    {:status :started :run-id run-id :conversation-id conv-id :since since}))
+    {:dispatch (fn []
+                 (try
+                   (-> (case kind
+                         :chat   (agent/chat-async a message invoke-opts)
+                         :resume (agent/resume-async a decision payload invoke-opts))
+                       (flt/fmap   (fn [result] (finish-run! entry run-id em result nil done fe-names) result))
+                       (flt/fcatch (fn [t] (finish-run! entry run-id em nil t done fe-names) nil)))
+                   (catch Throwable t
+                     ;; 同步抛出的（如 resume 的暂停态校验）——照样落进事件流，不甩给调用方
+                     (finish-run! entry run-id em nil t done fe-names))))
+     :result {:status :started :run-id run-id :conversation-id conv-id :since since}}))
 
 (defn- request-stop!*
   "标记 + 取消。返回是否**本次**才登记上（幂等：重复 stop 返回 false）。"
@@ -335,10 +344,10 @@
                      ;; 我们不重复实现一遍。
                      (and (= :chat kind) (some? @(:awaiting entry)) discard-pause?)
                      (do (reset! (:awaiting entry) nil)
-                         [:done (launch! rt entry kind args)])
+                         [:launch (launch! rt entry kind args)])
 
                      (nil? @(:run entry))
-                     [:done (launch! rt entry kind args)]
+                     [:launch (launch! rt entry kind args)]
 
                      (not= :supersede policy)
                      [:busy (:run-id @(:run entry))]
@@ -348,7 +357,10 @@
                        (request-stop!* r)
                        [:wait (:done r)])))]
         (case (first step)
-          :done     (second step)
+          ;; **装配在锁内，发起在锁外**——见 `launch!` 的注释
+          :launch   (let [{:keys [dispatch result]} (second step)]
+                       (dispatch)
+                       result)
           :busy     {:status :busy :run-id (second step)}
           :awaiting (let [{:keys [run-id reason pending-tool]} (second step)]
                       {:status :awaiting-resume :run-id run-id

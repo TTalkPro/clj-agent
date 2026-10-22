@@ -309,9 +309,33 @@ agui.subagent/observer ── {:decorate (fn [agent] …)  ;; emit/attach lane �
    `kill!` 会 `deliver` 一个 `{:error :killed}` 并中断 worker，worker 的 finally
    仍然跑，读到的就是那个 outcome。
 
+> **契约 3 补一条（2026-10-22 实测后加）：`:settle!` 必须早于「放行父线程」。**
+>
+> 父线程有两条被放行的路：`await!` 等 promise 的 `deliver`，以及 `await!` 直接读
+> 注册表的状态（非 `:running` 就返回结果）。**两条都必须在 settle 之后**——否则
+> 父 run 可能先跑到 `:run/finished`，而 lane 的终态事件被 §3.3 的守卫整条吞掉，
+> 前端就永远看不到 `SUBAGENT_FINISHED`。
+>
+> 原实现是「先 deliver 后 settle」，窗口小但真实：机器一忙就复现（实测 600 轮
+> 并行压测里丢 185 次）。改法是把 worker 的 finally 排成
+> **settle → 登记终态 → deliver**，`kill!` 也改成**先 deliver 再 cancel**
+> （cancel 先走的话，被中断的 worker 会读到还没 deliver 的空 promise，把这次
+> 尝试报成「崩溃」而不是「被杀」）。
+
 `delegate-tool` / `fanout-tool` / `management-tools` 只是把 config 里的
 `:observer` 原样塞进 spec，外加 `:subagent-name`（缺省取工具名，fanout 取
 `"<tool-name>#<idx>"`）。
+
+> **另一条独立的账，在 agui 这一侧（2026-10-22）：会话锁不能跨 LLM/工具往返。**
+>
+> `agui.runtime` 的发射器 `:gate` **就是会话锁**，事件取号与投递都在它里面。
+> 而 `launch!` 原先在**会话锁内**调 `chat-async`——provider 是同步的（测试里的桩、
+> 本地小模型）时，`chat-async` 的 deferred 链**当场续完**，整轮连工具调用都在
+> 调用线程上跑完。那一轮里子 agent 的 lane 事件要发进同一条流，于是全被挡在
+> 门外：实测 lane 事件迟到 10 秒、委派工具先超时、`SUBAGENT_FINISHED` 丢失。
+>
+> 改法：**装配在锁内（认领 run 槽位 + 发 `:run/started`），发起在锁外。**
+> 这与「`:supersede` 要先放锁再等旧 run 收尾」是同一条纪律——锁不能握着等别人。
 
 ### 3.6 codec 映射与开关
 
@@ -417,6 +441,7 @@ docstring 早就记过：「`:tool` 链的 ToolRequest 两个都没有 id」）�
 | **S2** ✅ | manager/delegate 的 `:observer` 钩子（**不碰 agui**） | 用一个纯记录用的假 observer 验证：sync / fanout / kill / 超时 / 崩溃五条路径上 `:start!` 与 `:settle!` **各恰好一次**，且 `:settle!` 拿到正确 outcome；observer 抛异常不影响子 agent 结果 |
 | **S3** ✅ | `agui.subagent` + codec + runtime 开关 | 端到端：一次 `delegate_tool` 委派产出 `SUBAGENT_STARTED → (lane 内的 TEXT_MESSAGE_* / TOOL_CALL_*，全带 subagentRunId) → SUBAGENT_FINISHED`，且 `RUN_FINISHED` 仍是最后一条；开关关掉时事件流与今天逐字节相同 |
 | **S4** ✅ | `:tool/call-id` 进 tool-context → `parentToolCallId` 落位 | **同一批里两个委派 tool-call 并发**时，两条 `SUBAGENT_STARTED` 的 `parentToolCallId` 各不相同且与各自的 `TOOL_CALL_START` 对得上（fanout 的 N 路共享同一个 id——它们本就是一次调用的扇出，不是这条要防的场景）；折叠回去的 context 与 `STATE_SNAPSHOT` 里都看不到 `:tool/call-id`；**内联与 executor 两条批内调度路径逐字段相同** |
+| **S5** ✅（2026-10-22 补） | 两条独立的顺序保证：① worker 的 finally 排成 **settle → 登记终态 → deliver**，`kill!` 改成**先 deliver 再 cancel**；② `agui.runtime` 的 `launch!` 拆成**装配在锁内、发起在锁外** | 并行压测（4–6 个 JVM 同时跑）下 lane 事件**一条不丢**：修前 600 轮丢 185 次（31%），修后 900 轮 0 丢。验收靠**加压**——单进程跑几乎碰不到，机器一忙就复现 |
 
 嵌套（子 agent 再委派）在 S3 顺带验一个两层用例即可——它是
 `observer-factory` 自递归的自然结果，不单独立阶。

@@ -176,28 +176,36 @@
   (.submit ^ExecutorService worker-executor
            ^Callable
            (fn []
-             (let [observer (observer-of spec id attempt)]
+             (let [observer (observer-of spec id attempt)
+                   outcome-box (atom nil)]
                (try
                  (safe-call (:start! observer))
-                 (let [outcome (do-run spec observer)]
-                   (deliver result-promise outcome)
-                   (finish! id result-promise
-                            (cond (:ok outcome)        :done
-                                  (:suspended outcome) :suspended
-                                  :else                :failed)
-                            outcome))
+                 (reset! outcome-box (do-run spec observer))
                  (catch Throwable t
-                   (let [err {:error {:crashed true :message (.getMessage t)}}]
-                     (deliver result-promise err)
-                     (finish! id result-promise :failed err)))
+                   (reset! outcome-box {:error {:crashed true :message (.getMessage t)}}))
                  (finally
                    ;; **在 finally 里**：kill 会从调用方线程 deliver {:error :killed} 并
                    ;; 中断本线程，中断的 unwind 照样跑 finally，于是三条异常路径
                    ;; （kill / 超时后 kill / 崩溃）都有且只有一次 settle。
-                   ;; promise 此刻必已 deliver（try 的三条出口各自 deliver 过一次），
-                   ;; 0ms 兜底只是不信任「必然」。
-                   (safe-call (:settle! observer)
-                              (deref result-promise 0 {:error :unknown}))))))))
+                   ;;
+                   ;; **顺序是结构保证的，不是碰运气**——父线程有两条路被放行，
+                   ;; 两条都在 settle 之后：
+                   ;;   1) `await!` 等 promise 的 deliver；
+                   ;;   2) `await!` 读注册表的状态（非 :running 就直接返回结果）。
+                   ;; 曾经反过来（先 deliver 后 settle），父 run 偶尔先跑到
+                   ;; `:run/finished`，而 lane 的终态事件被「父 run 终态后丢弃」
+                   ;; 的守卫吃掉——前端就永远看不到 SUBAGENT_FINISHED 了
+                   ;; （实测间歇性丢，机器越忙越容易）。
+                   (let [outcome (or (deref result-promise 0 nil)  ;; kill! 放的
+                                     @outcome-box
+                                     {:error :unknown})]
+                     (safe-call (:settle! observer) outcome)
+                     (finish! id result-promise
+                              (cond (:ok outcome)        :done
+                                    (:suspended outcome) :suspended
+                                    :else                :failed)
+                              outcome)
+                     (deliver result-promise outcome))))))))
 
 ;;; ============================================================
 ;;; API
@@ -264,10 +272,13 @@
   [id]
   (when-let [entry (get @registry id)]
     (when (= :running (:status entry))
-      ;; :future 可能尚未落账（spawn! 两步注册的间隙）——nil 时只标记状态即可
-      (when-let [f (:future entry)] (future-cancel f))
+      ;; **先 deliver 再 cancel**：worker 被中断后会 unwind 到 settle，那时它读
+      ;; promise 里的值——cancel 先走的话，worker 可能读到还没 deliver 的空
+      ;; promise，把这次尝试报成「崩溃」而不是「被杀」。
       ;; 安全 deliver：已 deliver 时 no-op
       (deliver (:promise entry) {:error :killed})
+      ;; :future 可能尚未落账（spawn! 两步注册的间隙）——nil 时只标记状态即可
+      (when-let [f (:future entry)] (future-cancel f))
       (swap! registry update id merge
              {:status :killed :result {:error :killed} :finished-at (now-ms)})))
   nil)
