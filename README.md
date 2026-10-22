@@ -38,7 +38,7 @@ Clojure AI Agent Framework - ChatClient 中央编排器
 - **Filter 中间件**：洋葱式 around 链（对标 Spring AI 2.0 Advisor），:chat / :tool / :iteration / :turn / :token-xform 五类钩子，可短路/重试/计时/递归重入
 - **Spring AI 2.0 Advisor 对齐**：ToolSearch 渐进式工具披露（省 34–64% token）、return-direct、可插拔续跑判据、SafeGuard 敏感词、RAG 注入、结构化输出自我修正、RE2 重读——检索/向量库一律经协议注入，框架零新增依赖（见 `docs/advisor-alignment-design.md`）
 - **ChatModel 抽象**：LLM 服务通过 `{:chat-fn :stream-fn}` map 接入，无耦合
-- **多 Provider 支持**：Anthropic、OpenAI、DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）、xAI、Moonshot、OpenRouter、SiliconFlow 及 OpenAI 兼容协议
+- **多 Provider 支持**：三大协议栈 —— OpenAI Chat Completions（`common/base`）、Anthropic Messages（`anthropic`）、OpenAI Responses（`openai-responses`）—— 以及 DeepSeek、Zhipu、Ollama、Gemini、Mistral、MiniMax、DashScope（阿里云）、xAI、Moonshot、OpenRouter、SiliconFlow 及 OpenAI 兼容协议
 - **多模态输入**：中立内容部件（图片 / PDF / 音频）一份历史两家 wire 各自成型；不支持的组合当场报错而非静默丢内容
 - **文本向量化**：`IEmbeddingProvider` 独立可选协议 + 内置 8 家端点（OpenAI / 智谱 / SiliconFlow / DashScope 原生 / Ollama 等），自动批次切片
 - **SimpleAgent 封装**：同步有状态对话，可选 pause/resume 敏感工具审批；LLM/工具异常归一化为 `{:status :error :error <规范错误 map>}`（可配 `:on-error`）
@@ -80,6 +80,7 @@ graph TB
     subgraph "clj-agent-provider（适配器，依赖 core）"
         AN[Anthropic]
         OA[OpenAI]
+        OR[OpenAI Responses]
         DS[DeepSeek]
         ZP[Zhipu]
         OL[Ollama]

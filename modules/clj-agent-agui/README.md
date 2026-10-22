@@ -33,6 +33,8 @@
 | `im.ttalk.agent.agui.tools` | AG-UI 前端工具（client-side tool）→ 内联工具 + gate |
 | `im.ttalk.agent.agui.a2ui` | **可选插件**：A2UI —— 声明式生成式 UI，模型按 catalog 拼组件树（不执行任意代码） |
 | `im.ttalk.agent.agui.mcp` | **可选插件**：MCP Apps 的**前端那半边** —— 带 UI 的工具出结果时补一条 activity 事件 + UI 代理白名单。协议栈在 [`clj-agent-mcp`](../clj-agent-mcp/) |
+| `im.ttalk.agent.agui.state` | 共享状态的 JSON Pointer / JSON Patch（RFC 6901 / 6902）与 delta 规范化——服务端每发一条增量同步应用到自己的状态，否则下一条 delta 就是对着想象中的状态算的 |
+| `im.ttalk.agent.agui.subagent` | 子 Agent 事件归属：把 `subagent/manager` 的协议无关观察钩子翻译成 lane 事件（`:subagent/started|finished|error`）。设计见 [`docs/subagent-event-attribution-design.md`](../../docs/subagent-event-attribution-design.md) |
 
 **零 web 服务端依赖**（`design-principles.md` §2）：订阅是回调，本模块不做 HTTP
 服务端——不引 ring / http-kit，不认识 Request / Response、不产 SSE 响应帧、不管
@@ -231,11 +233,12 @@ Streamable HTTP，走 JDK 自带的 `java.net.http`——**不加依赖**，而�
 可注入（测试用纯函数，不起服务）。
 
 ```clojure
-(require '[im.ttalk.agent.agui.mcp :as mcp])
+(require '[im.ttalk.agent.agui.mcp :as mcp]
+         '[im.ttalk.agent.mcp.tools :as mcp-tools])
 
 (def servers [{:type :http :url "http://localhost:4100/mcp" :server-id "demo"}])
 
-(rt/runtime {:agent-fn (tools/agent-fn (mcp/with-tools spec servers))
+(rt/runtime {:agent-fn (tools/agent-fn (mcp-tools/with-tools spec servers))
              :event-transform (mcp/event-transform {:apps (mcp/app-tools (:tools spec))
                                                     :servers servers})})
 ;; 前端那块 MCP UI 发起的调用（forwardedProps.__proxiedMCPRequest）

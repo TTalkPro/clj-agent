@@ -1,5 +1,7 @@
 # 子 Agent 事件归属设计：让委派的那几分钟在事件流里有形状
 
+> **状态：✅ 已实施。** `im.ttalk.agent.agui.subagent`。
+
 > 对标 AG-UI 0.0.59 的 `SUBAGENT_*` 事件族与 CopilotKit `emit_subagent_events`
 > （证据见 §1.2）。本文是 [`agent-runtime-design.md`](agent-runtime-design.md) 的增量，
 > 不推翻它的任何一条契约——**恰恰相反，本文一半的篇幅在论证怎么不破它们**。

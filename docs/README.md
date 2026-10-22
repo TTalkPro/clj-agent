@@ -31,8 +31,6 @@
 | 文档 | 讲什么 |
 |---|---|
 | [`agent-runtime-design.md`](agent-runtime-design.md) | **新建 `clj-agent-agui` 模块**：借鉴 CopilotKit runtime 的「run 与 HTTP 请求解耦」机制并原生实现（会话注册表 + 有界事件缓冲 + `:seq` 偏移续传 + 跨请求 stop/resume），从而不需要它的 remote agent。§6 是**对现有框架的强化清单**（框架侧只有 `resume` 收不到 `:on-token`/`:cancel-token` 一处必须改），§7 是**能力缺口清单**（真缺的只有跨 run 共享状态；前端工具是既有 HITL 词汇的一个用法）。**也是一份「抄一半」的记录**：事件折叠 / 事件日志持久化 / Runner 协议 / 全局单例 / hooks 逐条否决并记明重启条件 |
-| [`mcp-module-design.md`](mcp-module-design.md) | **新建 `clj-agent-mcp` 模块**：按 MCP `2026-07-28` 实现 client + server 两侧（Streamable HTTP + stdio），并**双时代**兼容 `initialize` 握手的老实现。记了判时代的规则表（两条反直觉：`-32021`/`-32020` **不回退**；回退判据不得只认一个错误码）、三处施工时才看清的坑（`_meta` 不能按版本号猜、MCP Apps 的键是 `_meta.ui.resourceUri`、服务端默认不外泄异常消息），以及 6 条否决记录（MRTR 状态机 / 长流 / OAuth / 已废弃的 roots·sampling·logging …） |
-
 ## 已实施（专题 / 重构记录）
 
 | 文档 | 讲什么 |
@@ -46,6 +44,8 @@
 | [`unified-invoke-agent.md`](unified-invoke-agent.md) | 统一 invoke + 合并 Agent |
 | [`response-path-consolidation.md`](response-path-consolidation.md) | D6/D7：响应路径整理、core 收回厂商 wire 知识、双消息体系统一 |
 | [`error-model-unification.md`](error-model-unification.md) | D5：一个 canonical 错误值 + 四条边界信封规则（修了 401 被误标可重试的真 bug） |
+| [`mcp-module-design.md`](mcp-module-design.md) | **`clj-agent-mcp` 模块**：按 MCP `2026-07-28` 实现 client + server 两侧（Streamable HTTP + stdio），并**双时代**兼容 `initialize` 握手的老实现。记了判时代的规则表（两条反直觉：`-32021`/`-32020` **不回退**；回退判据不得只认一个错误码）、三处施工时才看清的坑（`_meta` 不能按版本号猜、MCP Apps 的键是 `_meta.ui.resourceUri`、服务端默认不外泄异常消息），以及 6 条否决记录（MRTR 状态机 / 长流 / OAuth / 已废弃的 roots·sampling·logging …） |
+| [`subagent-event-attribution-design.md`](subagent-event-attribution-design.md) | 子 Agent 事件归属：三个中立事件 `:subagent/started|finished|error` + `:subagent-run-id` 打在 lane 事件上。`agui.subagent` 把 `subagent/manager` 的协议无关钩子翻译成 lane 发射器，§7 逐条记否决（delegations 状态槽 / lane 级插件 / 子 agent HITL …） |
 
 ## 已废弃留档（🗑️ 不代表现状，只留教训）
 

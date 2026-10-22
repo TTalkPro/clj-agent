@@ -1,5 +1,7 @@
 # `clj-agent-mcp` 设计：按 2026-07-28 实现 MCP 的两侧
 
+> **状态：✅ 已实施。** 独立模块 `modules/clj-agent-mcp/`。
+
 > 规范：[`modelcontextprotocol.io/specification/2026-07-28`](https://modelcontextprotocol.io/specification/2026-07-28)
 > （SEP-2575 + SEP-2567 + SEP-2577）。实现细节的第二来源是官方 **C# SDK**
 > （`~/workspace/csharp-sdk`）——它已跟到这一版，且把「为什么这么做」写在注释里。
