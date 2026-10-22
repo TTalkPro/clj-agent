@@ -17,6 +17,7 @@
   "内置 provider -> [ns 符号, create 函数符号]"
   {:anthropic ['im.ttalk.agent.provider.anthropic 'im.ttalk.agent.provider.anthropic/create-provider]
    :openai    ['im.ttalk.agent.provider.openai 'im.ttalk.agent.provider.openai/create-provider]
+   :openai-responses ['im.ttalk.agent.provider.openai-responses 'im.ttalk.agent.provider.openai-responses/create-provider]
    :zhipu     ['im.ttalk.agent.provider.zhipu 'im.ttalk.agent.provider.zhipu/create-provider]
    :mock      ['im.ttalk.agent.provider.mock 'im.ttalk.agent.provider.mock/create-mock-provider]
    :ollama    ['im.ttalk.agent.provider.ollama 'im.ttalk.agent.provider.ollama/create-provider]

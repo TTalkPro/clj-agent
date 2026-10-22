@@ -166,6 +166,7 @@
 
 (def ^:private builtin-env-mappings
   {:openai  "OPENAI"
+   :openai-responses "OPENAI_RESPONSES"
    :anthropic "ANTHROPIC"
    :zhipu   "ZHIPU"
    :ollama  "OLLAMA"
@@ -184,6 +185,12 @@
              :base-url "https://api.openai.com/v1"
              :timeout  60000
              :model    "gpt-4"}
+   :openai-responses {:api-key ""
+                      ;; Responses base URL 不含 /v1；协议路径由 :api-path 补齐。
+                      :base-url "https://api.openai.com"
+                      :api-path "/v1/responses"
+                      :timeout 60000
+                      :model "gpt-5"}
    :anthropic {:api-key  ""
                ;; anthropic provider 会拼 base-url + "/v1/messages"，base-url 不能含 /v1
                ;; （否则得到 .../v1/v1/messages → 404）

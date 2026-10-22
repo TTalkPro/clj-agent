@@ -4,6 +4,12 @@
 
 ## [0.3.0] - 未发布（2026-07-17 定稿；2026-07-11 启动）
 
+v0.3 追加整合（2026-10-22）：provider 层补齐第三个主流协议栈
+**OpenAI Responses**（`:openai-responses`）。上层仍走同一个 `ILLMProvider` /
+中立消息 / ChatModel 边界；wire、流式累积器、工具定义扁平化、
+`function_call` 回放与异步路径都已内建。共享 HTTP 客户端固定 HTTP/1.1，
+以兼容 LiteGate 等本地网关（JDK 默认 HTTP/2 upgrade 会被网关直接断连）。
+
 v0.3 的主线：工具阶段 MapReduce 化（S1/S2）、HITL 持久化与 Timeline、
 Spring AI 2.0 Advisor 全面对齐、ToolCallingManager 执行引擎、工具超时内建化、
 缺省引擎串行化。设计与动机见 `docs/agent-loop-concurrency-design.md`（§9 为实施设计）。

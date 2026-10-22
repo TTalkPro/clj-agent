@@ -12,7 +12,7 @@ LLM Provider 和 ChatModel 工厂模块
 │                                                                              │
 │   Layer 1: Provider 实现层                                                   │
 │   ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐         │
-│   │ OpenAI   │ │ Anthropic│ │ Zhipu    │ │ Gemini   │ │ Ollama   │ ...     │
+│   │ OpenAI   │ │ Responses│ │Anthropic│ │ Zhipu/Gemini/Ollama ...          │
 │   └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘         │
 │                                    ▲                                         │
 │   Layer 2: Factory 工厂层 ─────────┘                                         │
@@ -45,8 +45,9 @@ LLM Provider 和 ChatModel 工厂模块
 ```
 
 内部依赖：`clj-agent-core`（实现其 `im.ttalk.agent.model/ILLMProvider` 协议；
-两个 record —— `common/base` 的 `OpenAICompatProvider` 与 `anthropic` 的
-`AnthropicProvider` —— 另实现可选协议 `IAsyncLLMProvider`，走原生异步 HTTP。
+三个内置协议栈 —— OpenAI Chat Completions（`common/base`）、
+Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）——
+另实现可选协议 `IAsyncLLMProvider`，走原生异步 HTTP。
 没实现它的 provider 由 `chat-model/call-async*` 用虚拟线程兜底，异步入口一样可用；
 设计见 [`docs/async-chat-model-design.md`](../../docs/async-chat-model-design.md)）
 
@@ -61,6 +62,7 @@ LLM Provider 和 ChatModel 工厂模块
 | Provider | 关键字 | 环境变量前缀 | 说明 |
 |----------|--------|-------------|------|
 | OpenAI | `:openai` | `OPENAI_*` | GPT 系列，Function Call；`:parallel-tool-calls`、`:reasoning-effort`/`:verbosity`（o 系列 / GPT-5）、结构化输出（`json_object` / `json_schema`+`strict`）、多模态输出（`:modalities`/`:audio`）；prompt cache 命中归一化到 `:cache-read-tokens` |
+| OpenAI Responses | `:openai-responses` | `OPENAI_RESPONSES_*` | `/v1/responses` 协议；`instructions`、扁平 function 工具、`reasoning`、`previous_response_id`、结构化输出、流式与工具回放 |
 | Anthropic | `:anthropic` | `ANTHROPIC_*` | Claude 系列，Function Call；服务端 `web_search` 工具、Citations 引用、Skills（beta）、`:service-tier`、prompt caching 策略层（含 `:tool-results` / `:system-and-conversation`）、响应限流头解析（`:rate-limit`） |
 | 智谱 | `:zhipu` | `ZHIPU_*` | GLM 系列（glm-5/4.7/4.6），**双协议**：OpenAI 兼容（默认，对话补全文档字段全量支持：`:thinking/:do-sample/:tool-stream/:request-id/:user-id`、预置工具 web_search/retrieval/mcp 透传）+ Anthropic 兼容（`create-anthropic-provider`）；**异步任务**：`submit-async`/`await-async-result` |
 | Gemini | `:gemini` | `GOOGLE_*` | Google Gemini |
@@ -84,6 +86,7 @@ LLM Provider 和 ChatModel 工厂模块
 | `im.ttalk.agent.provider.factory.registry` | Provider 注册表 |
 | `im.ttalk.agent.provider.factory.config` | 环境变量配置管理 |
 | `im.ttalk.agent.provider.openai` | OpenAI 实现 |
+| `im.ttalk.agent.provider.openai-responses` | OpenAI Responses 实现 |
 | `im.ttalk.agent.provider.anthropic` | Anthropic 实现（含可配置端点，支持 Anthropic 兼容服务） |
 | `im.ttalk.agent.provider.zhipu` | Zhipu 实现（双协议：OpenAI 兼容 + Anthropic 兼容） |
 | `im.ttalk.agent.provider.ollama` | Ollama 实现 |
@@ -109,9 +112,10 @@ LLM Provider 和 ChatModel 工厂模块
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |
 | `im.ttalk.agent.provider.schema.anthropic` | Anthropic Schema 转换 |
 | `im.ttalk.agent.provider.stream.openai` | OpenAI 流式处理 |
+| `im.ttalk.agent.provider.stream.openai-responses` | OpenAI Responses 流式处理 |
 | `im.ttalk.agent.provider.stream.anthropic` | Anthropic 流式处理 |
 | `im.ttalk.agent.provider.stream.dashscope` | DashScope 原生 SSE 流式处理 |
-| `im.ttalk.agent.provider.wire.{openai,anthropic}` | wire 格式转换（provider 内部） |
+| `im.ttalk.agent.provider.wire.{openai,openai-responses,anthropic}` | wire 格式转换（provider 内部） |
 | `im.ttalk.agent.provider.http.client` | HTTP 客户端（同步；走 JDK java.net.http） |
 | `im.ttalk.agent.provider.http.stream-client` | SSE 真流式传输（`fromLineSubscriber` + 虚拟线程 + cancel） |
 | `im.ttalk.agent.provider.http.retry` | 重试与错误分类（指数退避 + Retry-After） |
@@ -146,6 +150,7 @@ LLM Provider 和 ChatModel 工厂模块
 ;; 基本创建
 (factory/create-provider :openai)
 (factory/create-provider :anthropic {:api-key "sk-..."})
+(factory/create-provider :openai-responses {:api-key "sk-..." :model "gpt-5"})
 
 ;; 从环境变量创建
 (factory/create-provider-from-env :openai)
@@ -158,6 +163,23 @@ LLM Provider 和 ChatModel 工厂模块
 (factory/create-provider-auto :openai {:model "gpt-4"})
 (factory/create-provider-auto :openai {:api-key "sk-..."} false)  ;; 不读环境变量
 ```
+
+### OpenAI Responses
+
+`:openai-responses` 与 `:openai` 共享上层 ChatModel/Agent API，但 wire 协议独立。
+默认 `base-url` 不含 `/v1`，`:api-path` 默认 `/v1/responses`；兼容网关只需覆盖
+`:base-url`（例如 `http://127.0.0.1:4000`）。
+
+```clojure
+(def p (factory/create-provider :openai-responses
+                                {:api-key "sk-..." :model "gpt-5"}))
+;; 兼容网关 / LiteGate：
+;; {:base-url "http://127.0.0.1:4000" :api-path "/v1/responses"}
+```
+
+响应中的 `output` items 会翻译成统一文本 / reasoning / tool calls；工具循环的
+`function_call` 以 `:blocks` 不透明载荷回放，`reasoning` 与 message 不做跨网关
+回放（部分兼容端点不支持）。
 
 ### ChatModel 创建
 
@@ -315,6 +337,9 @@ embedding 模型与对话模型是**两种模型**（另一个端点、另一套
 - 失败与 chat 路径同一套规范错误词汇（401 → `:auth-error` 且不可重试）。
 
 ### 结构化输出（OpenAI 兼容）
+
+Responses 端点也接受 Chat 风格 `:response-format`，provider 会转换成
+`text.format`；`json_schema` 的 name/schema/strict/description 保持不变。
 
 `:response-format` 透传，支持 JSON 模式与严格 JSON Schema：
 

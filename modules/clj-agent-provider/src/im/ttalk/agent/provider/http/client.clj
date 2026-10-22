@@ -36,6 +36,9 @@
   (delay
     (-> (HttpClient/newBuilder)
         (.connectTimeout (Duration/ofSeconds 30))
+        ;; LiteGate 等本地网关会在 HTTP/2 prior-knowledge 握手阶段直接断连；
+        ;; JDK 默认先试 HTTP/2。显式固定 HTTP/1.1，避免网关兼容性破坏 provider。
+        (.version java.net.http.HttpClient$Version/HTTP_1_1)
         (.executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor))
         (.build))))
 
