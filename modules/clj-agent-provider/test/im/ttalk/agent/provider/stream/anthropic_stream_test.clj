@@ -74,10 +74,21 @@
       (is (= [{:id "t2" :name "now" :args {}}] (:tool-calls resp))))))
 
 (deftest error-event-test
-  (testing "error 事件被记录，build-response 抛出"
+  (testing "error 事件被记录，build-response 抛 canonical error（overloaded 可重试）"
     (let [state (run-events [{:type "message_start" :message {:id "m1"}}
                              {:type "error" :error {:type "overloaded_error"
                                                     :message "overloaded"}}])]
       (is (= {:type "overloaded_error" :message "overloaded"} (:error state)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"streaming error"
-                            (stream/build-response state))))))
+      (let [d (try (stream/build-response state) nil
+                   (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+        (is (= :provider-error (:type d)))
+        (is (true? (:retryable? d)))
+        (is (re-find #"overloaded" (:message d))))))
+  (testing "流内 billing_error → 欠费，不可重试"
+    (let [state (run-events [{:type "message_start" :message {:id "m1"}}
+                             {:type "error" :error {:type "billing_error"
+                                                    :message "credit balance too low"}}])
+          d (try (stream/build-response state) nil
+                 (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+      (is (= :quota-exhausted-error (:type d)))
+      (is (false? (:retryable? d))))))

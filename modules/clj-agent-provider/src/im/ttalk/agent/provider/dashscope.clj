@@ -267,7 +267,9 @@
        :build-response dstream/build-response
        :on-token on-token
        :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
-       :provider :dashscope})))
+       :provider :dashscope
+       :first-byte-ms (:first-byte-ms config)
+       :idle-ms (:idle-ms config)})))
 
 ;;; ============================================================
 ;;; Provider Record

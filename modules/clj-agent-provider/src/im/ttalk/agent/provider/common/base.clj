@@ -119,7 +119,8 @@
     (compat/call-api
       (get-api-url config)
       (get-api-key config)
-      llm-config
+      ;; provider 名下发给 compat：错误归一（:provider）与业务码表认家都靠它
+      (merge {:provider-name (:provider-name cfg)} llm-config)
       messages
       tools
       {:timeout (:timeout cfg)})))
@@ -141,7 +142,8 @@
     (compat/call-api-stream
       (get-api-url config)
       (get-api-key config)
-      llm-config
+      ;; provider 名下发给 compat：错误归一（:provider）与业务码表认家都靠它
+      (merge {:provider-name (:provider-name cfg)} llm-config)
       messages
       tools
       on-token
@@ -158,7 +160,8 @@
     (compat/call-api-deferred
       (get-api-url config)
       (get-api-key config)
-      llm-config
+      ;; provider 名下发给 compat：错误归一（:provider）与业务码表认家都靠它
+      (merge {:provider-name (:provider-name cfg)} llm-config)
       messages
       tools
       {:timeout (:timeout cfg)})))
@@ -170,7 +173,8 @@
     (compat/call-api-stream-deferred
       (get-api-url config)
       (get-api-key config)
-      llm-config
+      ;; provider 名下发给 compat：错误归一（:provider）与业务码表认家都靠它
+      (merge {:provider-name (:provider-name cfg)} llm-config)
       messages
       tools
       on-token

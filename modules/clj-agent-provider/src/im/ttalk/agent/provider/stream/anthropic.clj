@@ -26,8 +26,10 @@
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [taoensso.timbre :as log]
+            [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.model.message :as msg]
-            [im.ttalk.agent.model.response :as response]))
+            [im.ttalk.agent.model.response :as response]
+            [im.ttalk.agent.provider.common.business-codes :as codes]))
 
 (set! *warn-on-reflection* true)
 
@@ -236,9 +238,10 @@
    (build-response final-state)
    ; => {:id \"...\" :content [...] :stop_reason \"end_turn\" ...}"
   [state]
+  ;; 流内错误帧 → canonical error（overloaded_error 可重试、billing_error 欠费、
+  ;; prompt is too long 超长…，designs/provider-reliability.md §1）。原始帧保留在 :context。
   (when-let [err (:error state)]
-    (throw (ex-info "Anthropic streaming error"
-                    {:error err :provider :anthropic :stream? true})))
+    (errors/throw! (assoc (codes/stream-error :anthropic err) :stream? true)))
   (let [message (:message state)
         accumulated (str (:accumulated state))
         content-blocks (:content-blocks state)]

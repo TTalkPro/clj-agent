@@ -74,6 +74,8 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.cache :as cache]
+            [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
+            [im.ttalk.agent.provider.common.thinking :as thinking]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
             [im.ttalk.agent.provider.wire.anthropic :as wire]
             [im.ttalk.agent.provider.stream.anthropic :as stream]))
@@ -140,45 +142,20 @@
 ;;; 响应头：限流信息
 ;;; ============================================================
 
-(defn- header-get
-  "从 headers map 读取某个头（兼容 keyword / 字符串键，大小写不敏感）"
-  [headers k]
-  (when headers
-    (or (get headers k)
-        (get headers (keyword k))
-        (get headers (clojure.string/lower-case k)))))
-
 (defn parse-rate-limit
-  "从 Anthropic 响应头解析限流信息（anthropic-ratelimit-*）。
+  "从响应头解析限流信息。
 
-   参数：
-   - headers: HTTP 响应头 map
+   统一实现见 `provider.common.rate-limit/parse-rate-limit`（OpenAI x-ratelimit-* 与
+   anthropic-ratelimit-* 折成同一形状，designs/provider-reliability.md §6）；本函数保留为
+   向后兼容的入口。
 
    返回：
    {:requests-limit n :requests-remaining n :requests-reset \"ISO时间\"
     :tokens-limit n :tokens-remaining n :tokens-reset \"ISO时间\"
     :retry-after n}
-   仅包含响应实际携带的字段；全部缺失时返回 nil。
-
-   说明：数值字段会尝试解析为 Long，解析失败则保留原字符串。"
+   仅包含响应实际携带的字段；全部缺失时返回 nil。"
   [headers]
-  (let [->long (fn [s] (when s (try (Long/parseLong (str s)) (catch Exception _ s))))
-        m (cond-> {}
-            (header-get headers "anthropic-ratelimit-requests-limit")
-            (assoc :requests-limit (->long (header-get headers "anthropic-ratelimit-requests-limit")))
-            (header-get headers "anthropic-ratelimit-requests-remaining")
-            (assoc :requests-remaining (->long (header-get headers "anthropic-ratelimit-requests-remaining")))
-            (header-get headers "anthropic-ratelimit-requests-reset")
-            (assoc :requests-reset (header-get headers "anthropic-ratelimit-requests-reset"))
-            (header-get headers "anthropic-ratelimit-tokens-limit")
-            (assoc :tokens-limit (->long (header-get headers "anthropic-ratelimit-tokens-limit")))
-            (header-get headers "anthropic-ratelimit-tokens-remaining")
-            (assoc :tokens-remaining (->long (header-get headers "anthropic-ratelimit-tokens-remaining")))
-            (header-get headers "anthropic-ratelimit-tokens-reset")
-            (assoc :tokens-reset (header-get headers "anthropic-ratelimit-tokens-reset"))
-            (header-get headers "retry-after")
-            (assoc :retry-after (->long (header-get headers "retry-after"))))]
-    (when (seq m) m)))
+  (rate-limit/parse-rate-limit headers))
 
 ;;; ============================================================
 ;;; 响应解析
@@ -380,7 +357,7 @@
    API 参数 map（已按 cache-strategy 注入 cache_control）"
   [{:keys [model max-tokens system-prompt tool-choice tools
            temperature top-p top-k stop metadata thinking service-tier container
-           cache-strategy cache-ttl]} messages tool-schemas]
+           cache-strategy cache-ttl] :as config} messages tool-schemas]
   (let [all-tools (merge-tools tools tool-schemas)
         max-tokens (or max-tokens 4096)
         params (cond-> {:model model
@@ -398,7 +375,10 @@
                  ;; 服务层级（"auto" | "standard_only"）：容量路由，仅显式提供时发送
                  service-tier        (assoc :service_tier service-tier)
                  ;; Skills 容器（beta）：{:skills [{:type "anthropic" :skill_id "xlsx" ...}]}
-                 container           (assoc :container container))]
+                 container           (assoc :container container))
+        ;; 统一思考档位（:thinking-effort / :thinking-enabled / :thinking-budget-tokens；
+        ;; 显式 :thinking 优先，见 common.thinking）
+        params (thinking/merge-output-config params (thinking/anthropic-fields config))]
     (cache/apply-anthropic-cache params cache-strategy cache-ttl)))
 
 ;;; ============================================================
@@ -444,10 +424,9 @@
                             :body params
                             :timeout timeout)]
     (if (:success? response)
-      ;; 把限流头信息附加到响应体（内部字段，不影响 normalize-response 的标准解析）
-      (let [rl (parse-rate-limit (:headers response))]
-        (cond-> (:body response)
-          rl (assoc :rate-limit rl)))
+      ;; 成功体统一处理：HTTP 200 业务错（MiniMax base_resp）、可选模型名核对、
+      ;; 限流头附加为 :rate-limit（内部字段，不影响 normalize-response 的标准解析）
+      (http/success-body response (:provider-name config :anthropic) config)
       (errors/throw! (response->error response (:provider-name config :anthropic))))))
 
 ;;; ============================================================
@@ -485,7 +464,11 @@
        :build-response stream/build-response
        :on-token on-token
        :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
-       :provider (:provider-name config :anthropic)})))
+       :provider (:provider-name config :anthropic)
+       :first-byte-ms (:first-byte-ms config)
+       :idle-ms (:idle-ms config)
+       :check-model (when (:check-model? config)
+                      {:requested (:model config) :model-fn #(get-in % [:message :model])})})))
 
 (defn call-anthropic-deferred
   "调用 Anthropic API（异步，返回 deferred<响应体>）。
@@ -509,9 +492,7 @@
                                   :timeout timeout)
               (fn [response]
                 (if (:success? response)
-                  (let [rl (parse-rate-limit (:headers response))]
-                    (cond-> (:body response)
-                      rl (assoc :rate-limit rl)))
+                  (http/success-body response (:provider-name config :anthropic) config)
                   (errors/throw! (response->error response (:provider-name config :anthropic))))))))
 
 (defn call-anthropic-stream-deferred
@@ -536,7 +517,11 @@
        :build-response stream/build-response
        :on-token on-token
        :retry (:retry config)
-       :provider (:provider-name config :anthropic)})))
+       :provider (:provider-name config :anthropic)
+       :first-byte-ms (:first-byte-ms config)
+       :idle-ms (:idle-ms config)
+       :check-model (when (:check-model? config)
+                      {:requested (:model config) :model-fn #(get-in % [:message :model])})})))
 
 ;;; ============================================================
 ;;; AnthropicProvider 实现
@@ -587,11 +572,19 @@
   proto/IReplayableResponse
   (replay-blocks [_ raw-response]
     (let [content (:content raw-response)]
-      ;; **只在真有 thinking 块时才捕获**。范围严格限定在有实测证据的那一种情况：
-      ;; 无脑捕获所有响应会让「原样回放」盖过现有的 text/tool_use 重建路径，
-      ;; 连带绕过任何改写过历史的 filter——那是没有证据支持的行为变更。
+      ;; **只在有证据的情况下捕获**，无脑捕获所有响应会让「原样回放」盖过现有的
+      ;; text/tool_use 重建路径，连带绕过任何改写过历史的 filter：
+      ;; 1. 有 thinking 块（签名必须逐字回传，实测证据见上）；
+      ;; 2. 有服务端工具块（server_tool_use / *_tool_result）或 stop_reason 为 pause_turn——
+      ;;    pause_turn 续跑要求把这条 assistant 消息**原样**接回历史，wire 重建会丢掉
+      ;;    server_tool_use 块，服务端无法从断点接续（designs/provider-reliability.md §10）。
       (when (and (sequential? content)
-                 (some #(= "thinking" (:type %)) content))
+                 (or (some #(= "thinking" (:type %)) content)
+                     (= "pause_turn" (:stop_reason raw-response))
+                     (some #(let [t (str (:type %))]
+                              (or (= "server_tool_use" t)
+                                  (clojure.string/ends-with? t "_tool_result")))
+                           content)))
         {:format :anthropic-content
          :data (vec content)})))
 

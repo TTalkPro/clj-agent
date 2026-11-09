@@ -17,6 +17,8 @@
             [clojure.string :as str]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.provider.common.business-codes :as codes]
+            [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
             [im.ttalk.agent.provider.http.retry :as retry])
   (:import [java.net URI URLEncoder]
            [java.net.http HttpClient HttpRequest HttpRequest$Builder HttpRequest$BodyPublishers
@@ -146,11 +148,14 @@
   "把失败的 HTTP 响应（本模块 request/post 返回的 map）转为 canonical error
    （D5：ex-info data 即 canonical error map；保留 body/headers/request-id 于 :context 供排查）。
 
-   之前 openai_compat / anthropic / dashscope 各自维护同一逻辑，现统一于此。
+   之前 openai_compat / anthropic / dashscope 各自维护同一逻辑，现统一于此；流式非 2xx
+   （`stream-client`）也走这里。
 
-   顺带把 `Retry-After` 响应头解析成 `:retry-after-ms` 挂在错误 map 上：**解析
-   HTTP 头是 provider 边界的事**，而重试已上移到 ChatModel（core，不认识 HTTP）。
-   不这么传，重试上移就会静默丢掉服务端的退避建议——429 上尤其要紧。"
+   - 状态码初判之后**过厂商业务码表**（`provider.common.business-codes/refine-error`）：
+     429 + insufficient_quota → :quota-exhausted-error（不可重试）、400 + prompt is too long →
+     :context-overflow-error、智谱 1309 → 欠费……（designs/provider-reliability.md §1）
+   - 把 `Retry-After` 响应头解析成 `:retry-after-ms`：**解析 HTTP 头是 provider 边界的事**，
+     重试在 ChatModel（core，不认识 HTTP）。没有头时扫正文里的 `try again in 1.5s`。"
   [response provider]
   (let [status (or (:status response) 0)
         base (if (and (zero? status) (:error response))
@@ -158,11 +163,49 @@
                (errors/error :network-error
                              (str "连接失败: " (:error response))
                              {:provider provider})
-               ;; HTTP 4xx/5xx：按状态码分类（401/403→auth 不可重试；429→限流；5xx→provider 可重试）
-               (errors/http-response->error response provider))
-        retry-after (retry/parse-retry-after (:headers response))]
+               ;; HTTP 4xx/5xx：按状态码分类，再按业务码收紧
+               (let [e (errors/http-response->error response provider)
+                     ;; 状态码层只认 {:error {:message}} / {:message}；智谱 {:msg}、MiniMax base_resp.status_msg
+                     ;; 在这里补挖一次，免得错误消息只剩一句「HTTP 400 error」
+                     e (if-let [m (and (re-matches #"HTTP \d+ error" (str (:message e)))
+                                       (codes/extract-message (:body response)))]
+                         (assoc e :message m)
+                         e)]
+                 (codes/refine-error e (:body response))))
+        retry-after (or (retry/parse-retry-after (:headers response))
+                        (codes/retry-delay-text (:message base))
+                        (codes/retry-delay-text (let [b (:body response)] (when (string? b) b))))]
     (cond-> (assoc base :context (select-keys response [:body :headers :request-id :error]))
       retry-after (assoc :retry-after-ms retry-after))))
+
+(defn check-model!
+  "回包模型名核对（opt-in，designs/provider-reliability.md §4）：requested 与 answered 都非空且不相等
+   → 抛 `{:type :provider-error :retryable? false :code :model-mismatch}`。"
+  [provider requested answered]
+  (when (and (string? requested) (seq requested)
+             (string? answered) (seq answered)
+             (not= requested answered))
+    (errors/throw! (errors/error :provider-error
+                                 (str "请求的模型是 " requested "，服务端却以 " answered " 作答")
+                                 {:provider provider :status 200 :retryable? false
+                                  :code :model-mismatch}))))
+
+(defn success-body
+  "成功（2xx）响应 → 原始响应体，统一做三件事（openai 兼容 / anthropic / responses 的同步与异步路径共用）：
+
+   1. HTTP 200 里的业务错（MiniMax / 智谱 `base_resp.status_code ≠ 0`）→ 抛 canonical error（§1）；
+   2. opts `{:check-model? true :model \"请求的模型\"}` 时核对 `(:model body)`（§4）；
+   3. 响应头里的限流信息折成 `:rate-limit` 挂到响应体上（§6；body 是 map 时）。"
+  ([response provider] (success-body response provider nil))
+  ([response provider {:keys [check-model? model]}]
+   (let [body (:body response)]
+     (when-let [err (codes/body-error provider body)]
+       (errors/throw! (assoc err :context (select-keys response [:body :headers :request-id]))))
+     (when (and check-model? (map? body))
+       (check-model! provider model (:model body)))
+     (let [rl (rate-limit/parse-rate-limit (:headers response))]
+       (cond-> body
+         (and rl (map? body)) (assoc :rate-limit rl))))))
 
 ;; ============================================================
 ;; 请求构建

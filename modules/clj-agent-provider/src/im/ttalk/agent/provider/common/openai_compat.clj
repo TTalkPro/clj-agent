@@ -18,6 +18,7 @@
    (compat/call-api-stream api-url api-key config messages tools on-token)"
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
+            [im.ttalk.agent.provider.common.thinking :as thinking]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]
             [im.ttalk.agent.filter :as flt]
@@ -68,6 +69,8 @@
      - 系统提示：:system-prompt
      - 结构化输出：:response-format（json_object 或 json_schema+strict 模式）
      - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）
+     - 统一思考档位：:thinking-effort / :thinking-enabled / :thinking-style（见 common.thinking；
+       显式 :thinking / :reasoning-effort 优先，原样透传）
    - messages:     消息列表
    - tool-schemas: 工具 schema 列表
 
@@ -78,15 +81,19 @@
    - temperature/top_p 改为「存在才设」—— 不再强塞默认值（推理类模型对此敏感）。
    - OpenAI 兼容协议的 prompt caching 是自动的，无需 cache_control；命中情况见
      响应 usage 的 prompt_tokens_details.cached_tokens（OpenAI）/ prompt_cache_hit_tokens（DeepSeek）。"
-  [{:keys [model max-tokens system-prompt temperature top-p stop response-format
-           frequency-penalty presence-penalty seed n tool-choice user
-           logprobs top-logprobs thinking parallel-tool-calls reasoning-effort verbosity
-           modalities audio
-           do-sample tool-stream request-id user-id stream-options extra-body]}
-   messages tool-schemas]
+  ([config messages tool-schemas] (build-params config messages tool-schemas false))
+  ([{:keys [model max-tokens system-prompt temperature top-p stop response-format
+            frequency-penalty presence-penalty seed n tool-choice user
+            logprobs top-logprobs thinking parallel-tool-calls reasoning-effort verbosity
+            modalities audio
+            do-sample tool-stream request-id user-id stream-options extra-body]
+     :as config}
+    messages tool-schemas stream?]
   (let [msgs (build-messages system-prompt messages)]
-    (cond-> {:model model
-             :messages msgs}
+    (cond-> (merge {:model model
+                    :messages msgs}
+                   ;; 统一思考档位（显式 :thinking / :reasoning-effort 在场时不生成对应字段）
+                   (thinking/openai-fields config stream?))
       max-tokens                (assoc :max_tokens max-tokens)
       (some? temperature)       (assoc :temperature temperature)
       (some? top-p)             (assoc :top_p top-p)
@@ -122,7 +129,7 @@
       user-id                   (assoc :user_id user-id)
       ;; 流式 usage 开关（OpenAI 标准 {:include_usage true}；DeepSeek 末块原生带 usage）
       stream-options            (assoc :stream_options stream-options)
-      (map? extra-body)         (merge extra-body))))
+      (map? extra-body)         (merge extra-body)))))
 
 ;;; ============================================================
 ;;; 消息构建
@@ -189,7 +196,7 @@
                             :body params
                             :timeout timeout)]
     (if (:success? response)
-      (:body response)
+      (http/success-body response (:provider-name config) config)
       (errors/throw! (response->error response (:provider-name config))))))
 
 ;;; ============================================================
@@ -218,7 +225,7 @@
        (flush)))"
   [api-url api-key config messages tools on-token & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (-> (build-params config messages tool-schemas)
+        params (-> (build-params config messages tool-schemas true)
                    (assoc :stream true))
         ;; 真流式：长生成给足超时（java.net.http 的 timeout 是 total）
         timeout (or (:timeout opts) 300000)
@@ -239,7 +246,11 @@
                                                           :model (get-model)))
        :on-token on-token
        :retry (:retry config)            ;; opt-in 建链重试（未出 token 才重试）
-       :provider (:provider-name config)})))
+       :provider (:provider-name config)
+       :first-byte-ms (:first-byte-ms config)
+       :idle-ms (:idle-ms config)
+       :check-model (when (:check-model? config)
+                      {:requested (:model config) :model-fn (fn [_] (get-model))})})))
 
 ;;; ============================================================
 ;;; 异步调用（deferred）
@@ -268,7 +279,7 @@
                                   :timeout timeout)
               (fn [response]
                 (if (:success? response)
-                  (:body response)
+                  (http/success-body response (:provider-name config) config)
                   (errors/throw! (response->error response (:provider-name config))))))))
 
 (defn call-api-stream-deferred
@@ -278,7 +289,7 @@
    只是不阻塞调用线程。⚠️ on-token 在传输层 executor 上派发，不是调用线程。"
   [api-url api-key config messages tools on-token & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (-> (build-params config messages tool-schemas)
+        params (-> (build-params config messages tool-schemas true)
                    (assoc :stream true))
         timeout (or (:timeout opts) 300000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
@@ -296,4 +307,8 @@
                                                           :model (get-model)))
        :on-token on-token
        :retry (:retry config)
-       :provider (:provider-name config)})))
+       :provider (:provider-name config)
+       :first-byte-ms (:first-byte-ms config)
+       :idle-ms (:idle-ms config)
+       :check-model (when (:check-model? config)
+                      {:requested (:model config) :model-fn (fn [_] (get-model))})})))

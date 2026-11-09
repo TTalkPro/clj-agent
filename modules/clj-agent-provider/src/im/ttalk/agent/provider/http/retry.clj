@@ -111,13 +111,20 @@
 ;; ============================================================
 
 (defn- header-get
-  "大小写无关地取响应头（HTTP 客户端头通常是小写关键字或字符串，但不同栈大小写不一）"
+  "大小写无关地取响应头（HTTP 客户端头通常是小写关键字或字符串，但不同栈大小写不一）。
+
+   值是 `List<String>` / 向量时取第一个——`http.client` 的 `http-headers->map` 存的正是
+   `java.net.http` 给的 List。此前直接 `(str v)` 得到 \"[120]\"，Retry-After 在真实请求上
+   **从未生效**（单测一直传字符串值所以没发现；designs/provider-reliability.md §1.3）。"
   [headers k]
   (when headers
-    (let [target (str/lower-case (name k))]
-      (some (fn [[hk hv]]
-              (when (= target (str/lower-case (name hk))) hv))
-            headers))))
+    (let [target (str/lower-case (name k))
+          v (some (fn [[hk hv]]
+                    (when (= target (str/lower-case (name hk))) hv))
+                  headers)]
+      (if (or (instance? java.util.List v) (sequential? v))
+        (first v)
+        v))))
 
 (defn parse-retry-after
   "从响应头解析 Retry-After，返回毫秒数或 nil

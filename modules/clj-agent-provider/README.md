@@ -109,6 +109,10 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 | `im.ttalk.agent.provider.common.response-parser` | 响应归一化（辅助层） |
 | `im.ttalk.agent.provider.common.memo` | 有界记忆化（schema 转换缓存，辅助层） |
 | `im.ttalk.agent.provider.common.embeddings` | Embedding HTTP 调用与响应归一（OpenAI 兼容 + DashScope 原生，辅助层） |
+| `im.ttalk.agent.provider.common.business-codes` | 厂商业务码表：insufficient_quota@429 / Anthropic billing_error / 智谱 1308-1311 / MiniMax 1039·2056 → `:quota-exhausted-error`，context_length_exceeded / prompt is too long → `:context-overflow-error`（辅助层） |
+| `im.ttalk.agent.provider.common.rate-limit` | 统一限流快照：OpenAI `x-ratelimit-*` 与 `anthropic-ratelimit-*` 折成同一形状，挂到响应 `:rate-limit`（辅助层） |
+| `im.ttalk.agent.provider.common.thinking` | thinking 档位统一：`:thinking-effort` / `:thinking-enabled` 按各家风格生成 wire，显式 `:thinking` 优先（辅助层） |
+| `im.ttalk.agent.provider.anthropic-server-tools` | Anthropic 服务端工具块（web_search / code_execution）的可读视图 `describe`，不进历史 |
 | `im.ttalk.agent.provider.schema.openai` | OpenAI Schema 转换 |
 | `im.ttalk.agent.provider.schema.anthropic` | Anthropic Schema 转换 |
 | `im.ttalk.agent.provider.stream.openai` | OpenAI 流式处理 |

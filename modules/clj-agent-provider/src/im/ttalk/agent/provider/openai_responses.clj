@@ -8,6 +8,7 @@
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.response-parser :as parser]
+            [im.ttalk.agent.provider.common.thinking :as thinking]
             [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.schema.openai :as schema]
@@ -52,7 +53,7 @@
   [{:keys [model system-prompt max-tokens max-output-tokens temperature top-p user
            store previous-response-id metadata parallel-tool-calls truncation include
            service-tier reasoning reasoning-effort reasoning-summary response-format
-           tool-choice tools extra-body]}
+           tool-choice tools extra-body thinking-effort]}
    wire-input wire-tools]
   (cond-> {:model model
            :input (:input wire-input)}
@@ -71,6 +72,9 @@
     (map? reasoning)                  (assoc :reasoning reasoning)
     (and (not reasoning) reasoning-effort)
     (assoc :reasoning {:effort reasoning-effort})
+    ;; 统一思考档位（designs/provider-reliability.md §7）：显式 :reasoning / :reasoning-effort 优先
+    (and (not reasoning) (not reasoning-effort) thinking-effort)
+    (merge (thinking/responses-fields {:thinking-effort thinking-effort}))
     (and (not reasoning) reasoning-summary)
     (update :reasoning #(merge (or % {}) {:summary reasoning-summary}))
     response-format                   (merge (response-format->text response-format))
@@ -135,7 +139,7 @@
                         :body (build-body cfg messages tools)
                         :timeout (or (:timeout cfg) 60000))]
     (if (:success? resp)
-      (provider-response (:body resp) (:provider-name cfg))
+      (provider-response (http/success-body resp (:provider-name cfg) cfg) (:provider-name cfg))
       (errors/throw! (http/response->error resp (:provider-name cfg))))))
 
 (defn- call-stream!
@@ -155,7 +159,9 @@
                                             (:provider-name cfg)))
        :on-token on-token
        :retry (:retry cfg)
-       :provider (:provider-name cfg)})))
+       :provider (:provider-name cfg)
+       :first-byte-ms (:first-byte-ms cfg)
+       :idle-ms (:idle-ms cfg)})))
 
 (defrecord OpenAIResponsesProvider [config]
   proto/ILLMProvider
@@ -185,7 +191,7 @@
                                     :timeout (or (:timeout cfg) 60000))
                 (fn [resp]
                   (if (:success? resp)
-                    (provider-response (:body resp) (:provider-name cfg))
+                    (provider-response (http/success-body resp (:provider-name cfg) cfg) (:provider-name cfg))
                     (errors/throw! (http/response->error resp (:provider-name cfg))))))))
   (call-llm-stream-async [_ llm-config messages tools on-token]
     (let [cfg (merge @config llm-config)
@@ -203,7 +209,9 @@
                                               (:provider-name cfg)))
          :on-token on-token
          :retry (:retry cfg)
-         :provider (:provider-name cfg)}))))
+         :provider (:provider-name cfg)
+         :first-byte-ms (:first-byte-ms cfg)
+         :idle-ms (:idle-ms cfg)}))))
 
 (defn create-provider
   ([opts]
