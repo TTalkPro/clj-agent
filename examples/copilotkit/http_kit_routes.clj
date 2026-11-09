@@ -19,6 +19,14 @@
      POST {base}/agent/:id/connect          → 只订阅（重连/旁观），SSE
      POST {base}/agent/:id/stop/:threadId   → 停（**threadId 在路径里，没有请求体**）
 
+   多 agent：`start-registry!` 收一张 `agui.registry`，路径里的 `:id` 按表分派，
+   找不到回 404 `agent_not_found`（designs/agui-borrow.md §4）。单 agent 的
+   `start!` 签名不变（内部建一台 `\"default\"` 的表）。
+
+   错误一律 `{\"error\": <码>, \"message\": <话>}`：坏 JSON / 缺 threadId、runId →
+   400，请求体超限 → 413，线程面缺槽 → 501（designs/agui-borrow.md §7）。
+   SSE 流闲够 `:heartbeat-ms`（缺省 15s）就发一条注释帧保活（§3）。
+
    这四条的形状全部对着 `packages/core/src/agent.ts` 与 `agent-registry.ts` 抄的
    ——联调时照出来两处：`/info` 的 agents 是字典（给数组前端会去请求
    `/agent/0/run`），`/stop` 的 threadId 是**路径段**不是请求体。
@@ -30,13 +38,18 @@
   (:require [cheshire.core :as json]
             [clojure.string :as str]
             [im.ttalk.agent.agui.codec :as codec]
+            [im.ttalk.agent.agui.registry :as registry]
             [im.ttalk.agent.agui.runtime :as rt]
             [im.ttalk.agent.agui.state :as agui-state]
+            [im.ttalk.agent.agui.thread-store :as ts]
             [im.ttalk.agent.agui.tools :as agui-tools]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.simple-agent :as agent]
             [im.ttalk.agent.tool :as tool]
-            [org.httpkit.server :as hk]))
+            [org.httpkit.server :as hk])
+  (:import [java.io InputStream]
+           [java.util.concurrent Executors ScheduledExecutorService ScheduledFuture
+            ThreadFactory TimeUnit]))
 
 ;;; ============================================================
 ;;; SSE
@@ -53,11 +66,12 @@
    没有 Origin 时的退化形态）。做成动态变量是为了不用把 request 穿到每一个
    `json-response` 调用点上去。
 
-   **方法表里必须有 `DELETE`**：`DELETE /threads/:id` 不是简单请求，浏览器
-   先发预检，表里没有它整条删除线程的路由在浏览器侧根本走不通（服务端那段
-   cond 永远等不到请求）。"
+   **方法表里必须有 `DELETE` 与 `PATCH`**：`DELETE /threads/:id`、
+   `PATCH /threads/:id`（上游改名 / 取消归档走它）都不是简单请求，浏览器先发
+   预检，表里没有它们那几条路由在浏览器侧根本走不通（服务端那段 cond 永远等
+   不到请求）。"
   {"Access-Control-Allow-Origin" "*"
-   "Access-Control-Allow-Methods" "GET, POST, DELETE, OPTIONS"
+   "Access-Control-Allow-Methods" "GET, POST, PATCH, DELETE, OPTIONS"
    "Access-Control-Allow-Headers" "Content-Type, Last-Event-ID, X-CopilotKit-Runtime-Client-GQL-Version"
    "Access-Control-Max-Age" "86400"
    "Vary" "Origin"})
@@ -89,6 +103,83 @@
   ;; 那正好就是 subscribe 的 `:since`。这是**偏移续传**，不是全量重放。
   (str "id: " seq "\ndata: " (json/generate-string agui) "\n\n"))
 
+;;; ------------------------------------------------------------
+;;; 心跳（designs/agui-borrow.md §3）
+;;; ------------------------------------------------------------
+
+(def default-heartbeat-ms
+  "缺省 15 秒（Keelson `AguiServerOptions.Heartbeat` 同值）：比 nginx 缺省的
+   `proxy_read_timeout 60s` 与常见云 LB 的 30–60s 空闲超时都短一截。"
+  15000)
+
+(def default-heartbeat-frame
+  "SSE **注释帧**：`EventSource` 与 `@ag-ui/client` 的解析器都直接跳过以 `:` 开头
+   的行，于是它只保活、不进事件校验。⛔ 别换成 `data: {}`——那会被当成一条
+   AG-UI 事件去校验，`{}` 不是合法事件。前端看门狗真要看得见心跳，自己给
+   `:heartbeat-frame`。"
+  ": clj-agent-alive\n\n")
+
+(defonce ^:private heartbeat-pool
+  ;; **所有连接共用一根 daemon 线程**，不是每连接一根：心跳只是「到点看一眼、
+  ;; 闲了就写一行」，一根线程扛得住成千上万条流。懒建：不开心跳就不起
+  (delay (Executors/newSingleThreadScheduledExecutor
+          (reify ThreadFactory
+            (newThread [_ r]
+              (doto (Thread. ^Runnable r "agui-sse-heartbeat") (.setDaemon true)))))))
+
+(defn heartbeat!
+  "给一条 SSE 流起心跳，返回**停止函数**。
+
+   **闲够才发**：`last-sent`（atom，毫秒）由发真实事件的那一侧刷新；每个 tick
+   距上次发送不足 `period-ms` 就什么都不写——忙的流上没有一个多余字节。
+   tick 间隔取 `period-ms` 的一半，最长静默因此不超过 1.5 个周期。
+
+   - `:period-ms` 0 / nil = 关（返回空操作的停止函数）
+   - `:send!`     `(fn [string])`，往连接上写（写失败——连接已断——无所谓）
+   - `:frame`     字符串或 `(fn [] string)`，缺省 `default-heartbeat-frame`
+   - `:last-sent` 与事件发送共享的 atom；不给就自己建一个
+   - `:now`       `(fn [] ms)`，可注入（测试）"
+  [{:keys [period-ms send! frame last-sent now]}]
+  (let [period (long (or period-ms 0))]
+    (if-not (pos? period)
+      (fn [] nil)
+      (let [now (or now #(System/currentTimeMillis))
+            last-sent (or last-sent (atom (now)))
+            tick (max 1 (quot period 2))
+            ^ScheduledExecutorService pool @heartbeat-pool
+            ^ScheduledFuture fut
+            (.scheduleAtFixedRate
+             pool
+             ^Runnable
+             (fn []
+               (try
+                 (when (>= (- (long (now)) (long @last-sent)) period)
+                   (reset! last-sent (now))
+                   (send! (cond (fn? frame) (frame)
+                                (string? frame) frame
+                                :else default-heartbeat-frame)))
+                 (catch Throwable _ nil)))
+             tick tick TimeUnit/MILLISECONDS)]
+        (fn [] (.cancel fut false) nil)))))
+
+(defn- open-sse!
+  "发 SSE 响应头、起心跳。返回 `{:send! (fn [frame-string]) :close! (fn [])}`；
+   连接关掉时（无论哪一侧关）停心跳并调 `on-closed`。
+
+   `:send!` 每发一帧都刷新「最后发送时间」——心跳只在真空期出现。"
+  [channel {:keys [heartbeat-ms heartbeat-frame]} on-closed]
+  (hk/send! channel {:status 200 :headers (merge cors-headers sse-headers)} false)
+  (let [last-sent (atom (System/currentTimeMillis))
+        stop-hb (heartbeat! {:period-ms (if (contains? #{nil :default} heartbeat-ms)
+                                          default-heartbeat-ms
+                                          heartbeat-ms)
+                             :frame heartbeat-frame
+                             :last-sent last-sent
+                             :send! #(hk/send! channel % false)})]
+    (hk/on-close channel (fn [_] (stop-hb) (when on-closed (on-closed))))
+    {:send! (fn [frame] (reset! last-sent (System/currentTimeMillis)) (hk/send! channel frame false))
+     :close! (fn [] (stop-hb) (hk/close channel))}))
+
 (defn- sse-response
   "把一个订阅接到 http-kit 的 channel 上。
 
@@ -100,25 +191,24 @@
    - `/run` **要关**——客户端的 `run()` 得在终态处收口，不关它就一直吊着；
    - `/connect` **不关**——它是旁观/重连流，跨 run 连续（`:seq` 本来就是会话级的）。
      HITL 下一次对话由多个 run 组成，在第一个终态就关会把续跑截断（联调实测）。"
-  [runtime conv-id since {:keys [close-on-terminal?]}]
+  [runtime conv-id since {:keys [close-on-terminal?] :as opts}]
   (fn [request]
     (hk/with-channel request channel
-      (hk/send! channel {:status 200 :headers (merge cors-headers sse-headers)} false)
       (let [unsub (volatile! nil)
+            {:keys [send! close!]} (open-sse! channel opts (fn [] (when-let [u @unsub] (u))))
             emit (fn [ev]
                    (doseq [agui (codec/->agui-events ev)]
-                     (hk/send! channel (sse-frame ev agui) false)
+                     (send! (sse-frame ev agui))
                      ;; **终态即关流**：AG-UI 的一条 run 以终态收口，流不关客户端就
                      ;; 一直吊着（联调实测：工具卡片永远停在 inProgress）。
                      ;; 续跑是新的 run，前端用 /connect 接着看。
                      (when (and close-on-terminal? (codec/terminal? agui))
                        (when-let [u @unsub] (u))
-                       (hk/close channel))))]
+                       (close!))))]
         (vreset! unsub (rt/subscribe runtime conv-id
                                      {:since since
                                       :on-event emit
-                                      :on-close (fn [_] (hk/close channel))}))
-        (hk/on-close channel (fn [_] (when-let [u @unsub] (u))))))))
+                                      :on-close (fn [_] (close!))}))))))
 
 (defn- sse-frames
   "把**已经算好**的几条 AG-UI 事件当成一条 SSE 流发完就关。
@@ -128,10 +218,11 @@
   [agui-events]
   (fn [request]
     (hk/with-channel request channel
-      (hk/send! channel {:status 200 :headers (merge cors-headers sse-headers)} false)
-      (doseq [[i ev] (map-indexed vector agui-events)]
-        (hk/send! channel (sse-frame {:seq i} ev) false))
-      (hk/close channel))))
+      ;; 发完就关，用不着心跳
+      (let [{:keys [send! close!]} (open-sse! channel {:heartbeat-ms 0} nil)]
+        (doseq [[i ev] (map-indexed vector agui-events)]
+          (send! (sse-frame {:seq i} ev)))
+        (close!)))))
 
 (defn- last-event-id
   "浏览器 EventSource 自动重连时带的头；没有就退回请求体里的 since。"
@@ -139,17 +230,76 @@
   (some-> (or (get-in request [:headers "last-event-id"]) (:since body))
           str parse-long))
 
-(defn- json-response [body]
-  {:status 200
-   :headers (merge cors-headers {"Content-Type" "application/json"})
-   :body (json/generate-string body)})
+(defn- json-response
+  ([body] (json-response 200 body))
+  ([status body]
+   {:status status
+    :headers (merge cors-headers {"Content-Type" "application/json"})
+    :body (json/generate-string body)}))
+
+(defn- error-response
+  "错误出口：`{\"error\": 码, \"message\": 话}`（Keelson `AguiHttp.WriteError` 同形）。
+   码是给程序判的，话是给人看的。"
+  [status code message]
+  (json-response status {:error code :message message}))
 
 ;;; ============================================================
 ;;; 四条路由
 ;;; ============================================================
 
-(defn- read-body [request]
-  (some-> (:body request) slurp (json/parse-string true)))
+(def default-max-body-bytes
+  "请求体上限，缺省 16 MiB（Keelson `AguiServerOptions.MaxBodyBytes` 同值）。
+   AG-UI 客户端每次 run 都发全量历史，带图的多模态消息会很大——给得宽，但得有。"
+  (* 16 1024 1024))
+
+(def ^:private ^:dynamic *max-body-bytes* default-max-body-bytes)
+
+(defn- read-body*
+  "读请求体并解析 JSON。返回 `[:ok 解析结果]`（空体 = `[:ok nil]`）或
+   `[:error 响应]`：超限 → 413 `body_too_large`，解析失败 → 400 `bad_json`。
+
+   **多读一个字节判超限**，而不是先整个 slurp 再量——那样上限就形同虚设。"
+  [request]
+  (let [b (:body request)
+        limit (long *max-body-bytes*)
+        text (cond
+               (nil? b) nil
+               (string? b) b
+               (instance? InputStream b)
+               (let [bs (.readNBytes ^InputStream b (int (min Integer/MAX_VALUE (inc limit))))]
+                 (if (> (alength bs) limit)
+                   ::too-large
+                   (String. bs "UTF-8")))
+               :else (slurp b))]
+    (cond
+      (= ::too-large text)
+      [:error (error-response 413 "body_too_large" (str "请求体超过上限 " limit " 字节"))]
+
+      (and (string? text) (> (count text) limit))
+      [:error (error-response 413 "body_too_large" (str "请求体超过上限 " limit " 字节"))]
+
+      (str/blank? text)
+      [:ok nil]
+
+      :else
+      (try
+        [:ok (json/parse-string text true)]
+        (catch Exception e
+          [:error (error-response 400 "bad_json" (str "请求体不是合法 JSON: " (ex-message e)))])))))
+
+(defmacro ^:private with-body
+  "读体：成功绑定到 `sym` 执行 body，失败直接回 4xx 响应。"
+  [[sym request] & body]
+  `(let [[tag# v#] (read-body* ~request)]
+     (if (= :error tag#)
+       v#
+       (let [~sym v#] ~@body))))
+
+(defn- input-error
+  "`codec/run-input-problem` → 400 响应（没问题回 nil）。"
+  [body opts]
+  (when-let [{:keys [error message]} (codec/run-input-problem body opts)]
+    (error-response 400 error message)))
 
 (defn- decision-of
   "前端 `respond(...)` 回来的载荷 → resume 决策。
@@ -164,22 +314,55 @@
       "approved"
       "rejected")))
 
-(defn- resume-decision
-  "AG-UI `resume[]` 条目 → resume 决策。
+(defn- reason-of
+  "载荷里给模型看的拒绝理由：`reason` 优先，其次 `message`；字符串载荷本身就是理由。"
+  [payload]
+  (let [r (cond
+            (map? payload) (or (:reason payload) (:message payload))
+            (string? payload) payload)]
+    (when (and (string? r) (not (str/blank? r))) r)))
+
+(defn- explicit-false? [v]
+  (or (false? v) (and (string? v) (= "false" (str/lower-case (str/trim v))))))
+
+(defn resume-decision
+  "AG-UI `resume[]` 条目 → `[decision payload]`，喂给 `rt/resume-run!`
+   （designs/agui-borrow.md §1，tasks/G-01.md）。
 
    `status` 是协议的一等字段（`\"resolved\"` / `\"cancelled\"`），**先看它**：
    取消就是拒绝，没有歧义。`resolved` 才去看载荷——前端可能什么都不带
-   （「点了同意」本身就是全部信息），也可能带 `{decision: ...}`（我们在
-   `responseSchema` 里就是这么要的）。"
+   （「点了同意」本身就是全部信息），也可能带 `{decision}`（老前端）或
+   `{approved, editedArgs?, reason?}`（通用审批客户端，Keelson 同形）。
+
+   | 入参 | decision | payload（client 的 resume 词汇） |
+   |---|---|---|
+   | `status=cancelled` | `\"rejected\"` | `{:message 理由}`（有才带） |
+   | `approved:false`，或 `decision` 判拒 | `\"rejected\"` | `{:message reason}`（有才带） |
+   | 批准 + `editedArgs` 是对象 | `\"approved\"` | `{:args editedArgs}`——**整体替换**，不合并 |
+   | 其余 | `\"approved\"` | nil |
+
+   ⚠️ **`approved:false` 先于一切判**：从前只认 `decision`，`{approved:false}`
+   没有 `decision` 键就落到缺省的「批准」——用户点了拒绝，工具照样执行。
+
+   ⛔ 不把客户端载荷原样透传：它的键名与 client 的 `{:args :message}` 不是一套
+   词汇，原样透传等于让客户端往 resume 里塞任意键。"
   [{:keys [status payload]}]
-  (cond
-    (= "cancelled" status)                    "rejected"
-    (map? payload)                            (if-let [d (or (:decision payload)
-                                                             (get payload "decision"))]
-                                                (decision-of d)
-                                                "approved")
-    (some? payload)                           (decision-of payload)
-    :else                                     "approved"))
+  (let [reject (fn [] (if-let [r (reason-of payload)] ["rejected" {:message r}] ["rejected" nil]))
+        approve (fn [] (let [e (when (map? payload) (:editedArgs payload))]
+                         (if (map? e) ["approved" {:args e}] ["approved" nil])))]
+    (cond
+      (= "cancelled" status)                     (reject)
+      (map? payload)
+      (cond
+        (explicit-false? (:approved payload))    (reject)
+        (some? (:decision payload))              (if (= "approved" (decision-of (:decision payload)))
+                                                   (approve)
+                                                   (reject))
+        :else                                    (approve))
+      (some? payload)                            (if (= "approved" (decision-of payload))
+                                                   ["approved" nil]
+                                                   (reject))
+      :else                                      ["approved" nil])))
 
 (defn- payload-text
   "`resume[].payload` → 交给模型的文本。
@@ -223,16 +406,94 @@
       ;; 别让模型把空串当成内容
       :else "该工具已在客户端执行完成，但没有返回任何结果。")))
 
-(defn- matching-resume
-  "本次请求里、针对**当前这条**暂停的 resume 条目。
+(defn- bad-resume-entry?
+  "AG-UI `ResumeEntry`：`{interruptId, status?, payload?}`，status 只有
+   `resolved` / `cancelled` 两种。"
+  [e]
+  (not (and (map? e)
+            (let [id (:interruptId e)]
+              (or (and (string? id) (not (str/blank? id))) (number? id)))
+            (or (nil? (:status e)) (contains? #{"resolved" "cancelled"} (:status e))))))
 
-   校验 `interruptId`：客户端可能带着一条过期的答复重放（换页签、重连、
-   用户在旧卡片上点了按钮）。对不上就当没有——按新消息起 run，而不是拿旧决定
-   去恢复一个已经不是它的暂停。"
-  [resume pending]
-  (when pending
-    (let [id (codec/interrupt-id pending)]
-      (first (filter #(= id (str (:interruptId %))) resume)))))
+(defn- per-call-decision
+  "一条 resume 条目 → client 的逐条决策（`{:decisions {id 这个}}` 里的值）。
+
+   服务端工具：载荷是**决策**（`resume-decision`，含 editedArgs → `:args`、理由 →
+   `:message`）；前端工具：载荷**即**结果（`:reply`，口径同单条的 `frontend-reply`）。"
+  [pending-tool entry server-tool-names]
+  (if (contains? server-tool-names (str (:name pending-tool)))
+    (let [[d p] (resume-decision entry)]
+      (cond-> {:decision (keyword d)}
+        (:args p)    (assoc :args (:args p))
+        (:message p) (assoc :message (:message p))))
+    {:decision :reply :message (frontend-reply entry nil)}))
+
+(defn resume-plan
+  "`resume[]` 对着当前暂停算出怎么续（designs/agui-borrow.md §2，tasks/G-02.md）。
+   **在起 run 之前**判完所有错，回普通 JSON 4xx——Keelson 是起 run 之后发
+   `RUN_ERROR INTERRUPT_*`，我们在路由层就看得见暂停，早判客户端更好处理，也不会
+   留下一条只有 `RUN_STARTED` + `RUN_ERROR` 的空 run。
+
+   返回：
+   - nil —— 没带 resume，走原来的推断
+   - `{:error [status code body-extra]}`
+     | 情形 | status | code |
+     |---|---|---|
+     | resume 不是数组 / 条目形状不对 | 400 | `interrupt_bad_resume`（INTERRUPT_BAD_RESUME） |
+     | 没有暂停 | 409 | `no_pending_interrupt` |
+     | 一条都对不上（过期重放） | 409 | `interrupt_mismatch` |
+     | 对上了、但还夹着不认识的 id | 409 | `interrupt_unknown`（INTERRUPT_UNKNOWN，带 `unknown`） |
+     | 多条审批只答了一部分 | 409 | `interrupt_incomplete`（INTERRUPT_INCOMPLETE，带 `missing`） |
+   - `{:single entry}` —— 只有一条暂停：走原来的单条路（与 G-01 逐字相同）
+   - `{:decisions {id 决策}}` —— 多条：交给 client 的逐条决策（**答全答对**，
+     与 client 的校验口径一致；漏答在这里就拦下，不让它变成一次失败的 run）"
+  [resume pending server-tool-names]
+  (when (and (some? resume) (or (not (sequential? resume)) (seq resume)))
+    (cond
+      (or (not (sequential? resume)) (some bad-resume-entry? resume))
+      {:error [400 "interrupt_bad_resume"
+               {:message "resume 必须是 [{interruptId, status: resolved|cancelled, payload?}]"}]}
+
+      (nil? pending)
+      {:error [409 "no_pending_interrupt" {:message "这个线程没有在等答复的 interrupt"}]}
+
+      :else
+      (let [pts (or (not-empty (vec (:pending-tools pending))) [(:pending-tool pending)])
+            multi? (> (count pts) 1)
+            ids (if multi?
+                  (mapv #(str (get-in % [:tool-call :id])) pts)
+                  [(codec/interrupt-id pending)])
+            id-set (set ids)
+            by-id (reduce (fn [m e] (let [k (str (:interruptId e))]
+                                      (if (contains? m k) m (assoc m k e))))
+                          {} resume)
+            unknown (vec (remove id-set (keys by-id)))
+            missing (vec (remove #(contains? by-id %) ids))]
+        (cond
+          (= (count unknown) (count by-id))
+          {:error [409 "interrupt_mismatch"
+                   (cond-> {:message "resume 里的 interruptId 对不上当前的暂停（过期的答复？）"
+                            :interruptId (first ids)}
+                     multi? (assoc :interruptIds ids))]}
+
+          (seq unknown)
+          {:error [409 "interrupt_unknown"
+                   {:message (str "resume 里有不认识的 interruptId: " (str/join ", " unknown))
+                    :unknown unknown :pending ids}]}
+
+          (not multi?)
+          {:single (get by-id (first ids))}
+
+          (seq missing)
+          {:error [409 "interrupt_incomplete"
+                   {:message (str "同一轮有 " (count ids) " 条待审批，还差: " (str/join ", " missing))
+                    :missing missing :pending ids}]}
+
+          :else
+          {:decisions (into {} (map (fn [p id] [id (per-call-decision p (get by-id id) server-tool-names)])
+                                    pts ids))})))))
+
+(declare handle-run*)
 
 (defn handle-run
   "POST {base}/agent/:id/run
@@ -260,9 +521,21 @@
       `copilotkitSuggest` 塞进 `tools`，只读模型发出的 `TOOL_CALL_ARGS` 来渲染
       建议按钮，从不回结果。会话于是停在那儿等，用户下一句话全被挡住
       （联调时当场卡死：输入框敲了字，发不出去）。所以新用户消息到达、而挂起的
-      正是**这次请求带上来的前端工具**时，`:discard-pause? true` 丢掉它继续。"
-  [runtime server-tool-names {:keys [input-transform mcp-proxy]} request]
-  (let [body (read-body request)
+      正是**这次请求带上来的前端工具**时，`:discard-pause? true` 丢掉它继续。
+
+   `entry` 是 `agui.registry` 里那台 agent 的条目（`:runtime` /
+   `:server-tool-names` …）。坏 JSON / 缺 `threadId` / 缺 `runId` 在**开 SSE 之前**
+   回 400——开了流状态码就已经是 200 了（designs/agui-borrow.md §7）。"
+  [entry opts request]
+  (with-body [body request]
+   (or (input-error body {:require-run-id? true})
+       (handle-run* entry opts request body))))
+
+(defn- handle-run*
+  [{:keys [runtime] :as entry} {:keys [thread-store] :as opts} request body]
+  (let [server-tool-names (or (:server-tool-names entry) #{})
+        input-transform (or (:input-transform entry) (:input-transform opts))
+        mcp-proxy (or (:mcp-proxy entry) (:mcp-proxy opts))
         ;; **MCP UI 的代理调用不是一次 run**：前端那块 MCP App 界面（跑在 iframe
         ;; 里）要调 server 时，把请求塞在 `forwardedProps.__proxiedMCPRequest` 里
         ;; 走 `/run` 这条路发上来。这时候不能起 agent——照上游的做法，回一对
@@ -283,7 +556,9 @@
                    parent-run-id (assoc :parent-run-id parent-run-id))
         pending (rt/awaiting runtime conversation-id)
         pending-name (get-in pending [:pending-tool :name])
-        resume-entry (matching-resume resume pending)
+        ;; 多条审批 / 坏 resume / 过期答复都在这里先判（见 resume-plan）
+        plan (resume-plan (:resume body) pending server-tool-names)
+        resume-entry (:single plan)
         tool-result (when pending
                       (->> (:messages body)
                            (filter #(= "tool" (:role %)))
@@ -298,18 +573,21 @@
                                    (nil? resume-entry)
                                    (contains? frontend-names pending-name))
         result (cond
-                 ;; 带了 resume 却对不上当前这条 interrupt（过期重放：换页签、重连、
-                 ;; 在旧卡片上点了按钮）。**什么都不起**，下面回 409——落进 start-run!
+                 ;; 带了 resume 却对不上 / 答不全 / 形状不对（过期重放：换页签、重连、
+                 ;; 在旧卡片上点了按钮）。**什么都不起**，下面回 4xx——落进 start-run!
                  ;; 会拿旧决定去恢复一个已经不是它的暂停。
-                 (and (seq resume) (nil? resume-entry))
-                 {:status :interrupt-mismatch}
+                 (:error plan)
+                 {:status :resume-error :error (:error plan)}
+
+                 ;; 同一轮多条审批：逐条决策交给 client（顶层 decision 被 :decisions 覆盖）
+                 (:decisions plan)
+                 (rt/resume-run! runtime conversation-id "approved"
+                                 {:decisions (:decisions plan)} ctx-opts)
 
                  ;; interrupt 协议的答复：`resume[]` 是一等字段，压过一切推断
                  (and resume-entry (contains? server-tool-names pending-name))
-                 (rt/resume-run! runtime conversation-id
-                                 (resume-decision resume-entry)
-                                 (when (map? (:payload resume-entry)) (:payload resume-entry))
-                                 ctx-opts)
+                 (let [[decision payload] (resume-decision resume-entry)]
+                   (rt/resume-run! runtime conversation-id decision payload ctx-opts))
 
                  ;; 前端工具被 resolve：载荷**即**结果（ask-user 语义）
                  resume-entry
@@ -337,6 +615,11 @@
                                         ;; 共享状态的基线：客户端那份原样交给
                                         ;; runtime，后续 delta 对着它算
                                         :state state})))]
+    ;; 起跑成功（新 run 或续跑）就给线程表记一笔：线程从此在 `/threads` 里，
+    ;; **会话被驱逐之后也还在**（designs/agui-borrow.md §6）
+    (when (and thread-store (= :started (:status result)))
+      (try (ts/ts-touch! thread-store conversation-id {:agent-id (:id entry)})
+           (catch Throwable _ nil)))
     (cond
       (and proxied mcp-proxy)
       ((sse-frames [{:type "RUN_STARTED" :threadId conversation-id :runId (:runId body)}
@@ -345,36 +628,35 @@
        request)
 
       (= :busy (:status result))
-      {:status 409 :headers cors-headers
-       :body (json/generate-string {:error "thread_busy" :runId (:run-id result)})}
+      (json-response 409 {:error "thread_busy" :message "这个线程上还有一个 run 在跑"
+                          :runId (:run-id result)})
 
       ;; **明说**，别落进下面那个订阅——那会开一条永远不来事件的流（客户端吊在那儿）
-      (= :interrupt-mismatch (:status result))
-      {:status 409 :headers cors-headers
-       :body (json/generate-string
-              (if pending
-                {:error "interrupt_mismatch" :interruptId (codec/interrupt-id pending)}
-                {:error "no_pending_interrupt"}))}
+      (= :resume-error (:status result))
+      (let [[status code extra] (:error result)]
+        (json-response status (assoc extra :error code)))
 
       :else
       ;; **用返回的 `:since` 订阅，不是 nil**：run 已经起跑并发了 `RUN_STARTED`，
       ;; 这里才轮到我们订阅。传 nil = 只收新事件 = 把 `RUN_STARTED` 漏掉，
       ;; 前端第一件事就是 `AGUIError: First event must be 'RUN_STARTED'`。
-      ((sse-response runtime conversation-id (:since result) {:close-on-terminal? true}) request))))
+      ((sse-response runtime conversation-id (:since result)
+                     (assoc opts :close-on-terminal? true))
+       request))))
 
 (defn- sse-detached
   "把一次**没有会话**的 run 接到 SSE 上（`/suggest` 用）。
 
    与 `sse-response` 的差别正是这条路的全部特点：不订阅会话（没有会话），
    事件从 run 自己的发射器直接来，终态即关流。"
-  [start!]
+  [start! opts]
   (fn [request]
     (hk/with-channel request channel
-      (hk/send! channel {:status 200 :headers (merge cors-headers sse-headers)} false)
-      (start! (fn [ev]
-                (doseq [agui (codec/->agui-events ev)]
-                  (hk/send! channel (sse-frame ev agui) false)
-                  (when (codec/terminal? agui) (hk/close channel))))))))
+      (let [{:keys [send! close!]} (open-sse! channel opts nil)]
+        (start! (fn [ev]
+                  (doseq [agui (codec/->agui-events ev)]
+                    (send! (sse-frame ev agui))
+                    (when (codec/terminal? agui) (close!)))))))))
 
 (defn- ack-tool
   "客户端在建议 run 里声明的工具 → 内联工具。
@@ -393,6 +675,8 @@
     description (assoc :description description)
     parameters  (assoc :parameters parameters)))
 
+(declare handle-suggest*)
+
 (defn handle-suggest
   "POST {base}/agent/:id/suggest —— **无状态**建议 run（「猜用户下一句想说什么」）。
 
@@ -408,17 +692,21 @@
 
    为什么值得单开一条：不实现它，前端就把 `copilotkitSuggest` 塞进 `/run` 的
    `tools` 里绕过去——那正是「输入框敲了字发不出去」的来源（§9.10 第 5 条）。"
-  [agent-spec request]
-  (let [body (read-body request)
-        msgs (codec/agui->messages (:messages body))
+  ([agent-spec request] (handle-suggest agent-spec nil request))
+  ([agent-spec opts request]
+   (with-body [body request]
+    (handle-suggest* agent-spec opts request body))))
+
+(defn- handle-suggest*
+  [agent-spec opts request body]
+  (let [msgs (codec/agui->messages (:messages body))
         history (vec (butlast msgs))
         last-msg (last msgs)
         tools (mapv ack-tool (:tools body))
         store (memory/in-memory-store)]     ;; 临时的：跑完就没人引用了
     (when (seq history) (memory/mem-add store "suggest" history))
     (if (nil? last-msg)
-      {:status 400 :headers cors-headers
-       :body (json/generate-string {:error "no_messages"})}
+      (error-response 400 "no_messages" "建议 run 需要至少一条消息")
       ((sse-detached
         (fn [on-event]
           (rt/run-detached!
@@ -442,15 +730,28 @@
                            :max-iterations 1}
                     (codec/context->prompt (:context body))
                     (assoc :extra-system-prompts
-                           [(codec/context->prompt (:context body))]))})))
+                           [(codec/context->prompt (:context body))]))}))
+        opts)
        request))))
 
 (defn handle-connect
   "POST {base}/agent/:id/connect —— 只订阅，不起 run（重连 / 第二个页签旁观）。"
-  [runtime request]
-  (let [body (read-body request)
-        conv-id (:threadId body)]
-    ((sse-response runtime conv-id (last-event-id request body) {:close-on-terminal? false}) request)))
+  ([runtime request] (handle-connect runtime nil request))
+  ([runtime opts request]
+   (with-body [body request]
+    (or (input-error body nil)
+        ((sse-response runtime (:threadId body) (last-event-id request body)
+                       (assoc opts :close-on-terminal? false))
+         request)))))
+
+(defn stop-response
+  [stopped?]
+  (json-response
+   (if stopped?
+     {:stopped true
+      :interrupt {:type "RUN_ERROR" :message "Run stopped by user" :code "STOPPED"}}
+     {:stopped false
+      :message "这个线程上没有在跑的 run（或这台 agent 拒绝停止）"})))
 
 (defn handle-stop
   "POST {base}/agent/:id/stop/:threadId
@@ -458,9 +759,14 @@
    **threadId 在路径里，请求没有 body**（`agent.ts` 的 `stopPath`）。
 
    返回 true 只表示**取消已登记**：JVM 上没有抢占原语，正在跑的工具会跑完。
-   UI 上该显示「正在停止…」，停稳的信号是事件流里的终态。"
-  [runtime request thread-id]
-  (json-response {:stopped (boolean (and thread-id (rt/stop! runtime thread-id)))}))
+   UI 上该显示「正在停止…」，停稳的信号是事件流里的终态。
+
+   响应体照上游（Keelson `AguiEndpoints.Stop` 同形）：停了就带一条 `interrupt`
+   ——那条 `RUN_ERROR code=STOPPED` **由前端合成**，不发进流（流上的终态是
+   `RUN_FINISHED result.status=cancelled`，原因 `stop`）。没停（没在跑）给一句
+   `message`，而不是一个光秃秃的 false。"
+  [reg agent-id thread-id]
+  (stop-response (boolean (and thread-id (registry/stop! reg agent-id thread-id)))))
 
 (defn handle-pending
   "GET {base}/pending —— 当前有哪些会话卡在等审批。
@@ -470,17 +776,25 @@
 
    `interruptId` 与事件流里那条 interrupt 是同一个（`codec/interrupt-id`），
    审批台拿它就能凭 `/approve` 或走 `resume[]` 答复。"
-  [runtime]
+  [reg]
   (json-response
    {:pending (into []
-                   (keep (fn [cid]
-                           (when-let [aw (rt/awaiting runtime cid)]
-                             {:threadId cid
-                              :runId (:run-id aw)
-                              :interruptId (codec/interrupt-id aw)
-                              :reason (:reason aw)
-                              :pendingTool (get-in aw [:pending-tool :name])})))
-                   (rt/conversations runtime))}))
+                   (for [{:keys [id runtime]} (registry/agents reg)
+                         cid (rt/conversations runtime)
+                         :let [aw (rt/awaiting runtime cid)]
+                         :when aw]
+                     {:threadId cid
+                      :agentId id
+                      :runId (:run-id aw)
+                      :interruptId (codec/interrupt-id aw)
+                      :reason (:reason aw)
+                      :pendingTool (get-in aw [:pending-tool :name])
+                      ;; 同一轮多条审批时每条一项（单条时就一项），id 即各自的 interruptId
+                      :pendingTools (mapv (fn [p] {:interruptId (str (get-in p [:tool-call :id]))
+                                                   :name (:name p)
+                                                   :args (:args p)})
+                                          (or (not-empty (vec (:pending-tools aw)))
+                                              (when (:pending-tool aw) [(:pending-tool aw)])))}))}))
 
 (defn handle-approve
   "POST {base}/agent/:id/approve  {threadId, decision, payload}
@@ -490,30 +804,39 @@
    审批**：审批台、Slack 按钮、运维脚本——它们手上只有 conversation-id，不发
    聊天消息，也不该被迫伪造一次 run。打完再 `/connect` 接着看续跑（新的 run）。"
   [runtime request]
-  (let [{:keys [threadId decision payload]} (read-body request)
-        result (rt/resume-run! runtime threadId (or decision "approved") payload)]
-    (json-response {:status (name (:status result))
-                    :runId (:run-id result)})))
+  (with-body [body request]
+   (or (input-error body nil)
+       (let [{:keys [threadId decision payload]} body
+             result (rt/resume-run! runtime threadId (or decision "approved") payload)]
+         (json-response {:status (name (:status result))
+                         :runId (:run-id result)})))))
+
 
 (defn- iso-now [ms]
   (.toString (java.time.Instant/ofEpochMilli (long (or ms (System/currentTimeMillis))))))
 
+(defn- entry-of-thread
+  "线程归哪台 agent：线程表里记着 `agentId` 就按它找，找不到（老记录 / 那台已经
+   不在表里）退回第一台。"
+  [reg rec]
+  (or (registry/find-agent reg (:agent-id rec))
+      (registry/default-agent reg)))
+
 (defn- thread-record
-  "会话 → 线程记录（上游 `LocalThreadEndpointRecord` 的形状）。
+  "线程表的中立记录 → 上游 `LocalThreadEndpointRecord` 的形状。
 
    `organizationId` / `createdById` 是 Intelligence（云产品）的字段，本地模式下
    上游也只是填个占位——照填，少了客户端解析会缺字段。"
-  [runtime meta-atom agent-id conv-id]
-  (let [st (rt/run-status runtime conv-id)
-        m (get @meta-atom conv-id)]
-    {:id conv-id
-     :name (:name m)                     ;; 没起过名就是 null，前端会自己显示摘要
-     :agentId agent-id
+  [reg rec]
+  (let [entry (entry-of-thread reg rec)]
+    {:id (:id rec)
+     :name (:name rec)                   ;; 没起过名就是 null，前端会自己显示摘要
+     :agentId (or (:agent-id rec) (:id entry))
      :organizationId "local"
      :createdById "local"
-     :archived (boolean (:archived m))
-     :createdAt (iso-now (or (:created-at m) (:last-active st)))
-     :updatedAt (iso-now (:last-active st))}))
+     :archived (boolean (:archived? rec))
+     :createdAt (iso-now (:created-at rec))
+     :updatedAt (iso-now (:updated-at rec))}))
 
 (defn- fold-state
   "缓冲里的状态事件折成**当前值**：最后一条快照 + 其后的所有 delta。
@@ -535,159 +858,283 @@
           nil
           events))
 
+(defn- query-params
+  "查询串 → `{\"k\" \"v\"}`（同名多值取第一个；值全是**串**，交给线程存储自己挑）。"
+  [request]
+  (let [qs (:query-string request)]
+    (if (str/blank? qs)
+      {}
+      (reduce (fn [m kv]
+                (let [[k v] (str/split kv #"=" 2)
+                      k (java.net.URLDecoder/decode (str k) "UTF-8")]
+                  (if (or (str/blank? k) (contains? m k))
+                    m
+                    (assoc m k (java.net.URLDecoder/decode (str v) "UTF-8")))))
+              {}
+              (str/split qs #"&")))))
+
+(defn- not-implemented
+  "缺槽 → 501（Keelson 同码）。⛔ 不是 404：上游 Inspector 对 501 有专门的一条路
+   ——画成「这一栏没有」，而不是报错。"
+  [what]
+  (error-response 501 "not_implemented" (str "这台服务端没有提供：" what)))
+
+(defn- no-thread [thread-id]
+  (error-response 404 "thread_not_found" (str "没有这个线程: " thread-id)))
+
+(defn thread-endpoints
+  "`/info.threadEndpoints` 的三格，与路由的 501 **出自同一份事实**——报 true 的路
+   一定走得通，走不通的路一定报 false：
+
+   - `list`      线程存储给了 `:list`
+   - `inspect`   至少一台 agent 配了 memory（`/messages` 读的是 ChatMemory）
+   - `mutations` `:update` 与 `:delete` 都给了"
+  [reg store]
+  {:list (ts/has-slot? store :list)
+   :inspect (boolean (and store (some :memory (registry/agents reg))))
+   :mutations (and (ts/has-slot? store :update) (ts/has-slot? store :delete))})
+
 (defn handle-threads
-  "`/threads*` —— **把已有的东西暴露出来**，不是新建一套存储：
+  "`/threads*` —— **三样东西各管一件**，这里只是把它们拼起来：
 
    | 端点 | 数据从哪来 |
    |---|---|
-   | `GET /threads` | runtime 的**会话注册表** |
+   | `GET /threads` | **线程存储**（`agui.thread-store`）——会话被驱逐、进程重启后照样在 |
    | `GET /threads/:id/messages` | **ChatMemory**（服务端权威的那份历史） |
-   | `GET /threads/:id/events` | 会话的**环形缓冲**（有界、不落库，见 `rt/buffered-events`） |
-   | `GET /threads/:id/state` | 缓冲里最后一条 `:state/snapshot` |
-   | `POST /threads/clear` / `DELETE /threads/:id` | 摘会话 + 清 ChatMemory |
-   | `POST /threads/:id`（改名）/ `…/archive` | 进程内的一小张元数据表 |
+   | `GET /threads/:id/events` | 会话的事件存储（缺省环形缓冲：有界、不落库；可经 runtime `:event-store` 换成持久化实现，见 `rt/buffered-events`） |
+   | `GET /threads/:id/state` | 缓冲里的状态事件折出来的当前值 |
+   | `POST\\|PATCH /threads/:id`（改名 / 取消归档）、`POST …/archive` | 线程存储 |
+   | `DELETE /threads/:id`、`POST /threads/clear` | 摘会话 + 清 ChatMemory + 删线程记录 |
 
-   **两条要如实说的边界**：会话空闲 30 分钟会被驱逐（`:idle-ttl-ms`），
-   驱逐后它就不在列表里了——历史还在 ChatMemory，但我们的 `ChatMemory` 协议
-   没有「列出所有会话」，所以列不出来；名字与归档标记只活在**进程内**，
-   重启即失（真做要给 ChatMemory 加一张线程表，那是另一件事）。"
-  [runtime memory meta-atom agent-id path request]
+   `GET /threads` 认上游会发的四个查询参数：`agentId`（只列这台的）、
+   `includeArchived=true`（**缺省不列归档的**）、`limit`、`cursor`（上一页回的
+   `nextCursor`）。存储缺哪个槽，对应的路回 **501**（`thread-endpoints` 报 false）。
+
+   ⛔ 线程存储只存**元数据**（designs/agui-borrow.md §6）：事件照旧不落库
+   （docs/agent-runtime-design.md §8.2），`/events` 照实返回缓冲里现存的部分。"
+  [reg store path request]
   (let [seg (fn [re] (some-> (re-find re path) second java.net.URLDecoder/decode))
         method (:request-method request)
-        thread-id (or (seg #"/threads/([^/]+)/(?:messages|events|state|archive)$")
-                      (seg #"/threads/([^/]+)$"))]
+        thread-id (or (seg #"^/threads/([^/]+)/(?:messages|events|state|archive)$")
+                      (seg #"^/threads/([^/]+)$"))
+        rec (when thread-id (ts/ts-get store thread-id))
+        entry (when thread-id (entry-of-thread reg (or rec {})))]
     (cond
-      (re-find #"/threads/subscribe$" path)
+      (re-find #"^/threads/subscribe$" path)
       ;; 实时订阅是 Intelligence（云产品）的东西，我们没有——**如实 404**，
       ;; 客户端会降级成轮询，比假装成功强
-      {:status 404 :headers cors-headers :body "threads/subscribe not supported"}
+      (error-response 404 "not_found" "threads/subscribe not supported")
 
-      (re-find #"/threads/clear$" path)
-      (do (doseq [cid (rt/conversations runtime)]
-            (rt/forget! runtime cid)
+      (re-find #"^/threads/clear$" path)
+      (if-not (ts/has-slot? store :delete)
+        (not-implemented "删除线程")
+        (let [known (when (ts/has-slot? store :list)
+                      (:threads (ts/ts-list store {:include-archived? true})))]
+          (doseq [{:keys [runtime memory]} (registry/agents reg)
+                  cid (rt/conversations runtime)]
+            (rt/purge! runtime cid)
             (when memory (memory/mem-clear memory cid)))
-          (reset! meta-atom {})
-          {:status 204 :headers cors-headers})
+          (doseq [r known
+                  :let [{:keys [runtime memory]} (entry-of-thread reg r)]]
+            (rt/purge! runtime (:id r))
+            (when memory (memory/mem-clear memory (:id r)))
+            (ts/ts-delete! store (:id r)))
+          {:status 204 :headers cors-headers}))
 
-      (re-find #"/threads/[^/]+/messages$" path)
-      (json-response {:messages (codec/messages->thread-messages
-                                 (if memory (memory/mem-get memory thread-id) []))})
+      (re-find #"^/threads/[^/]+/messages$" path)
+      (if-let [mem (:memory entry)]
+        (json-response {:messages (codec/messages->thread-messages (memory/mem-get mem thread-id))})
+        (not-implemented "线程消息（这台 agent 没配 memory）"))
 
-      (re-find #"/threads/[^/]+/events$" path)
-      (json-response {:events (codec/events->agui (rt/buffered-events runtime thread-id))})
+      (re-find #"^/threads/[^/]+/events$" path)
+      (json-response {:events (codec/events->agui (rt/buffered-events (:runtime entry) thread-id))})
 
-      (re-find #"/threads/[^/]+/state$" path)
-      (json-response {:state (fold-state (rt/buffered-events runtime thread-id))})
+      (re-find #"^/threads/[^/]+/state$" path)
+      (json-response {:state (fold-state (rt/buffered-events (:runtime entry) thread-id))})
 
-      (re-find #"/threads/[^/]+/archive$" path)
-      (do (swap! meta-atom assoc-in [thread-id :archived] true)
-          (json-response {:threadId thread-id :archived true}))
+      (re-find #"^/threads/[^/]+/archive$" path)
+      (if-not (ts/has-slot? store :update)
+        (not-implemented "归档线程")
+        (if (ts/ts-update! store thread-id {:archived? true})
+          (json-response {:threadId thread-id :archived true})
+          (no-thread thread-id)))
 
       (and thread-id (= :delete method))
-      (do (rt/forget! runtime thread-id)
+      (if-not (ts/has-slot? store :delete)
+        (not-implemented "删除线程")
+        (let [{:keys [runtime memory]} entry
+              live? (boolean (some #{thread-id} (rt/conversations runtime)))]
+          (rt/purge! runtime thread-id)
           (when memory (memory/mem-clear memory thread-id))
-          (swap! meta-atom dissoc thread-id)
-          (json-response {:threadId thread-id :deleted true}))
+          (if (or (ts/ts-delete! store thread-id) live?)
+            (json-response {:threadId thread-id :deleted true})
+            (no-thread thread-id))))
 
-      (and thread-id (= :post method))
-      (let [{:keys [name]} (read-body request)]
-        (swap! meta-atom assoc-in [thread-id :name] name)
-        (json-response (thread-record runtime meta-atom agent-id thread-id)))
+      ;; 改名 / 取消归档。上游走 PATCH，我们早先用 POST——两个都认
+      (and thread-id (#{:post :patch} method))
+      (if-not (ts/has-slot? store :update)
+        (not-implemented "修改线程")
+        (with-body [body request]
+          (if-not (or (nil? body) (map? body))
+            (error-response 400 "bad_json" "请求体必须是 JSON 对象")
+            (let [updates (cond-> {}
+                            (contains? body :name)     (assoc :name (:name body))
+                            (contains? body :archived) (assoc :archived? (boolean (:archived body))))]
+              (if-let [r (ts/ts-update! store thread-id updates)]
+                (json-response (thread-record reg r))
+                (no-thread thread-id))))))
+
+      (and thread-id (= :get method))
+      (if rec
+        (json-response (thread-record reg rec))
+        (no-thread thread-id))
+
+      thread-id
+      (error-response 405 "method_not_allowed" "这条路只认 GET / POST / PATCH / DELETE")
 
       :else
-      (json-response {:threads (mapv #(thread-record runtime meta-atom agent-id %)
-                                     (rt/conversations runtime))
-                      :nextCursor nil}))))
+      (if-not (ts/has-slot? store :list)
+        (not-implemented "线程列表")
+        (let [q (query-params request)
+              {:keys [threads next-cursor]}
+              (ts/ts-list store {:agent-id (get q "agentId")
+                                 :include-archived? (get q "includeArchived")
+                                 :limit (get q "limit")
+                                 :cursor (get q "cursor")})]
+          (json-response {:threads (mapv #(thread-record reg %) threads)
+                          :nextCursor next-cursor}))))))
+
+(def ^:private agent-route
+  #"^/agent/([^/]+)/(run|connect|suggest|approve|stop)(?:/([^/]+))?$")
+
+(defn- info-opts
+  "`/info` 的能力位：装配期的开关 + 线程面按存储的槽逐格报。"
+  [reg {:keys [thread-store] :as opts}]
+  (-> (select-keys opts [:version :open-generative-ui? :a2ui? :multimodal
+                         :parallel-tools? :max-iterations :state? :capabilities])
+      (assoc :thread-endpoints (thread-endpoints reg thread-store)
+             ;; 本路由把 `editedArgs` 翻成 resume 的 `{:args}`（见 resume-decision），
+             ;; 能力是真的——缺省报；装配方可显式关
+             :approve-with-edits? (get opts :approve-with-edits? true))))
 
 (defn handler
-  [runtime agent-ids base-path server-tool-names & [opts]]
+  "Ring handler。`reg` 是 `agui.registry` 的注册表；`opts`：
+
+   - `:thread-store`    线程存储（不给 = 没有 `/threads*`，照旧 404）
+   - `:heartbeat-ms`    SSE 心跳周期（缺省 15000，0 = 关）
+   - `:heartbeat-frame` 心跳帧，字符串或 `(fn [] string)`（缺省注释帧）
+   - `:max-body-bytes`  请求体上限（缺省 16 MiB，超了 413）
+   - `:input-transform` / `:mcp-proxy` 入站插件（条目里给了就以条目为准）
+   - 其余是 `/info` 的能力位（见 `codec/run-info`）"
+  [reg base-path & [opts]]
+  (when-not (registry/registry? reg)
+    (throw (ex-info "handler 需要 agui.registry/registry 建的注册表" {})))
   (fn [request]
-    (binding [cors-headers (cors-for request)]
-     (let [path (subs (:uri request) (min (count base-path) (count (:uri request))))]
+    (binding [cors-headers (cors-for request)
+              *max-body-bytes* (or (:max-body-bytes opts) default-max-body-bytes)]
+     (let [uri (:uri request)
+           path (if (str/starts-with? uri base-path) (subs uri (count base-path)) uri)
+           store (:thread-store opts)]
        (cond
          (= :options (:request-method request))
          {:status 204 :headers cors-headers}
 
-         (re-find #"/info$" path)    (json-response (codec/run-info agent-ids opts))
-         (re-find #"/run$" path)     (handle-run runtime server-tool-names opts request)
-         (re-find #"/suggest$" path) (if-let [spec (:agent-spec opts)]
-                                       (handle-suggest spec request)
-                                       {:status 404 :headers cors-headers
-                                        :body "suggest not enabled"})
-         (re-find #"/connect$" path) (handle-connect runtime request)
-         ;; 不属于 AG-UI：应用自己的审批端点（见 handle-approve）
-         (re-find #"/approve$" path) (handle-approve runtime request)
-         (re-find #"/pending$" path)  (handle-pending runtime)
-         ;; 线程只读面：把已有的东西暴露出来（见 handle-threads）
-         (re-find #"/threads" path)
-         (if-let [meta-atom (:thread-meta opts)]
-           (handle-threads runtime (:memory opts) meta-atom (first agent-ids) path request)
-           {:status 404 :headers cors-headers :body "threads not enabled"})
-         ;; threadId 是路径段：/agent/:id/stop/:threadId
-         (re-find #"/stop(/|$)" path)
-         (handle-stop runtime request
-                      (some-> (re-find #"/stop/([^/]+)$" path) second
-                              java.net.URLDecoder/decode))
-         :else {:status 404 :headers cors-headers :body "not found"})))))
+         (= "/info" path)    (json-response (registry/info reg (info-opts reg opts)))
+         ;; 不属于 AG-UI：应用自己的审批台数据源（见 handle-pending）
+         (= "/pending" path) (handle-pending reg)
+         ;; 线程面（见 handle-threads）。**锚在开头**：agent 名字里带 threads 的
+         ;; （`/agent/threads/run`）不能被它截走
+         (re-find #"^/threads(/|$)" path)
+         (if store
+           (handle-threads reg store path request)
+           (error-response 404 "not_found" "threads not enabled"))
+
+         :else
+         (if-let [[_ raw-id action tail] (re-find agent-route path)]
+           (let [agent-id (java.net.URLDecoder/decode ^String raw-id "UTF-8")]
+             (if-let [entry (registry/find-agent reg agent-id)]
+               (case action
+                 "run"     (handle-run entry opts request)
+                 "connect" (handle-connect (:runtime entry) opts request)
+                 "suggest" (if-let [spec (and (registry/supports-suggest? entry) (:agent-spec entry))]
+                             (handle-suggest spec opts request)
+                             (error-response 404 "not_found" (str "agent " agent-id " 没有开 /suggest")))
+                 ;; 不属于 AG-UI：应用自己的审批端点（见 handle-approve）
+                 "approve" (handle-approve (:runtime entry) request)
+                 ;; threadId 是路径段：/agent/:id/stop/:threadId
+                 "stop"    (handle-stop reg agent-id
+                                        (when tail (java.net.URLDecoder/decode ^String tail "UTF-8"))))
+               (error-response 404 "agent_not_found" (str "没有这台 agent: " agent-id))))
+           (error-response 404 "not_found" (str "认不出的路径: " path))))))))
 
 ;;; ============================================================
 ;;; 启动
 ;;; ============================================================
+
+(defn start-registry!
+  "起一台挂着**多台 agent** 的服务。`reg` 由 `agui.registry/registry` 建，条目里
+   除 `:id` / `:runtime` 外可带路由用的键：
+
+   - `:server-tool-names` 服务端工具名（认出前端同名声明 = 渲染意图）
+   - `:memory`            这台的 ChatMemory（`/threads/:id/messages` 读它）
+   - `:suggest?` + `:agent-spec` 开 `/suggest`（要现建一次性 agent，所以整份配置得留着）
+
+   `opts` 同 `handler`。"
+  [port reg base-path opts]
+  {:server (hk/run-server (handler reg base-path opts) {:port port})
+   :registry reg
+   :runtime (:runtime (registry/default-agent reg))})
 
 (defn start!
   "`agent-spec` 就是 `create-agent` 那份配置（provider / tools / memory /
    pause-store …）。**memory 与 pause-store 要跨 run 共享**，所以建在外面。
 
    agent id 用 `\"default\"`：CopilotKit 前端不指定 agent 时就找这个名字
-   （`@copilotkit/shared` 的 `DEFAULT_AGENT_ID`）。"
+   （`@copilotkit/shared` 的 `DEFAULT_AGENT_ID`）。多台 agent 用 `start-registry!`。
+
+   线程面：`:threads? true` 缺省用进程内线程存储；`:thread-store` 可换成任何实现
+   （如 `agui.thread-store.sqlite`，重启后侧栏照样在）。`:orphan-cancel-ms` 透传给
+   runtime（最后一个订阅者走后多久自动停，缺省关）。"
   ([port agent-spec] (start! port agent-spec "/api/copilotkit" nil))
   ([port agent-spec base-path] (start! port agent-spec base-path nil))
-  ([port agent-spec base-path {:keys [event-transform input-transform open-generative-ui?
-                                      a2ui? suggestions? mcp-proxy threads? multimodal
-                                      parallel-tools? max-iterations state-tools?]}]
+  ([port agent-spec base-path {:keys [event-transform open-generative-ui?
+                                      suggestions? threads? thread-store
+                                      state-tools? orphan-cancel-ms] :as opts}]
    (let [runtime (rt/runtime (cond-> {:agent-fn (agui-tools/agent-fn agent-spec)
-                                      ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled）
+                                      ;; 聊天 UX：用户又发一条就顶掉上一条（旧 run 落 cancelled，
+                                      ;; 原因 superseded）
                                       :on-concurrent :supersede
                                       ;; 模型写共享状态的两把工具（见 rt/runtime）
                                       :state-tools? (boolean state-tools?)}
                                ;; 事件流插件（如 agui.a2ui / copilotkit.genui）；不传就完全不存在
-                               event-transform (assoc :event-transform event-transform)))
+                               event-transform (assoc :event-transform event-transform)
+                               orphan-cancel-ms (assoc :orphan-cancel-ms orphan-cancel-ms)))
          ;; 服务端工具名：用来把「前端同名声明」认成**渲染意图**而不是新工具
          server-tool-names (into #{}
                                  (comp (filter var?)
                                        (map #(:name (tool/get-schema %))))
-                                 (:tools agent-spec))]
-     {:server (hk/run-server (handler runtime ["default"] base-path server-tool-names
-                                      {:open-generative-ui? open-generative-ui?
-                                       ;; `/info` 的线程档能力位——挂了 `/threads`
-                                       ;; 才报（见 `codec/run-info` 的 :threadEndpoints）
-                                       :threads? (boolean threads?)
-                                       ;; 多模态能力位：**装配方说了算**，库不猜
-                                       ;; （见 `codec/run-info` 的 :multimodal）
-                                       :multimodal multimodal
-                                       ;; 同上：这两格也只有装配方知道
-                                       ;; （工具引擎是不是并行的、循环上限是多少）
-                                       :parallel-tools? parallel-tools?
-                                       :max-iterations max-iterations
-                                       ;; 装了写状态的工具才报 state 能力位——
-                                       ;; 读面一直都在，但没有写的那一半，报 true
-                                       ;; 就是谎报（模型根本写不动）
-                                       :state? (boolean state-tools?)
-                                       ;; 这两位都是 `/info` 的能力位：前端据此才注册
-                                       ;; 对应的 renderer（`codec/run-info` 的注释）
-                                       :a2ui? a2ui?
-                                       :input-transform input-transform
-                                       :mcp-proxy mcp-proxy
-                                       ;; 线程只读面：历史在 ChatMemory，名字/归档
-                                       ;; 标记在这张**进程内**的小表里
-                                       :thread-meta (when threads? (atom {}))
-                                       :memory (:memory agent-spec)
-                                       :suggestions? suggestions?
-                                       ;; `/suggest` 要现建一次性 agent，所以整份配置得留着
-                                       :agent-spec (when suggestions? agent-spec)})
-                             {:port port})
-      :runtime runtime})))
+                                 (:tools agent-spec))
+         reg (registry/registry
+              [{:id "default"
+                :runtime runtime
+                :server-tool-names server-tool-names
+                :memory (:memory agent-spec)
+                :suggest? (boolean suggestions?)
+                ;; `/suggest` 要现建一次性 agent，所以整份配置得留着
+                :agent-spec (when suggestions? agent-spec)}])]
+     (start-registry! port reg base-path
+                      (-> opts
+                          (dissoc :event-transform :threads? :suggestions? :state-tools?
+                                  :orphan-cancel-ms)
+                          (assoc :open-generative-ui? open-generative-ui?
+                                 ;; 装了写状态的工具才报 state 能力位——读面一直都在，
+                                 ;; 但没有写的那一半，报 true 就是谎报（模型根本写不动）
+                                 :state? (boolean state-tools?)
+                                 ;; 线程面：存储管「有哪些线程、叫什么」，历史在 ChatMemory
+                                 :thread-store (when threads? (or thread-store (ts/in-memory-store)))))))))
 
-(defn stop! [{:keys [server runtime]}]
-  (rt/shutdown! runtime)
+(defn stop! [{:keys [server runtime] reg :registry}]
+  (if reg
+    (registry/shutdown! reg)
+    (rt/shutdown! runtime))
   (server))

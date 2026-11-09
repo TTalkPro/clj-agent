@@ -27,6 +27,7 @@
    ```"
   (:require [im.ttalk.agent.agui.emit :as emit]
             [im.ttalk.agent.agui.event :as event]
+            [im.ttalk.agent.agui.event-store :as es]
             [im.ttalk.agent.agui.subagent :as subagent]
             [im.ttalk.agent.agui.tools :as agui-tools]
             [im.ttalk.agent.filter :as flt]
@@ -34,7 +35,7 @@
             [im.ttalk.agent.streaming :as streaming]
             [taoensso.timbre :as log])
   (:import [java.util UUID]
-           [java.util.concurrent CompletableFuture]))
+           [java.util.concurrent CompletableFuture TimeUnit]))
 
 (set! *warn-on-reflection* true)
 
@@ -45,40 +46,28 @@
    :buffer-size       512
    :idle-ttl-ms       (* 30 60 1000)
    :supersede-wait-ms 5000
-   :shutdown-wait-ms  5000})
+   :shutdown-wait-ms  5000
+   :orphan-cancel-ms  0})
 
 ;;; ============================================================
 ;;; 会话条目
 ;;; ============================================================
 
-(defn- new-entry [conversation-id buffer-size now]
+(defn- new-entry [conversation-id store now]
   {:conversation-id conversation-id
    :lock            (Object.)
-   :seq             (atom -1)
-   :buffer          (atom {:cap buffer-size :events []})
+   ;; 序号接上事件存储里的最后一条：插了持久化存储时，重启后 `:seq` 不从 0 重来
+   ;; （客户端拿着旧 Last-Event-ID 来续传才不会漏收）。缺省环形缓冲新会话为 nil → -1
+   :seq             (atom (long (or (es/safe-last-seq store conversation-id) -1)))
    :subs            (atom {})
    :sub-ids         (atom 0)
+   ;; 订阅表的**代数**：每次订阅 / 退订 +1。孤儿定时器只在代数没变时才动手——
+   ;; 「走了又回来」那一下把旧定时器作废，不用去撤销它（见 `arm-orphan!`）
+   :sub-gen         (atom 0)
    :run             (atom nil)     ;; {:run-id :emitter :cancel-token :done :started-at}
    :awaiting        (atom nil)     ;; 暂停中 {:run-id :reason :pending-tool}
    :state-atom      (atom {:status :idle :paused-state nil :turn-count 0 :run-id nil})
    :last-active     (atom now)})
-
-(defn- buf-add! [buf ev]
-  (swap! buf (fn [{:keys [cap events] :as b}]
-               (let [e (conj events ev)]
-                 (assoc b :events (if (> (count e) cap)
-                                    (subvec e (- (count e) cap))
-                                    e))))))
-
-(defn- buf-since
-  "`since` 之后的事件。返回 `{:events [...] :gap? bool}`——`gap?` 为真表示缓冲
-   起点已经越过 `since`，中间那段**永远补不回来了**，订阅侧该走 resync（§4.5）。"
-  [buf since]
-  (let [{:keys [events]} @buf]
-    (if (nil? since)
-      {:events [] :gap? false}
-      {:events (filterv #(> (:seq %) since) events)
-       :gap?   (boolean (and (seq events) (> (:seq (first events)) (inc since))))})))
 
 ;;; ============================================================
 ;;; Runtime
@@ -94,9 +83,18 @@
                           没有则为 `[]`。同一 conversation-id 的 agent 会被
                           runtime 换上会话级 state-atom，故每次现建也不丢暂停态。
    - `:on-concurrent`     `:reject`（缺省）| `:supersede`（§4.4）
-   - `:buffer-size`       会话事件环形缓冲条数（缺省 512）
+   - `:buffer-size`       会话事件环形缓冲条数（缺省 512）；只在没给 `:event-store` 时生效
+   - `:event-store`       事件存储（`agui.event-store/EventStore`），缺省
+                          `(es/ring-store {:buffer-size ..})`——即原来的进程内环形缓冲。
+                          **可替换挂点**：外部库实现该协议即可持久化事件（本库不带持久化
+                          实现，见该 ns 文档与 designs/agui-borrow.md §8）
    - `:idle-ttl-ms`       空闲会话驱逐（缺省 30min；有 run / 有订阅者 / 暂停中的不驱逐）
    - `:supersede-wait-ms` supersede 时等旧 run 收尾的上限（缺省 5s）
+   - `:orphan-cancel-ms`  最后一个订阅者走后过这么久仍没人来，就以 `:orphan` 原因
+                          停掉在跑的 run（缺省 **0 = 关**，与上游同：没人看的 run
+                          照样跑完——断线 ≠ 停止，刷新正是 `:since` 要救的场景）。
+                          给「烧 token 的长 run 没人看就止损」的部署方
+                          （designs/agui-borrow.md §5）
    - `:now`               `(fn [] ms)`，可注入（测试）
    - `:state-tools?`      给模型两把写共享状态的工具（缺省 **false**）。开了之后
                           `agui.tools/state-tools` 的 `AGUISendStateSnapshot` /
@@ -122,6 +120,7 @@
   (let [cfg (merge defaults opts)]
     {:agent-fn agent-fn
      :cfg cfg
+     :event-store (or (:event-store opts) (es/ring-store {:buffer-size (:buffer-size cfg)}))
      :event-transform (:event-transform opts)
      :now (or (:now opts) #(System/currentTimeMillis))
      :conversations (atom {})
@@ -141,8 +140,11 @@
   [rt]
   (let [now ((:now rt))
         ttl (get-in rt [:cfg :idle-ttl-ms])]
-    (swap! (:conversations rt)
-           (fn [m] (into {} (remove (fn [[_ e]] (evictable? e now ttl))) m)))))
+    (let [[old new] (swap-vals! (:conversations rt)
+                                (fn [m] (into {} (remove (fn [[_ e]] (evictable? e now ttl))) m)))]
+      ;; 被驱逐的会话通知事件存储：环形缓冲借机释放，持久化实现不动数据
+      (doseq [cid (keys old) :when (not (contains? new cid))]
+        (es/safe-release! (:event-store rt) cid)))))
 
 (defn- entry-of! [rt conv-id]
   (sweep! rt)
@@ -150,7 +152,7 @@
         m (swap! (:conversations rt)
                  (fn [m] (if (contains? m conv-id)
                            m
-                           (assoc m conv-id (new-entry conv-id (get-in rt [:cfg :buffer-size]) now)))))
+                           (assoc m conv-id (new-entry conv-id (:event-store rt) now)))))
         entry (get m conv-id)]
     (touch! entry now)
     entry))
@@ -161,21 +163,26 @@
 ;;; 事件出口：缓冲 + 扇出
 ;;; ============================================================
 
+(declare arm-orphan!)
+
 (defn- make-sink
   "事件出口。**在会话锁内**入缓冲并扇出，`subscribe` 也在同一把锁里注册——
    两者不能交错，否则新订阅者会漏掉「重放完到注册完」之间的那几条。
 
    订阅者抛异常 → 摘掉它，run 不受影响（§6.3）。回调的契约是**立刻交出去**
    （往 SSE channel put 一下就返回），与 `on-token` 逐字同源。"
-  [entry]
+  [rt entry]
   (fn [ev]
     (locking (:lock entry)
-      (buf-add! (:buffer entry) ev)
+      (es/safe-append! (:event-store rt) (:conversation-id entry) ev)
       (doseq [[id {:keys [on-event]}] @(:subs entry)]
         (try
           (on-event ev)
           (catch Throwable t
             (swap! (:subs entry) dissoc id)
+            (swap! (:sub-gen entry) inc)
+            ;; 被摘掉的也算「走了」——它多半就是那条断掉的连接
+            (arm-orphan! rt entry)
             (log/warn "agui 订阅者抛异常，已摘除:" (.getMessage t))))))))
 
 (defn- next-seq-fn [entry]
@@ -198,6 +205,24 @@
     (= :cancelled (:status result)) :run/cancelled
     :else                           :run/finished))
 
+(def ^:private interrupt-error-types
+  "client 在 resume 时对逐条决策的校验错误（`:decisions` 漏答 / 答了不存在的 id）。
+   路由在起 run 之前就判掉了；这里是兜底——绕过路由直接调 `resume-run!` 的人
+   也拿到可区分的错误类，而不是一个笼统的 `:provider-error`。"
+  #{:interrupt-incomplete :interrupt-unknown})
+
+(defn- interrupt-error
+  "沿 cause 链找 client 抛的 interrupt 校验错误（异步链上它可能被包过一层）。"
+  [t]
+  (loop [t t]
+    (when (instance? Throwable t)
+      (let [d (ex-data t)]
+        (if (contains? interrupt-error-types (:type d))
+          (cond-> {:class (:type d) :message (ex-message t)}
+            (:missing d) (assoc :missing (vec (:missing d)))
+            (:unknown d) (assoc :unknown (vec (:unknown d))))
+          (recur (.getCause ^Throwable t)))))))
+
 (defn- terminal-payload
   "终态事件的载荷。`frontend-names` 是**本 run 客户端声明的那些工具名**——暂停时
    要靠它区分两类挂起：
@@ -213,17 +238,33 @@
    （feedbacks/2026-09-04-frontend-tool-pause-looks-like-an-approval.md）。"
   [t result throwable frontend-names]
   (case t
-    :run/paused   {:reason (:pause-reason result)
-                   :pending-tool (:pending-tool result)
-                   :pending-frontend? (contains? (or frontend-names #{})
-                                                 (str (:name (:pending-tool result))))
-                   :tool-calls-made (:tool-calls-made result)}
-    :run/error    {:error (or (:error result)
+    :run/paused   (let [fe? #(contains? (or frontend-names #{}) (str (:name %)))
+                        pendings (or (seq (:pending-tools result))
+                                     (when (:pending-tool result) [(:pending-tool result)]))]
+                    {:reason (:pause-reason result)
+                     :pending-tool (:pending-tool result)
+                     :pending-frontend? (fe? (:pending-tool result))
+                     ;; 同一批里**所有**被叫停的调用（designs/agui-borrow.md §2）——
+                     ;; 每条都要一个 interrupt，否则用户只看见第一条、点一次同意两条都执行
+                     :pending-tools (mapv #(assoc % :frontend? (fe? %)) pendings)
+                     :tool-calls-made (:tool-calls-made result)})
+    ;; client 把异常收成 canonical error（`:cause` 留着原异常）——先认 interrupt 校验错
+    :run/error    {:error (or (some-> (:error result) :cause interrupt-error)
+                              (:error result)
                               (when throwable
-                                {:class :provider-error
-                                 :message (or (ex-message throwable) (str throwable))}))}
+                                (or (interrupt-error throwable)
+                                    {:class :provider-error
+                                     :message (or (ex-message throwable) (str throwable))})))}
     :run/cancelled {:text (:text result) :tool-calls-made (:tool-calls-made result)}
     {:text (:text result) :tool-calls-made (:tool-calls-made result)}))
+
+(defn- with-stop-reason
+  "`:run/cancelled` 带上**为什么**（designs/agui-borrow.md §5）。只在真登记过取消时
+   带——取消令牌也可能是别处置的位（库不知道它的语义），那时宁可不说也不编。"
+  [payload t em]
+  (if-let [r (and (= :run/cancelled t) (event/stop-reason em))]
+    (assoc payload :reason r)
+    payload))
 
 (defn- finish-run!
   [entry run-id em result throwable ^CompletableFuture done & [frontend-names]]
@@ -231,12 +272,14 @@
     (let [t (terminal-type em result throwable)]
       (when (= :run/finished t)
         (event/ensure-text! em (str run-id "-final") (:text result)))
-      (event/finish! em t (terminal-payload t result throwable frontend-names))
+      (event/finish! em t (with-stop-reason (terminal-payload t result throwable frontend-names) t em))
       (reset! (:awaiting entry)
               (when (= :run/paused t)
                 {:run-id run-id
                  :reason (:pause-reason result)
-                 :pending-tool (:pending-tool result)}))
+                 :pending-tool (:pending-tool result)
+                 :pending-tools (or (not-empty (vec (:pending-tools result)))
+                                    (when (:pending-tool result) [(:pending-tool result)]))}))
       (when (= run-id (:run-id @(:run entry)))
         (reset! (:run entry) nil))))
   (.complete done true)
@@ -267,7 +310,7 @@
         em (event/emitter {:run-id run-id
                            :conversation-id conv-id
                            :next-seq (next-seq-fn entry)
-                           :sink (make-sink entry)
+                           :sink (make-sink rt entry)
                            ;; 会话锁交给发射器：取号 + 记账 + 投递在它里面一次做完
                            ;; （见 `event/deliver!`）。`subscribe` 拿的也是这把，
                            ;; 于是「重放完到注册完」那段照旧不会与扇出交错
@@ -320,9 +363,12 @@
      :result {:status :started :run-id run-id :conversation-id conv-id :since since}}))
 
 (defn- request-stop!*
-  "标记 + 取消。返回是否**本次**才登记上（幂等：重复 stop 返回 false）。"
-  [r]
-  (when (event/request-stop! (:emitter r))
+  "标记 + 取消。返回是否**本次**才登记上（幂等：重复 stop 返回 false）。
+
+   **先置原因、再取消令牌**（Keelson `AguiRun.Cancel` 同序）：令牌一置位，收尾
+   可能马上就在别的线程上发生，那时原因必须已经在了。"
+  [r reason]
+  (when (event/request-stop! (:emitter r) reason)
     (streaming/request-cancel! (:cancel-token r))
     true))
 
@@ -354,7 +400,7 @@
 
                      :else
                      (let [r @(:run entry)]
-                       (request-stop!* r)
+                       (request-stop!* r :superseded)
                        [:wait (:done r)])))]
         (case (first step)
           ;; **装配在锁内，发起在锁外**——见 `launch!` 的注释
@@ -450,7 +496,7 @@
                       (event/ensure-text! em (str run-id "-final") (:text result)))
                     ;; 不留痕的 run 没有客户端声明的工具（`/suggest` 用的是
                     ;; `ack-tool`，不走前端工具那条路），故 frontend-names 为 nil
-                    (event/finish! em t (terminal-payload t result throwable nil)))
+                    (event/finish! em t (with-stop-reason (terminal-payload t result throwable nil) t em)))
                   (.complete done (or result {})))]
     (event/emit! em :run/started {:kind :suggest :input {:message message}})
     (try
@@ -462,7 +508,8 @@
     done))
 
 (defn awaiting
-  "会话是否在等 resume（暂停中）。返回 `{:run-id :reason :pending-tool}` 或 nil。"
+  "会话是否在等 resume（暂停中）。返回 `{:run-id :reason :pending-tool :pending-tools}`
+   或 nil。`:pending-tools` 是同一批里所有被叫停的调用（单条时就是 `[pending-tool]`）。"
   [rt conv-id]
   (some-> (entry-peek rt conv-id) :awaiting deref))
 
@@ -498,17 +545,47 @@
    react 循环在轮边界不再续跑，**已经在跑的工具会跑完**（§4.8，口径同
    docs/tool-timeout-design.md）。停稳的信号是 `:run/cancelled` 事件。
 
-   传 `run-id` 则只停这一个 run，绝不误伤会话上更新的那个。"
-  ([rt conv-id] (stop! rt conv-id nil))
-  ([rt conv-id run-id]
+   传 `run-id` 则只停这一个 run，绝不误伤会话上更新的那个。
+
+   `reason`（缺省 `:stop`）落在 `:run/cancelled` 的 `:reason` 上，见
+   `event/stop-reasons`。第一个原因算数。"
+  ([rt conv-id] (stop! rt conv-id nil :stop))
+  ([rt conv-id run-id] (stop! rt conv-id run-id :stop))
+  ([rt conv-id run-id reason]
    (if-let [entry (entry-peek rt conv-id)]
      (locking (:lock entry)
        (if-let [r @(:run entry)]
          (if (or (nil? run-id) (= run-id (:run-id r)))
-           (boolean (request-stop!* r))
+           (boolean (request-stop!* r reason))
            false)
          false))
      false)))
+
+(defn- arm-orphan!
+  "最后一个订阅者走了 → 排一个 `:orphan-cancel-ms` 之后的检查（缺省关）。
+
+   **不建线程**：用 JDK 的公共延时执行器（`CompletableFuture/delayedExecutor`），
+   与 `sweep!`「不为它长一根线程」同一取舍。**不撤销旧定时器**：到点时比一下
+   订阅表的代数，变过（有人来过，哪怕又走了——那次离开自己会再排一个）就什么
+   都不做；还得是**同一个** run——旧 run 收完、新 run 起了，旧定时器不许误伤它。
+
+   调用方须持有会话锁（读订阅表与代数要与订阅 / 退订互斥）。"
+  [rt entry]
+  (let [ms (long (or (get-in rt [:cfg :orphan-cancel-ms]) 0))]
+    (when (and (pos? ms) (empty? @(:subs entry)))
+      (when-let [run-id (:run-id @(:run entry))]
+        (let [gen @(:sub-gen entry)]
+          (CompletableFuture/runAsync
+           ^Runnable
+           (fn []
+             (locking (:lock entry)
+               (when (and (= gen @(:sub-gen entry))
+                          (empty? @(:subs entry)))
+                 (when-let [r @(:run entry)]
+                   (when (= run-id (:run-id r))
+                     (when (request-stop!* r :orphan)
+                       (log/info "agui 孤儿 run 已停:" (:conversation-id entry) run-id)))))))
+           (CompletableFuture/delayedExecutor ms TimeUnit/MILLISECONDS)))))))
 
 (defn run-status
   [rt conv-id]
@@ -521,19 +598,27 @@
        ;; 「取消已登记、但还没停稳」——UI 上该显示「正在停止…」而不是「已停止」
        ;; （§4.8：JVM 上没有抢占，正在跑的工具会跑完）
        :stopping? (boolean (some-> r :emitter event/stop-requested?))
+       ;; 为什么在停（`:stop` / `:superseded` / `:shutdown` / `:orphan`），没在停是 nil
+       :cancel-reason (some-> r :emitter event/stop-reason)
        :pending-tool (:pending-tool aw)
        :seq @(:seq entry)
        :last-active @(:last-active entry)
        :subscribers (count @(:subs entry))})))
 
 (defn buffered-events
-  "会话环形缓冲里**现存**的事件（只读）。
+  "会话在事件存储里**现存**的事件（只读）。
 
-   注意这是**有界**的（`:buffer-size`，缺省 512 条）且**不落库**——它是为断线
-   续传服务的，不是事件日志。想要完整历史找 ChatMemory（§8.2「不做 durable
-   execution」）。`/threads/:id/events` 这类只读端点照实返回它现有的部分。"
+   缺省存储是**有界**的环形缓冲（`:buffer-size`，缺省 512 条）且**不落库**——它是为
+   断线续传服务的，不是事件日志；想要完整历史找 ChatMemory（§8.2）。插了持久化的
+   `:event-store` 时，这里返回该存储保留的部分（会话不在内存里也能读）。
+   `/threads/:id/events` 这类只读端点照实返回它。"
   [rt conv-id]
-  (some-> (entry-peek rt conv-id) :buffer deref :events vec))
+  (let [evs (try (vec (es/es-events (:event-store rt) conv-id))
+                 (catch Throwable t
+                   (log/warn "agui event-store 读取失败:" (.getMessage t))
+                   []))]
+    ;; 从未见过的会话（内存里没有、存储里也没有）→ nil，与以前一致
+    (when (or (seq evs) (entry-peek rt conv-id)) evs)))
 
 (defn forget!
   "把一个会话从注册表里摘掉（**不动 ChatMemory**——历史归历史）。
@@ -542,6 +627,16 @@
   [rt conv-id]
   (stop! rt conv-id)
   (swap! (:conversations rt) dissoc conv-id)
+  (es/safe-release! (:event-store rt) conv-id)
+  nil)
+
+(defn purge!
+  "删除线程时用：`forget!` 之外再让事件存储**真删**（`es-delete!`）。
+   缺省环形缓冲上与 `forget!` 等价；持久化存储上，`forget!` 只是腾内存、数据还在，
+   `purge!` 才把这条线程的事件删掉。同样不动 ChatMemory（那由调用方决定）。"
+  [rt conv-id]
+  (forget! rt conv-id)
+  (es/es-delete! (:event-store rt) conv-id)
   nil)
 
 (defn conversations [rt] (vec (keys @(:conversations rt))))
@@ -561,7 +656,7 @@
   (let [entry (entry-of! rt conv-id)]
     (locking (:lock entry)
       (let [id (swap! (:sub-ids entry) inc)
-            {:keys [events gap?]} (buf-since (:buffer entry) since)]
+            {:keys [events gap?]} (es/safe-since (:event-store rt) conv-id since)]
         (when gap?
           (let [msgs (try (agent/get-history ((:agent-fn rt) {:conversation-id conv-id :tools []}))
                           (catch Throwable t
@@ -574,10 +669,13 @@
                        :messages (vec msgs)})))
         (doseq [ev events] (on-event ev))
         (swap! (:subs entry) assoc id {:on-event on-event :on-close on-close})
+        (swap! (:sub-gen entry) inc)
         (fn unsubscribe! []
           (locking (:lock entry)
             (when-let [sub (get @(:subs entry) id)]
               (swap! (:subs entry) dissoc id)
+              (swap! (:sub-gen entry) inc)
+              (arm-orphan! rt entry)
               (when-let [c (:on-close sub)] (try (c :unsubscribed) (catch Throwable _ nil))))
             nil))))))
 
@@ -592,7 +690,7 @@
         dones (doall (keep (fn [entry]
                              (locking (:lock entry)
                                (when-let [r @(:run entry)]
-                                 (request-stop!* r)
+                                 (request-stop!* r :shutdown)
                                  (:done r))))
                            entries))]
     (doseq [^CompletableFuture d dones]
@@ -603,4 +701,5 @@
           (when on-close (try (on-close :shutdown) (catch Throwable _ nil))))
         (reset! (:subs entry) {})))
     (reset! (:conversations rt) {})
+    (doseq [entry entries] (es/safe-release! (:event-store rt) (:conversation-id entry)))
     nil))

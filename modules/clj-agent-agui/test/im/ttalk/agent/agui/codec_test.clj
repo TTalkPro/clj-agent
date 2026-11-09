@@ -294,7 +294,10 @@
     (testing "真审批：措辞与 decision 枚举照旧，kind 标 approval（既有客户端不受影响）"
       (let [i (it false)]
         (is (= "需要审批: generateSandboxedUi" (:reason i)))
-        (is (= ["decision"] (get-in i [:responseSchema :required])))
+        (is (= [{:required ["decision"]} {:required ["approved"]}] (get-in i [:responseSchema :anyOf]))
+            "decision（老前端）或 approved（通用审批客户端）任一")
+        (is (= "object" (get-in i [:responseSchema :properties :editedArgs :type])))
+        (is (= "string" (get-in i [:responseSchema :properties :reason :type])))
         (is (= ["approved" "rejected"] (get-in i [:responseSchema :properties :decision :enum])))
         (is (= "approval" (get-in i [:metadata :kind])))))
 
@@ -528,3 +531,9 @@
       (is (= :user (:role u)))
       (is (= [:text :file] (mapv :type (:content u))))
       (is (= "你是助手" (:content s))))))
+
+(deftest approve-with-edits-capability-test
+  (testing "装配方说了才报 approveWithEdits（缺省不报，不谎报）"
+    (is (nil? (get-in (codec/run-info ["a"]) [:agents "a" :capabilities :humanInTheLoop :approveWithEdits])))
+    (is (true? (get-in (codec/run-info ["a"] {:approve-with-edits? true})
+                       [:agents "a" :capabilities :humanInTheLoop :approveWithEdits])))))

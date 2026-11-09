@@ -28,12 +28,33 @@
    但可以把它放到远离真实时序的地方。"
   60000)
 
+;; 诊断（2026-11-08）：stop-semantics-test 曾间歇性红一次（stop! 返回 false、
+;; 终态不是 :cancelled，工具却跑完了），压测 ~45 次未复现。每次调用记下闸门当时的
+;; 状态、在闸门上实际等了多久、是放行还是超时，失败时随断言一起打印。
+(def gate-trace (atom []))
+
 (deftool slow-mark
   "卡在闸门上，放行后打个记号（用来验证「取消不杀正在跑的工具」）"
   [[label :string "记号"]]
-  (when-let [g @tool-gate] (deref g gate-timeout-ms nil))
+  (let [g @tool-gate
+        t0 (System/nanoTime)
+        res (when g (deref g gate-timeout-ms ::gate-timeout))]
+    (swap! gate-trace conj {:label label
+                            :thread (str (Thread/currentThread))
+                            :gate (cond (nil? g) :nil (= res ::gate-timeout) :timed-out :else :released)
+                            :waited-ms (quot (- (System/nanoTime) t0) 1000000)
+                            :at-ms (System/currentTimeMillis)}))
   (swap! side-effects conj label)
   (str "已标记 " label))
+
+(defn- diag
+  "失败时打印的现场：时间线（相对 t0 的毫秒）、闸门记录、run 状态、事件类型序列、终态。"
+  [t0 marks r c]
+  (pr-str {:marks-ms (into {} (map (fn [[k v]] [k (- v t0)])) @marks)
+           :gate-trace (mapv #(update % :at-ms - t0) @gate-trace)
+           :run-status (rt/run-status r "c1")
+           :types ((:types c))
+           :terminal (select-keys (sup/terminal-event ((:events c))) [:type :reason :error :run-id])}))
 
 (defn- tool-call-response [id name args]
   {:text nil :tool-calls [{:id id :name name :args args}]})
@@ -171,16 +192,29 @@
 (deftest stop-semantics-test
   (testing "stop! 后终态是 :cancelled；**正在跑的工具照样跑完**（JVM 无抢占）"
     (reset! side-effects [])
-    (reset! tool-gate (promise))
-    (let [r (sup/runtime {:provider (sup/provider [(tool-call-response "tc1" "slow-mark" {:label "A"})
+    (reset! gate-trace [])
+    (let [gate (promise)                 ;; 自己持有这只闸门：放行时不再回读全局 atom
+          _ (reset! tool-gate gate)
+          t0 (System/currentTimeMillis)
+          marks (atom {})
+          mark! #(swap! marks assoc % (System/currentTimeMillis))
+          r (sup/runtime {:provider (sup/provider [(tool-call-response "tc1" "slow-mark" {:label "A"})
                                                    {:text "不该跑到这里"}])
                           :tools [#'slow-mark]})
           c (sup/collector)]
-      (rt/subscribe r "c1" {:on-event (:on-event c)})
+      (rt/subscribe r "c1" {:on-event (fn [ev]
+                                        (when (#{:tool/started :run/finished :run/cancelled :run/error} (:type ev))
+                                          (mark! (:type ev)))
+                                        ((:on-event c) ev))})
       (rt/start-run! r "c1" "跑工具")
-      (sup/wait-for #(some #{:tool/started} ((:types c))))
+      (mark! :start-run-returned)
+      (let [seen? (sup/wait-for #(some #{:tool/started} ((:types c))))]
+        (mark! (if seen? :wait-tool-started-ok :wait-tool-started-TIMEOUT)))
       ;; 工具卡在闸门上：stop 一定落在「工具正在跑」这个窗口里
-      (is (true? (rt/stop! r "c1")) "登记成功")
+      (mark! :before-stop)
+      (let [stopped (rt/stop! r "c1")]
+        (mark! :after-stop)
+        (is (true? stopped) (str "登记成功\n诊断：" (diag t0 marks r c))))
       (is (false? (rt/stop! r "c1")) "重复 stop 是 no-op")
       ;; **这里不能断言「一定还在停的过程中」**：取消的语义是「放弃等待 +
       ;; 协作式中断」（§4.8），run 完全可能在这两行之间就收口了——工具还卡在
@@ -189,9 +223,10 @@
       (let [st (rt/run-status r "c1")]
         (is (or (:stopping? st) (= :idle (:state st)))
             "「正在停止…」或已经停稳——取消不等工具，两者都合法"))
-      (deliver @tool-gate true)
+      (deliver gate true)
       (is (sup/wait-for #(sup/terminal-event ((:events c)))))
-      (is (= :run/cancelled (:type (sup/terminal-event ((:events c))))))
+      (is (= :run/cancelled (:type (sup/terminal-event ((:events c)))))
+          (str "诊断：" (diag t0 marks r c)))
       ;; 同理：run 的终态可能**早于**工具跑完，所以这条要等，不能直接读
       (is (sup/wait-for #(= ["A"] @side-effects)) "取消 = 放弃等待，不是杀线程"
           )

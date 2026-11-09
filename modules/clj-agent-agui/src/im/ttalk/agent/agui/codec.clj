@@ -53,10 +53,21 @@
 
    我们的 resume 入口就是 `resume-run!` 的 decision，所以形状是决策而不是工具
    结果。前端工具那条路（AG-UI client-side tool）不看它——它自己以 tool-call
-   的方式回结果（§7.2）。"
+   的方式回结果（§7.2）。
+
+   **兼容两套答法**（designs/agui-borrow.md §1，对照 Keelson `ChatAguiRunState`
+   的 `ApproveSchema`）：老前端回 `{decision}`，通用审批客户端回
+   `{approved, editedArgs?, reason?}`——`anyOf` 两者任一即可。
+   `editedArgs` 是**整体替换**工具参数（不合并：合并没法表达「删掉某个参数」），
+   `reason` 是拒绝理由，原样交给模型（「已拒绝执行：<理由>」）。"
   {:type "object"
-   :properties {:decision {:type "string" :enum ["approved" "rejected"]}}
-   :required ["decision"]})
+   :properties {:decision {:type "string" :enum ["approved" "rejected"]}
+                :approved {:type "boolean"}
+                :editedArgs {:type "object"
+                             :description "批准时整体替换工具参数（不合并）"}
+                :reason {:type "string"
+                         :description "拒绝理由，原样交给模型"}}
+   :anyOf [{:required ["decision"]} {:required ["approved"]}]})
 
 (defn- reason-str
   "AG-UI 的 `Interrupt.reason` 是必填字符串；我们的 `:reason` 可能是关键字。"
@@ -99,6 +110,25 @@
       pending-tool  (assoc :metadata {:kind (if pending-frontend? "frontend-tool" "approval")
                                       :pendingTool {:name (:name pending-tool)
                                                     :args (:args pending-tool)}}))))
+
+(defn interrupts-of
+  "暂停事件 → `outcome.interrupts`：同一批里**每条**被叫停的调用一个 interrupt
+   （designs/agui-borrow.md §2，对照 Keelson `ChatAguiRunState.Judge` / `Done`）。
+
+   只有一条时与从前逐字相同（`interrupt-of` 整个事件）——单审批的客户端不受影响。
+   多条时每条用自己的 tool-call id 作 interrupt id、自己的 `pendingTool`、自己的
+   前端 / 审批归类；`reason` 取 gate 给的审批理由（`:approval :reason`），没有就是
+   「需要审批: <工具名>」——整批合在一起的那句「需要审批: a, b」挂不到单张卡片上。"
+  [{:keys [pending-tools] :as ev}]
+  (if (<= (count pending-tools) 1)
+    [(interrupt-of ev)]
+    (mapv (fn [p]
+            (interrupt-of (assoc ev
+                                 :pending-tool (dissoc p :frontend? :approval)
+                                 :pending-frontend? (boolean (:frontend? p))
+                                 :reason (or (get-in p [:approval :reason])
+                                             (str "需要审批: " (:name p))))))
+          pending-tools)))
 
 (def ^:private subagent-outcome-message
   "AG-UI 没有 killed / timeout 这两种收尾，按 `SUBAGENT_ERROR` 发并把原因写进 code
@@ -144,19 +174,29 @@
     :run/started    (cond-> {:type "RUN_STARTED" :threadId conversation-id :runId run-id}
                       (:parent-run-id ev) (assoc :parentRunId (str (:parent-run-id ev))))
     :run/finished   (with-usage {:type "RUN_FINISHED" :threadId conversation-id :runId run-id} ev)
-    ;; AG-UI 没有 cancelled：按「结束了，但带原因」发，前端照常收口
+    ;; AG-UI 没有 cancelled：按「结束了，但带原因」发，前端照常收口。
+    ;; `reason` 是**为什么**停（stop / superseded / shutdown / orphan，designs/
+    ;; agui-borrow.md §5）——前端据此区分「你按了停止」与「另一个窗口接管了」。
+    ;; `result` 是协议里的自由字段，多一格不破坏客户端；没登记原因就不写
     :run/cancelled  (with-usage {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
-                                 :result {:status "cancelled"}} ev)
+                                 :result (cond-> {:status "cancelled"}
+                                           (:reason ev) (assoc :reason (name (:reason ev))))} ev)
     ;; `RUN_ERROR` 在协议里同样有 `usage`——半途炸掉的那半轮 token 也是花掉的
     :run/error      (with-usage {:type "RUN_ERROR"
                                  :message (or (get-in ev [:error :message]) "run failed")
-                                 :code (some-> (get-in ev [:error :class]) name)} ev)
+                                 :code (let [c (get-in ev [:error :class])]
+                                         ;; 逐条审批的校验错误用 Keelson 的码（INTERRUPT_*），
+                                         ;; 客户端按码区分「答漏了」与「答错了」
+                                         (case c
+                                           :interrupt-incomplete "INTERRUPT_INCOMPLETE"
+                                           :interrupt-unknown    "INTERRUPT_UNKNOWN"
+                                           (some-> c name)))} ev)
     ;; AG-UI 的一等暂停态：`RUN_FINISHED` + `outcome:"interrupt"`（interrupt 协议）。
     ;; 收口与告知是**同一条**事件——run 有终态（流可以关），outcome 又说清了
     ;; 「不是跑完了，是停在这儿等人」。客户端 `useInterrupt` / `useHumanInTheLoop`
     ;; 直接接管渲染，答复走下一次 run 的 `resume[]`（见 §5.2）。
     :run/paused     (with-usage {:type "RUN_FINISHED" :threadId conversation-id :runId run-id
-                                 :outcome {:type "interrupt" :interrupts [(interrupt-of ev)]}} ev)
+                                 :outcome {:type "interrupt" :interrupts (interrupts-of ev)}} ev)
 
     :message/started {:type "TEXT_MESSAGE_START" :messageId message-id :role "assistant"}
     :message/delta   {:type "TEXT_MESSAGE_CONTENT" :messageId message-id :delta (:text ev)}
@@ -430,8 +470,40 @@
      :parent-run-id parentRunId
      :state state
      :context (vec context)
-     :resume (vec resume)
+     ;; 不是数组就当没带（形状错误由路由的 resume 校验回 400，这里不抛）
+     :resume (if (sequential? resume) (vec resume) [])
      :forwarded-props forwardedProps}))
+
+(defn- blank-id? [v]
+  (not (and (string? v) (not (str/blank? v)))))
+
+(defn run-input-problem
+  "校验 `RunAgentInput` 的**最小形状**。返回 nil（没问题）或
+   `{:error <机器可读的码> :message <给人看的话>}`。
+
+   为什么要有：不校验时坏输入一路滑到 `start-run!`——缺 `threadId` 就拿 nil 当
+   会话 id 照跑（一个所有人共享的 nil 会话），坏 JSON 则在路由里炸成 500，客户端
+   分不清是自己错了还是服务挂了（designs/agui-borrow.md §7）。
+
+   **只出数据，不出状态码**：码怎么映射成 400 是路由的事（本 ns 不产出 HTTP，
+   见 ns docstring）。`body` 是**已解析**的请求体（解析失败的那一步在路由里，
+   它同样回 `bad_json`）。
+
+   - `:require-run-id?` —— `/run` 要（AG-UI 的 `RunAgentInput.runId` 必填），
+     `/connect` 只认 `threadId`"
+  ([body] (run-input-problem body nil))
+  ([body {:keys [require-run-id?]}]
+   (cond
+     (not (map? body))
+     {:error "bad_json" :message "请求体必须是 JSON 对象（RunAgentInput）"}
+
+     (blank-id? (:threadId body))
+     {:error "missing_thread_id" :message "缺少 threadId（非空字符串）"}
+
+     (and require-run-id? (blank-id? (:runId body)))
+     {:error "missing_run_id" :message "缺少 runId（非空字符串）"}
+
+     :else nil)))
 
 (defn context->prompt
   "AG-UI `RunAgentInput.context` → 一段 system 文本。返回 nil = 这轮没有上下文。
@@ -547,7 +619,9 @@
    再交给 `useCapabilities`）。我们报的这三位都是真的：会暂停等人
    （`supported`）、敏感工具要审批（`approvals`）、走 AG-UI 的 interrupt 协议
    （`interrupts`：`RUN_FINISHED outcome=interrupt` + 收 `resume[]`）。
-   **`approveWithEdits` 不报**——改参数再执行我们还没实现，不谎报。
+   `approveWithEdits` **由装配方报**（`:approve-with-edits?`，缺省 false）：
+   改参数再执行要路由把 `editedArgs` 翻成 resume 的 `{:args}`——这层判不了
+   路由接没接，所以不替它说（examples 的路由接了，缺省报 true）。
 
    `multimodal` 是**装配方传进来的**，本 ns 不猜：能不能收图取决于两件事——
    wire 认不认部件（`wire/anthropic` / `wire/openai` 都认）**且模型本身有视觉**，
@@ -556,8 +630,8 @@
    入口收起来，比摆一颗点了才发现没用的回形针强。"
   ([agent-ids] (run-info agent-ids nil))
   ([agent-ids {:keys [version descriptions capabilities open-generative-ui? a2ui?
-                      suggestions? threads? multimodal parallel-tools? max-iterations
-                      state?]}]
+                      suggestions? threads? thread-endpoints multimodal parallel-tools?
+                      max-iterations state? approve-with-edits?]}]
    (cond->
     {:version (or version "clj-agent-agui/0.3")
      :mode "sse"
@@ -569,9 +643,11 @@
                                :capabilities
                                (cond-> (or capabilities
                                            (cond->
-                                            {:humanInTheLoop {:supported true
-                                                              :approvals true
-                                                              :interrupts true}
+                                            {:humanInTheLoop (cond-> {:supported true
+                                                                      :approvals true
+                                                                      :interrupts true}
+                                                               approve-with-edits?
+                                                               (assoc :approveWithEdits true))
                                              ;; AG-UI 的出口就是 SSE，token 逐个发
                                              ;; ——这一格是本层的事实，与模型无关
                                              :transport {:streaming true}
@@ -639,10 +715,16 @@
      ;; 这也不违反「不谎报能力位」：那条禁的是**报了没有的**，不是禁「如实说没有」。
      ;; 全 false 与省略在协议语义上等价（`list !== false` 两边都判否），差别只在
      ;; 客户端要不要多打一枪才知道。
-     :threadEndpoints {:list (boolean threads?)
-                       :inspect (boolean threads?)
-                       :mutations (boolean threads?)
-                       :realtimeMetadata false}}
+     ;;
+     ;; `:thread-endpoints {:list :inspect :mutations}` 逐格覆盖 `:threads?` 的三格
+     ;; 同值（designs/agui-borrow.md §7）：线程存储缺哪个槽、没配 memory，对应那格
+     ;; 就该是 false——路由那边回 501，这边报 true 就是谎报
+     :threadEndpoints (let [te (or thread-endpoints
+                                   {:list threads? :inspect threads? :mutations threads?})]
+                        {:list (boolean (:list te))
+                         :inspect (boolean (:inspect te))
+                         :mutations (boolean (:mutations te))
+                         :realtimeMetadata false})}
 
      ;; 对象只在开着时发，与上游一致。**不带 `agents`**——那是「A2UI 只对某几个
      ;; agent 生效」的按 agent 限定（上游 #5369），而我们的 a2ui 是 runtime 级的

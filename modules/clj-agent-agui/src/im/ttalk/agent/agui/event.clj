@@ -96,13 +96,37 @@
    :children (atom [])
    :finalize (atom {:stop-requested? false})})
 
+(def stop-reasons
+  "取消的四种原因（designs/agui-borrow.md §5，对照 Keelson `AguiCancelReason`）：
+
+   | 原因 | 谁触发 |
+   |---|---|
+   | `:stop`       | 用户按停（`runtime/stop!` 缺省） |
+   | `:superseded` | `:on-concurrent :supersede` 被同会话的新 run 顶掉 |
+   | `:shutdown`   | `runtime/shutdown!` |
+   | `:orphan`     | 最后一个订阅者走后 `:orphan-cancel-ms` 到点仍没人来 |"
+  #{:stop :superseded :shutdown :orphan})
+
 (defn request-stop!
-  "登记**本 run** 的停止意图（`stop!` / supersede 都走这里）。返回是否是首次登记。"
-  [em]
-  (let [[old _] (swap-vals! (:finalize em) assoc :stop-requested? true)]
-    (not (:stop-requested? old))))
+  "登记**本 run** 的停止意图（`stop!` / supersede / shutdown / 孤儿都走这里）。
+   返回是否是首次登记。
+
+   `reason` 缺省 `:stop`；**第一个原因算数**——先按停、随后停机，终态上仍写
+   `:stop`（用户的意图先到，停机只是没等它收完）。"
+  ([em] (request-stop! em :stop))
+  ([em reason]
+   (let [[old _] (swap-vals! (:finalize em)
+                             (fn [f] (if (:stop-requested? f)
+                                       f
+                                       (assoc f :stop-requested? true :stop-reason (or reason :stop)))))]
+     (not (:stop-requested? old)))))
 
 (defn stop-requested? [em] (:stop-requested? @(:finalize em)))
+
+(defn stop-reason
+  "本 run 的取消原因（没登记过取消 = nil）。"
+  [em]
+  (:stop-reason @(:finalize em)))
 
 (defn terminal-of [em] (:terminal @(:state em)))
 

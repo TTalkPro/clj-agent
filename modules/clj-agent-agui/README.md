@@ -34,6 +34,10 @@
 | `im.ttalk.agent.agui.a2ui` | **可选插件**：A2UI —— 声明式生成式 UI，模型按 catalog 拼组件树（不执行任意代码） |
 | `im.ttalk.agent.agui.mcp` | **可选插件**：MCP Apps 的**前端那半边** —— 带 UI 的工具出结果时补一条 activity 事件 + UI 代理白名单。协议栈在 [`clj-agent-mcp`](../clj-agent-mcp/) |
 | `im.ttalk.agent.agui.state` | 共享状态的 JSON Pointer / JSON Patch（RFC 6901 / 6902）与 delta 规范化——服务端每发一条增量同步应用到自己的状态，否则下一条 delta 就是对着想象中的状态算的 |
+| `im.ttalk.agent.agui.registry` | 多 agent 注册表：agent id → runtime（`registry` / `find-agent` / `stop!` / `info` / `shutdown!`）。路由按它分派 `/agent/:id/*`，找不到回 404。设计见 [`designs/agui-borrow.md`](../../designs/agui-borrow.md) §4 |
+| `im.ttalk.agent.agui.thread-store` | 线程**元数据**存储协议 + 进程内实现（名称、归档、agentId、时间；列表过滤 / 分页）。`/threads` 的数据源——会话被驱逐后线程照样列得出来。**不存消息与事件**（§8.1 / §8.2）。设计见 [`designs/agui-borrow.md`](../../designs/agui-borrow.md) §6 |
+| `im.ttalk.agent.agui.thread-store.sqlite` | 线程存储的 SQLite 后端，**按需加载**（`next.jdbc` 来自 client 模块，零新依赖）；重启后侧栏照样在 |
+| `im.ttalk.agent.agui.event-store` | 会话事件存储的**可替换挂点**（`EventStore` 协议）+ 缺省 `ring-store`（进程内环形缓冲，即原 `:buffer-size` 行为）。runtime 经 `:event-store` 注入；本库不带持久化实现，外部库实现该协议即可让事件跨重启（同 Keelson `Agui.Bitcask`）。设计见 [`designs/agui-borrow.md`](../../designs/agui-borrow.md) §8 |
 | `im.ttalk.agent.agui.subagent` | 子 Agent 事件归属：把 `subagent/manager` 的协议无关观察钩子翻译成 lane 事件（`:subagent/started|finished|error`）。设计见 [`docs/subagent-event-attribution-design.md`](../../docs/subagent-event-attribution-design.md) |
 
 **零 web 服务端依赖**（`design-principles.md` §2）：订阅是回调，本模块不做 HTTP
@@ -49,7 +53,8 @@
 |---|---|
 | `agui_example.clj` | 六场景端到端，**离线可跑**（桩 provider + 假 SSE 连接） |
 | `agui_live_test.clj` | 同样六场景，**真实 MiniMax 端点**（需 `MINIMAX_API_KEY`） |
-| `http_kit_routes.clj` | 真路由：四条 CopilotKit v2 端点 + `/suggest` + SSE（`id:` 放 `:seq` = `Last-Event-ID`） |
+| `http_kit_routes.clj` | 真路由：四条 CopilotKit v2 端点 + `/suggest` + `/threads*` + SSE（`id:` 放 `:seq` = `Last-Event-ID`；闲 15s 发注释帧心跳）；多 agent 走 `start-registry!`；坏输入 400 / 超限 413 / 缺槽 501 |
+| `http_kit_routes_test.clj` | 路由层离线测试（直接调 handler + 本机回环 http-kit），`clojure -M:test:copilotkit --focus :examples` |
 | `genui.clj` | **可选插件**：Open Generative UI（`generateSandboxedUi`）——见下节「为什么它不在本模块里」 |
 | `mcp_server_example.clj` | 最小 MCP server（Streamable HTTP），验 `agui.mcp` 客户端那一半 |
 
@@ -129,6 +134,10 @@
    `interrupt.id` 取 pending 工具的 tool-call id（`codec/interrupt-id`），客户端
    把人的决定放在**下一次 run 的 `resume[]`** 里送回来。`/info` 里报
    `humanInTheLoop.interrupts`，标准客户端据此才知道我们支持。
+5. **取消有原因**：`:run/cancelled` 带 `:reason`（`:stop` / `:superseded` /
+   `:shutdown` / `:orphan`，`event/stop-reasons`），编码成 `RUN_FINISHED.result.reason`；
+   `run-status` 的 `:cancel-reason` 在「正在停止」时就看得到。`runtime` 的
+   `:orphan-cancel-ms`（缺省 0 = 关）让最后一个订阅者走后到点自动停。
 
 ## Open Generative UI：为什么它不在本模块里
 
@@ -251,6 +260,25 @@ MCP App，结果之外还会发一条 `mcp-apps` activity 快照。
 
 跑得起来的对端：`examples/copilotkit/mcp_server_example.clj`（最小 MCP server，
 两个工具，其中一个带 UI 资源）。
+
+## 多 agent 与线程存储
+
+```clojure
+(require '[im.ttalk.agent.agui.registry :as registry]
+         '[im.ttalk.agent.agui.thread-store :as ts])
+
+(def reg (registry/registry [{:id "default" :runtime rt1 :description "通用助手"}
+                             {:id "ops" :runtime rt2 :suggest? true}]))
+(registry/find-agent reg "ops")              ;; 条目 map；没有 → nil（路由回 404）
+(registry/stop! reg "ops" "thread-1")        ;; 缺省 rt/stop!，原因 :stop
+
+(def store (ts/in-memory-store))             ;; 或 agui.thread-store.sqlite/sqlite-thread-store
+(ts/ts-touch! store "thread-1" {:agent-id "ops"})
+(ts/ts-list store {:agent-id "ops" :limit "20"})   ;; => {:threads [...] :next-cursor ...}
+```
+
+线程存储只管「有哪些线程、叫什么、归没归档」——历史在 ChatMemory，暂停在
+PauseStore，事件缓冲不落库（设计文档 §8.1 / §8.2）。
 
 ## 边界
 
