@@ -5,7 +5,7 @@
 
  ;; 只依赖 core：工具是 deftool var（tool/* 元数据约定），不认识 react 循环 / memory / pause。
  ;; 设计见 designs/tools-module.md §2。
- :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
 

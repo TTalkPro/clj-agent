@@ -957,7 +957,7 @@ clojure -M -e '(load-file "examples/toolsearch_live_test.clj")'
 
 核心依赖：
 
-- org.clojure/clojure 1.11.4
+- org.clojure/clojure 1.12.6
 - cheshire/cheshire 5.12.0（provider，JSON）
 - com.taoensso/timbre 6.3.0（client / provider，日志）
 

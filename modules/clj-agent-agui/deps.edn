@@ -3,7 +3,7 @@
  :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
             "clojars" {:url "https://repo.clojars.org/"}}
 
- :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         ;; 内部依赖 —— core（事件里的 canonical error / 中立消息 / 取消令牌）
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}

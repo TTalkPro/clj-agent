@@ -1,6 +1,6 @@
 {:paths ["src"]
 
- :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         ;; 内部依赖 - Core（protocol/契约：im.ttalk.agent.model.*）
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}

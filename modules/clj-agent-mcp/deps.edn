@@ -7,7 +7,7 @@
  ;; 工具接入产出的是**普通 map**（`{:name :description :parameters :handler}`），
  ;; 那是 clj-agent 的内联工具约定，不需要 require 任何东西就能满足。
  ;; 谁要把它接进 agent，谁自己去 conj 进 `:tools`。
- :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         ;; JSON —— JSON-RPC 2.0 的编解码
         cheshire/cheshire {:mvn/version "5.12.0"}

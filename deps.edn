@@ -4,7 +4,7 @@
           "modules/clj-agent-mcp/src"
           "modules/clj-agent-agui/src"
           "modules/clj-agent-tools/src"]
- :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
