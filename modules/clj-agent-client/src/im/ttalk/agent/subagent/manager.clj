@@ -344,9 +344,11 @@
           (let [resume-fn (resolve 'im.ttalk.agent.simple-agent/resume)
                 agent (or (safe-call (:decorate observer) agent) agent)
                 _ (safe-call (:start! observer))
-                resp (resume-fn agent decision (cond-> {}
-                                                 payload (assoc :payload payload)
-                                                 (:chat-opts observer) (merge (:chat-opts observer))))
+                ;; 4-arity：`payload` 是用户答复（:args / :message / :decisions），
+                ;; 传输选项（:on-token 等）走 opts——两件事不挤一个槽。曾用 3-arity
+                ;; 传 `{:payload p :on-token f}`，整个 map 被当成 payload：编辑后批准的
+                ;; :args 丢失、:reply 因找不到 :message 抛错、子 lane 的 :on-token 失效
+                resp (resume-fn agent decision payload (:chat-opts observer))
                 outcome (run-result agent resp rfn)]
             (swap! registry update id merge
                    {:status (cond (:ok outcome) :done

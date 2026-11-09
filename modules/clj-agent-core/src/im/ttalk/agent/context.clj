@@ -31,7 +31,24 @@
     :subagent/observer
     ;; 续跑那一批的钥匙（`react/resume-subagent` 钉、`delegate` 读）。只对那一批
     ;; 有效，用完即摘——留着会让下一轮的委派误以为自己也在续跑
-    :subagent/resume})
+    :subagent/resume
+    ;; designs/runtime-borrow.md 的三个框架挂点：
+    ;; - `:tool-guard/state` 失败保护的计数（`filter.tool-guard` 经 :writes 写，进暂停快照）
+    ;; - `:loop/stop`        工具侧请求停回合（react 批后读、读完即摘）
+    ;; - `:loop/notes`       本轮临时提醒（react 钉在本次 chat 请求上，memory filter 读）
+    :tool-guard/state :loop/stop :loop/notes})
+
+(defn- merge-2
+  "两层 merge：`{:a {k v}}` 与 `{:a {k2 v2}}` 合成 `{:a {k v k2 v2}}`，叶子后写覆盖。"
+  [old new]
+  (merge-with (fn [a b] (if (and (map? a) (map? b)) (merge a b) b)) old new))
+
+(def framework-slots
+  "**框架自己的状态槽**及其 reducer（与用户 `:state-slots` 同形，后者同名时优先）。
+
+   `:tool-guard/state` 的写意图是「只含本次调用那一格」的增量，同批多个工具各写各的格——
+   用缺省 last-writer 会互相覆盖，故内建两层 merge。见 designs/runtime-borrow.md §3。"
+  {:tool-guard/state {:init {} :reduce merge-2}})
 
 ;;; ============================================================
 ;;; 创建
@@ -86,7 +103,8 @@
    返回 {:context 新ctx :conflicts #{k ...}}
    conflicts = 同批被写 ≥2 次且未声明 reducer 的 key（调用方决定是否告警）。"
   [ctx writes-seq slots]
-  (let [write-counts (frequencies (mapcat keys writes-seq))
+  (let [slots (merge framework-slots slots)
+        write-counts (frequencies (mapcat keys writes-seq))
         conflicts (into #{}
                         (keep (fn [[k n]]
                                 (when (and (> n 1) (nil? (get-in slots [k :reduce])))

@@ -14,9 +14,12 @@
    重试重入碰不到任何 filter，`around_chat` 的副作用每轮只发生一次。
    要观测每次**真实尝试**，用 `:on-retry` 回调——它是为此存在的，不是日志糖。
 
-   **流式不重试**：token 已经投递给 sink，重跑会让下游看到重复内容。要容错
-   请在 turn 层重跑整轮（`:turn` / `:iteration` 链都能递归重入）。故本 ns 只
-   服务 `ChatModel.call`，`stream` 路径不经过它。
+   **流式只在首个 token 之前重试**：token 已经投递给 sink 之后重跑会让下游看到
+   重复内容，那之后的失败原样抛；要容错请在 turn 层重跑整轮。首个 token 之前
+   （建连失败、503、首字节超时）没有任何东西出门，重发安全——`stream-call` 用
+   `:retry-gate` + 独立预算 `:stream-retries` 表达这一点（designs/provider-reliability.md §2）。
+
+   **空补全**（HTTP 200 但无有效内容）走独立预算 `:empty-retries`，不占 `:max-retries`。
 
    **判据是 canonical error 的 `:retryable?`**，不是 HTTP 状态码——那是
    provider 边界的事（见 `provider.http.client/response->error`，它顺带把
@@ -33,7 +36,8 @@
    参数三级取值：**单次 opts > provider config > 框架默认**；`:max-retries 0`
    即关闭（等价于直接调用，零开销）。"
   (:require [im.ttalk.agent.async :as async]
-            [im.ttalk.agent.filter :as flt]))
+            [im.ttalk.agent.filter :as flt]
+            [im.ttalk.agent.model.error :as errors]))
 
 (set! *warn-on-reflection* true)
 
@@ -44,18 +48,27 @@
    - :base-delay   首次退避基准（毫秒）
    - :multiplier   退避倍率
    - :max-delay    单次退避上限（毫秒）——`Retry-After` 也受它约束
-   - :respect-retry-after? 是否优先采用错误里的 :retry-after-ms"
+   - :respect-retry-after? 是否优先采用错误里的 :retry-after-ms
+   - :empty-retries 空补全的独立预算（HTTP 200 但无有效内容时补打几次；0 = 不补打，空响应原样返回）
+   - :empty-exhausted 空补全预算用完仍空时怎么办：`:return`（缺省，把空响应原样交回——与过去一致）
+                     / `:throw`（抛 :empty-completion-error，交给主备切换 / 上层处理）
+   - :stream-retries 流式「首个 token 之前」失败的独立预算（token 出门后一律不重试）
+
+   三格预算各自记账、互不挪用（designs/provider-reliability.md §2）。"
   {:max-retries 2
    :base-delay 1000
    :multiplier 2.0
    :max-delay 30000
-   :respect-retry-after? true})
+   :respect-retry-after? true
+   :empty-retries 1
+   :empty-exhausted :return
+   :stream-retries 2})
 
 (defn resolve-opts
   "三级合并重试配置：框架默认 < provider/model config 的 :retry < 单次 opts 的 :retry。
 
    每一级都接受 nil（跳过）/ true（用上一级结果）/ false（关闭，等价
-   `{:max-retries 0}`）/ map（作为配置合并）。
+   `{:max-retries 0 :empty-retries 0 :stream-retries 0}`）/ map（作为配置合并）。
 
    返回: 合并后的配置 map（`:max-retries` 为 0 表示不重试）"
   ([config] (resolve-opts config nil))
@@ -64,7 +77,7 @@
                  (cond
                    (nil? r)   acc
                    (true? r)  acc
-                   (false? r) (assoc acc :max-retries 0)
+                   (false? r) (assoc acc :max-retries 0 :empty-retries 0 :stream-retries 0)
                    (map? r)   (merge acc r)
                    :else (throw (ex-info (str ":retry 必须是 nil / true / false / map，实为 " (pr-str r))
                                          {:retry r}))))]
@@ -109,77 +122,151 @@
       (long (min ra (double max-delay)))
       (compute-backoff attempt opts rand-fn))))
 
+(defn- empty-error
+  "空补全超预算时抛的 canonical error（designs/provider-reliability.md §2）。"
+  [provider calls]
+  (errors/error :empty-completion-error
+                (str "模型返回空补全（HTTP 200 但无有效内容，已尝试 " calls " 次）")
+                (cond-> {} provider (assoc :provider provider))))
+
+(defn- http-retryable?
+  "按 `:max-retries` 那一格能不能再打。**空补全一律不进这一格**——它即便 :retryable? true，
+   也只归 `:empty-retries` 管；否则稳定吐空的模型会被放大成「max-retries × empty-retries」次。"
+  [^Throwable t]
+  (and (retryable-ex? t)
+       (not= :empty-completion-error (:type (ex-data t)))))
+
+(defn- attempt-summary [^Throwable t]
+  (-> (or (ex-data t) {:message (or (.getMessage t) (.getName (class t)))})
+      (dissoc :cause :attempts)))
+
+(defn- give-up
+  "放弃：试过不止一次 ⇒ 异常 ex-data 追加 `:attempts`（每次失败的 canonical error，去掉 :cause）。
+   只试了一次 ⇒ 原异常原样返回（零改写）。"
+  ^Throwable [^Throwable t trail]
+  (if (> (count trail) 1)
+    (errors/with-ex-data t {:attempts trail})
+    t))
+
+(defn- annotate [v calls record?]
+  (if (and record? (map? v)) (assoc v :attempts calls) v))
+
 (defn run
   "在重试保护下执行 `f`（无参函数）。
 
    参数:
    - f:    无参函数；失败时**抛** ex-info（data 即 canonical error）
    - opts: `resolve-opts` 的结果，另可带
-     - :on-retry (fn [{:keys [attempt delay-ms error exception]}])
-                 每次退避**之前**调用，用来观测真实尝试次数
+     - :on-retry (fn [{:keys [attempt delay-ms error exception kind]}])
+                 每次重试**之前**调用，用来观测真实尝试次数。`:kind` ∈
+                 `:error`（按 :max-retries 退避重试）/ `:empty-completion`（空补全补打）/
+                 opts 的 `:retry-kind`（流式路径传 `:stream`）
      - :rand-fn  随机数函数（测试用）
      - :sleep-fn (fn [ms])（测试用；缺省 Thread/sleep）
+     以下为 designs/provider-reliability.md §2 新增，**不给即旧行为，逐字不变**：
+     - :empty?            (fn [result] bool)；真 ⇒ 按 `:empty-retries`（缺省 1）**立即**补打
+                          （不退避、不占 :max-retries、不抬高退避指数）；超预算按 `:empty-exhausted`：
+                          `:throw` 抛 :empty-completion-error，否则（缺省）把空结果原样返回
+     - :retry-gate        (fn [] bool)；每次决定重试前问一次，假 ⇒ 不重试（流式：本次尝试已吐过 token）
+     - :record-attempts?  真 ⇒ 成功结果（map/record）上 assoc `:attempts`（含首次）
+     - :provider          空补全错误的 :provider
 
-   返回: `f` 的返回值
+   返回: `f` 的返回值（`:record-attempts?` 时带 :attempts）
 
-   抛出: 最后一次失败的异常——**原样重抛**，不包一层。调用方拿到的仍是
-   canonical error，`:retryable?` / `:status` 全程不丢（README 的错误模型
-   承诺「各边界可单向转换」，重试层没有资格改写它）。"
-  [f {:keys [max-retries on-retry rand-fn sleep-fn]
+   抛出: 最后一次失败的异常——canonical error 原样不变（`:retryable?` / `:status` 全程不丢，
+   README 的错误模型承诺「各边界可单向转换」，重试层没有资格改写它）；试过不止一次时
+   ex-data 追加 `:attempts`（经 `errors/with-ex-data`，消息 / cause / 栈逐字保留）。"
+  [f {:keys [max-retries on-retry rand-fn sleep-fn empty? empty-retries empty-exhausted retry-gate
+             record-attempts? provider retry-kind]
       :or {rand-fn rand}
       :as opts}]
   (let [sleep! (or sleep-fn #(when (pos? %) (Thread/sleep (long %))))
-        maxr   (long (or max-retries 0))]
-    (loop [attempt 0]
-      (let [result (try
-                     {:ok (f)}
-                     (catch Throwable t
-                       (if (and (< attempt maxr) (retryable-ex? t))
-                         {:retry t}
-                         (throw t))))]
-        (if-let [t (:retry result)]
-          (let [delay-ms (delay-for t attempt opts rand-fn)]
-            (when on-retry
-              (on-retry {:attempt   (inc attempt)
-                         :delay-ms  delay-ms
-                         :error     (ex-data t)
-                         :exception t}))
-            (sleep! delay-ms)
-            (recur (inc attempt)))
-          (:ok result))))))
+        maxr   (long (or max-retries 0))
+        maxe   (if empty? (long (or empty-retries 1)) 0)
+        gate?  #(or (nil? retry-gate) (boolean (retry-gate)))]
+    (loop [http 0 empties 0 calls 1 trail []]
+      (let [r (try {:ok (f)} (catch Throwable t {:err t}))]
+        (if-let [^Throwable t (:err r)]
+          (let [trail (conj trail (attempt-summary t))]
+            (if (and (< http maxr) (http-retryable? t) (gate?))
+              (let [delay-ms (delay-for t http opts rand-fn)]
+                (when on-retry
+                  (on-retry {:attempt   calls
+                             :delay-ms  delay-ms
+                             :error     (ex-data t)
+                             :exception t
+                             :kind      (or retry-kind :error)}))
+                (sleep! delay-ms)
+                (recur (inc http) empties (inc calls) trail))
+              (throw (give-up t trail))))
+          (let [v (:ok r)]
+            (if (and empty? (empty? v))
+              (let [err (empty-error provider calls)
+                    trail (conj trail err)]
+                (cond
+                  (and (< empties maxe) (gate?))
+                  (do (when on-retry
+                        (on-retry {:attempt calls :delay-ms 0 :error err :kind :empty-completion}))
+                      (recur http (inc empties) (inc calls) trail))
+                  (= :throw empty-exhausted) (throw (give-up (ex-info (:message err) err) trail))
+                  :else (annotate v calls record-attempts?)))
+              (annotate v calls record-attempts?))))))))
 
 (defn run-async
   "`run` 的异步孪生：`f` 是无参函数，返回**链结果**（deferred 或普通值）。
 
-   与 `run` 的差别只有两处，其余（判据 `retryable-ex?`、次数、退避曲线含
-   `Retry-After` 与满抖动、`:on-retry` 回调时机）**逐字共用**：
+   与 `run` 的差别只有两处，其余（判据 `retryable-ex?`、三格预算、退避曲线含
+   `Retry-After` 与满抖动、`:on-retry` 回调时机、`:attempts` 记录）**逐字共用**：
 
    1. 失败经 deferred 的 error channel 传播，用 `flt/fcatch` 接（同步抛出也接得住）；
    2. 退避不 `Thread/sleep`——用 `async/delayed`（`CompletableFuture/delayedExecutor`）。注入了 `:sleep-fn` 时仍走它（测试用：立即返回、只记账）。
 
    返回: deferred（或普通值——`f` 同步返回且没触发重试时就是普通值，形态保持见
    filter-chain-design.md §2.6.4 契约 C1）。
-   抛出/落 error channel: 最后一次失败的异常，**原样**，不包一层。
+   抛出/落 error channel: 最后一次失败的异常（规则同 `run`）。
 
-   递归深度 ≤ max-retries（缺省 2），不吃栈。"
-  [f {:keys [max-retries on-retry rand-fn sleep-fn]
+   递归深度 ≤ 总尝试次数，不吃栈。"
+  [f {:keys [max-retries on-retry rand-fn sleep-fn empty? empty-retries empty-exhausted retry-gate
+             record-attempts? provider retry-kind]
       :or {rand-fn rand}
       :as opts}]
-  (let [maxr (long (or max-retries 0))
-        wait (fn [ms] (if sleep-fn (do (sleep-fn ms) nil) (async/delayed ms)))]
-    (letfn [(step [attempt]
-              (flt/fcatch (f)
-                (fn [t]
-                  (if (and (< attempt maxr) (retryable-ex? t))
-                    (let [delay-ms (delay-for t attempt opts rand-fn)]
-                      (when on-retry
-                        (on-retry {:attempt   (inc attempt)
-                                   :delay-ms  delay-ms
-                                   :error     (ex-data t)
-                                   :exception t}))
-                      (flt/fbind (wait delay-ms) (fn [_] (step (inc attempt)))))
-                    (throw t)))))]
-      (step 0))))
+  (let [maxr  (long (or max-retries 0))
+        maxe  (if empty? (long (or empty-retries 1)) 0)
+        gate? #(or (nil? retry-gate) (boolean (retry-gate)))
+        wait  (fn [ms] (if sleep-fn (do (sleep-fn ms) nil) (async/delayed ms)))]
+    (letfn [(on-err [^Throwable t http empties calls trail]
+              (let [trail (conj trail (attempt-summary t))]
+                (if (and (< http maxr) (http-retryable? t) (gate?))
+                  (let [delay-ms (delay-for t http opts rand-fn)]
+                    (when on-retry
+                      (on-retry {:attempt   calls
+                                 :delay-ms  delay-ms
+                                 :error     (ex-data t)
+                                 :exception t
+                                 :kind      (or retry-kind :error)}))
+                    (flt/fbind (wait delay-ms)
+                               (fn [_] (step (inc http) empties (inc calls) trail))))
+                  (throw (give-up t trail)))))
+            (on-ok [v http empties calls trail]
+              (if (and empty? (empty? v))
+                (let [err (empty-error provider calls)
+                      trail (conj trail err)]
+                  (cond
+                    (and (< empties maxe) (gate?))
+                    (do (when on-retry
+                          (on-retry {:attempt calls :delay-ms 0 :error err :kind :empty-completion}))
+                        (step http (inc empties) (inc calls) trail))
+                    (= :throw empty-exhausted) (throw (give-up (ex-info (:message err) err) trail))
+                    :else (annotate v calls record-attempts?)))
+                (annotate v calls record-attempts?)))
+            (step [http empties calls trail]
+              (flt/fbind (flt/fcatch (flt/fmap (f) (fn [v] [::ok v]))
+                           (fn [t] [::err t]))
+                         (fn [[tag x]]
+                           (if (= ::ok tag)
+                             (on-ok x http empties calls trail)
+                             (on-err x http empties calls trail)))))]
+      (step 0 0 1 []))))
 
 (defn wrap
   "把 `f` 包成带重试的同名函数。config/opts 语义同 `resolve-opts`。"

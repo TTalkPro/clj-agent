@@ -41,6 +41,11 @@ core 由此对「记忆 / 循环」零感知（onion-filter 设计验收标准�
 | `im.ttalk.agent.callbacks` | 生命周期回调 |
 | `im.ttalk.agent.subagent.manager` / `.delegate` | 子 agent 体系 |
 | `im.ttalk.agent.common` | 共享 ChatClient 构建逻辑 |
+| `im.ttalk.agent.approval` / `im.ttalk.agent.approval.model` | 声明式审批策略（规则 / MCP 注解）、会话审批缓存、审批者链、拒绝熔断、模型审阅者（designs/runtime-borrow.md §5–§7） |
+| `im.ttalk.agent.events` | 回合生命周期事件（`:on-event` 封闭事件集）+ 零依赖指标聚合 `metrics-collector` |
+| `im.ttalk.agent.filter.compaction` | 摘要式上下文压缩（微压缩 → 摘要 → 丢最老；超长恢复重发；缺省不改写 store） |
+| `im.ttalk.agent.filter.dead-loop` | 死循环临时提醒（经 react 的 `:notes` 挂点，不落库） |
+| `im.ttalk.agent.subagent.tools` | 子代理异步工具组 spawn/send/wait/list/interrupt（数量与深度上限） |
 
 设计文档：`docs/agent-loop-concurrency-design.md`（§9 工具批次 MapReduce、§11 暂停
 持久化、§12 timeline）、`docs/hitl-timeline-design.md`、`docs/filter-chain-design.md`、

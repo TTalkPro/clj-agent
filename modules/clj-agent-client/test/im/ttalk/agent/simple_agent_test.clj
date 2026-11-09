@@ -712,3 +712,26 @@
                         (range 8))]
       (doseq [w workers] @w)
       (is (= 400 (count (memory/mem-get s "c")))))))
+
+(deftest resume-bad-decisions-keeps-pause-test
+  ;; 回归（G-02）：逐件决定漏答 / 未知 id 是调用方输入错误——在动暂停态之前就抛，
+  ;; 暂停快照原样保留，改正后可再 resume（原先 finalize 的 :error 分支会把暂停清掉）。
+  (let [p (ts/create-mock-provider
+            [{:text nil :tool-calls [{:id "c1" :name "dangerous-tool" :args {:target "a"}}
+                                     {:id "c2" :name "dangerous-tool" :args {:target "b"}}]}
+             {:text "处理完毕" :tool-calls nil}])
+        a (agent/create-agent {:provider p :model "test" :tools ts/test-plugin
+                               :callbacks (dangerous-gate)})
+        r (agent/chat a "删两个")
+        err-type (fn [ds] (try (agent/resume a "approved" {:decisions ds}) nil
+                               (catch clojure.lang.ExceptionInfo e (:type (ex-data e)))))]
+    (is (= :paused (:status r)))
+    (is (= ["c1" "c2"] (mapv #(get-in % [:tool-call :id]) (:pending-tools r))))
+    (is (= :interrupt-unknown (err-type {"c1" :approved "c2" :approved "zz" :approved})))
+    (is (agent/paused? a))
+    (is (= :interrupt-incomplete (err-type {"c1" :approved})))
+    (is (agent/paused? a))
+    (let [r2 (agent/resume a "approved" {:decisions {"c1" :approved "c2" {:decision :rejected :message "b 不能删"}}})]
+      (is (= :completed (:status r2)))
+      (is (not (agent/paused? a)))
+      (is (some #(re-find #"b 不能删" (str (:content %))) (filter msg/tool? (agent/get-history a)))))))

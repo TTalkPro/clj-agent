@@ -13,7 +13,8 @@
     (build-chat-client {:chat-model cm
                         :tools tools
                         :filters [(memory-filter store)]})"
-  (:require [im.ttalk.agent.filter :as flt]
+  (:require [clojure.string]
+            [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.memory :as mem]
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as resp]))
@@ -39,6 +40,14 @@
             (msg/assistant text))]
     (msg/with-blocks m (resp/response-replay-blocks response))))
 
+(defn notes-message
+  "本轮临时提醒 → 一条 `<system-reminder>` 包装的 user 消息（designs/runtime-borrow.md
+   §0 挂点 1）。只拼进**本次**发给模型的消息，不进 ChatMemory。"
+  [notes]
+  (msg/user (str "<system-reminder>\n"
+                 (clojure.string/join "\n\n" notes)
+                 "\n</system-reminder>")))
+
 (defn memory-filter
   "构造按 conversation-id 读写历史的 around-chat filter，闭包绑定 store。
 
@@ -56,7 +65,13 @@
                (mem/mem-add store cid (mapv msg/normalize (flt/req-messages req)))  ;; 存 delta
                ;; 展开历史 → 下游；响应侧走 fmap（同步下即恒等展开，
                ;; :chat 终端将来异步化时同一份代码不用改，见 §2.6.4）
-               (flt/fmap (chain (flt/with-messages req (mem/mem-get store cid)))
+               ;; 临时提醒（react 钉在 context 的 :loop/notes）接在**展开后**的历史末尾：
+               ;; delta 已在上一句落库，这条提醒只活在本次请求里
+               (flt/fmap (chain (flt/with-messages
+                                  req
+                                  (let [history (mem/mem-get store cid)
+                                        notes (seq (:loop/notes (flt/req-context req)))]
+                                    (cond-> (vec history) notes (conj (notes-message notes))))))
                          (fn [resp]
                            (mem/mem-add store cid [(response->neutral (:response resp))])
                            resp)))

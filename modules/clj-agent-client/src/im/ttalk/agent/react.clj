@@ -24,6 +24,7 @@
             [im.ttalk.agent.model.message :as msg]
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.memory :as memory]
+            [im.ttalk.agent.filter.memory :as memory-filter]
             [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.tool-calling-manager :as tool-calling-manager]
             [taoensso.timbre :as log])
@@ -98,12 +99,50 @@
               (recur (inc attempt)))
           resp)))))
 
+(defn emit-event!
+  "发一个生命周期事件（designs/runtime-borrow.md §11）。`callbacks` 里没有
+   `:on-event` 就什么都不做；出口抛的异常吞掉（观察者不许打断回合）。
+   事件带 `:type` `:ts`，以及回调元数据里的 `:conversation-id` / `:run-id`。"
+  [callbacks type m]
+  (when-let [f (:on-event callbacks)]
+    (try
+      (f (merge {:type type :ts (System/currentTimeMillis)}
+                (select-keys (:metadata callbacks) [:conversation-id :run-id])
+                m))
+      (catch Throwable _ nil))))
+
+(defn- pause-decision?
+  "gate 决策是不是「暂停等审批」：`:pause` 或带信息的 `{:pause {...}}`（R-05）。"
+  [d]
+  (or (= :pause d) (and (map? d) (contains? d :pause))))
+
+(declare invoke-one*)
+
 (defn- invoke-one
   "执行单个 tool call（含 gate reject 分支）。异常折为错误结果，不逃逸。
    返回 {:tc tc :value str (:writes {k v}) (:error {:class :message})
          (:rejected? true)}——
    错误/拒绝的结果没有 :writes，reduce 时自动跳过（单工具事务性）；
-   :error 携带故障类别，供屏障处策略路由（S2）。"
+   :error 携带故障类别，供屏障处策略路由（S2）。
+
+   `obs`：`{:on-tool-result f :on-event f :index i :metadata m}`——观察挂点，
+   `:tool/started` / `:tool/finished` 事件在这里成对发出（R-11）。"
+  [chat-client tc decision tool-context obs]
+  (let [t0 (System/currentTimeMillis)
+        ev {:index (:index obs) :call-id (:id tc) :name (:name tc)}]
+    (emit-event! obs :tool/started (assoc ev :args (:args tc)))
+    (let [r (invoke-one* chat-client tc decision tool-context (:on-tool-result obs))]
+      (emit-event! obs :tool/finished
+                   (cond-> (assoc ev
+                                  :status (cond (:rejected? r) :rejected
+                                                (:replied? r)  :replied
+                                                (:error r)     :error
+                                                :else          :ok)
+                                  :elapsed-ms (- (System/currentTimeMillis) t0))
+                     (:error r) (assoc :error-class (get-in r [:error :class]))))
+      r)))
+
+(defn- invoke-one*
   [chat-client tc decision tool-context on-tool-result]
   (cond
     (= :reject decision)
@@ -169,8 +208,8 @@
 
 (defn- run-inline
   "map 阶段：按序内联执行，**不构造 Future**。"
-  [chat-client tool-calls decisions tool-context on-tool-result]
-  (mapv (fn [tc d] (invoke-one chat-client tc d tool-context on-tool-result))
+  [chat-client tool-calls decisions tool-context obs]
+  (mapv (fn [tc d] (invoke-one chat-client tc d tool-context obs))
         tool-calls decisions))
 
 (defn- run-on-executor
@@ -185,12 +224,12 @@
    包成 ExecutionException（普通 Exception）。invoke-one 忠实重抛的 OOM 若被包
    裹会逃逸类型随引擎而变（串行=裸 OOM，并发=EE），违反 §3「引擎不改变可观察语义」。
    此处拆 cause 原样重抛。"
-  [^ExecutorService executor chat-client tool-calls decisions tool-context on-tool-result]
+  [^ExecutorService executor chat-client tool-calls decisions tool-context obs]
   (let [futs (mapv (fn [tc d]
                      (.submit executor
                               ^Callable
                               (bound-fn* (fn [] (invoke-one chat-client tc d tool-context
-                                                            on-tool-result)))))
+                                                            obs)))))
                    tool-calls decisions)]
     (mapv (fn [^java.util.concurrent.Future f]
             (try (.get f)
@@ -240,13 +279,14 @@
    executor 非 nil → 并行提交，但下列两种情形仍退化为内联：
    - 批内任一工具声明 :serial（整批退化按序，声明级契约，manager 不得违反）
    - 批内只有一个调用（并行无收益）"
-  [executor chat-client tool-calls gate tool-context init-records on-tool-result]
-  (let [decisions (gate-decisions gate tool-calls)
+  [executor chat-client tool-calls gate tool-context init-records obs]
+  (let [obs       (if (map? obs) obs {:on-tool-result obs})
+        decisions (gate-decisions gate tool-calls)
         serial?   (boolean (some #(registry/serial-tool? chat-client (:name %)) tool-calls))
         results   (if (or (nil? executor) serial? (<= (count tool-calls) 1))
-                    (run-inline chat-client tool-calls decisions tool-context on-tool-result)
+                    (run-inline chat-client tool-calls decisions tool-context obs)
                     (run-on-executor executor chat-client tool-calls decisions
-                                     tool-context on-tool-result))]
+                                     tool-context obs))]
     (collect-batch chat-client tool-context init-records results)))
 
 (defn execute-batch
@@ -295,6 +335,12 @@
 ;;; 「怎么把这批跑完」，不决定「跑的是什么」。
 ;;; ============================================================
 
+(defn- batch-obs
+  "从 `execute-tool-calls` 的 opts 摘出观察挂点（`:on-tool-result` / `:on-event` /
+   `:index` / `:metadata`）。自实现的 TCM 只传 `:on-tool-result` 也照常工作。"
+  [opts]
+  (select-keys opts [:on-tool-result :on-event :index :metadata]))
+
 (defn- check-timeout-opt!
   [t]
   (tool/check-timeout! "ToolCallingManager" t))
@@ -308,7 +354,7 @@
                            (:gate opts)
                            (:tool-context opts)
                            (:records opts)
-                           (:on-tool-result opts))))))
+                           (batch-obs opts))))))
 
 (defn virtual-thread-tool-calling-manager
   "并发引擎：每调用一根虚拟线程，尊重 :serial 声明。
@@ -339,7 +385,7 @@
                            (:gate opts)
                            (:tool-context opts)
                            (:records opts)
-                           (:on-tool-result opts))))))
+                           (batch-obs opts))))))
 
 (defn sequential-tool-calling-manager
   "**缺省引擎**：每个工具按调用序在调用方线程执行，无并发。
@@ -387,7 +433,7 @@
                            (:gate opts)
                            (:tool-context opts)
                            (:records opts)
-                           (:on-tool-result opts)))))
+                           (batch-obs opts)))))
 
   Closeable
   (close [_] (.shutdown pool)))
@@ -599,6 +645,48 @@
            (when (seq text) text))]
     (msg/with-blocks m (response/response-replay-blocks response))))
 
+(defn- add-usage
+  "累计两份归一化 usage（数值键相加）。"
+  [a b]
+  (cond (nil? b) a (nil? a) b :else (merge-with #(if (and (number? %1) (number? %2)) (+ %1 %2) %2) a b)))
+
+(defn- response->plain-assistant
+  "不带工具调用的响应 → 中立 assistant 消息（含不透明回放块）。pause_turn 续跑在
+   没有 memory filter 时要把它原样带回下一轮。"
+  [response]
+  (msg/with-blocks (msg/assistant (response/response-text response))
+                   (response/response-replay-blocks response)))
+
+(defn- default-pause-turn?
+  "pause_turn 续跑判据（R-13，同 Keelson `PauseTurn.CanResume`）：finish-reason 为
+   `:pause`、且有可回放的内容（文本或不透明块）。没内容就续不了——服务端没东西可接。"
+  [response]
+  ;; 主判据用 provider 侧的 `response/pause-turn-resumable?`（P-10：有回放块、无本地工具调用）；
+  ;; 迭代上限由本循环自己的预算管。补一条：只有文本、没有块的 :pause 也续（服务端可接着写）。
+  (or (response/pause-turn-resumable? response)
+      (and (= :pause (response/response-finish-reason response))
+           (not (response/has-tool-calls? response))
+           (boolean (seq (response/response-text response))))))
+
+(defn- pause-turn?
+  "可由 `:settings :pause-turn-fn` 覆盖（provider 若有更准的判定可接进来）。"
+  [chat-client response]
+  ((or (get-in chat-client [:settings :pause-turn-fn]) default-pause-turn?) response))
+
+(defn- stop-result
+  "工具侧请求停回合（context 里的 `:loop/stop`）→ `:completed` 收尾。
+   本批工具结果经 `:direct-messages` 补落库（同 return-direct：没有下一次 invoke-chat
+   替它落库，不补就留悬空 tool_use）。"
+  [context messages records]
+  (let [{:keys [reason by]} (:loop/stop context)]
+    {:status :completed
+     :response (response/make-response :text (str reason) :finish-reason :stop)
+     :tool-context (dissoc context :loop/stop)
+     :tool-calls-made records
+     :direct-messages messages
+     :stopped-by (or by :tool)
+     :stop-reason reason}))
+
 (defn- run-tool-loop*
   "统一工具循环：从 delta 起步，驱动 LLM ↔ 工具，直到文本响应或暂停。
 
@@ -626,6 +714,14 @@
    （逐字等价于改造前），异步下自动变成续延。设计见
    docs/async-chat-model-design.md §7。
 
+   **designs/runtime-borrow.md 的新增**（全部缺省无感）：
+   - IterationRequest 的 `:notes` → 本轮临时提醒（不落库，§0 挂点 1）；
+   - `:continue` 结果带 `:calls` / `:errors`（本轮 tool-call 与失败）；
+   - 批后 context 里有 `:loop/stop` → 以 `:completed` 收尾（§0 挂点 2）；
+   - `pause_turn` 响应原样续跑（R-13）；
+   - `:on-event` 生命周期事件（R-11）；
+   - gate 可返回 `{:pause {...}}`，暂停结果带 `:pending-tools`（§15）。
+
    返回:
    {:status :completed :response r :tool-context c :tool-calls-made [...]}
    {:status :paused    :loop-state {...} :pending-tool {...} :tool-context c}
@@ -636,30 +732,68 @@
   (let [token (:cancel-token chat-opts)
         meta (or (:metadata callbacks) {})
         on-tool-result (:on-tool-result callbacks)
+        usage* (or (::usage callbacks) (atom nil))
+        memory? (some? (chat-client-memory-store chat-client))
         remaining* (volatile! remaining)
         records*   (volatile! records)
         iteration-terminal
         (fn [ireq]
           (let [delta (:messages ireq)
-                tctx  (:context ireq)]
+                tctx  (:context ireq)
+                index (:index ireq)
+                notes (seq (:notes ireq))]
             (if (streaming/cancelled? token)
               {:status :cancelled :tool-context tctx :tool-calls-made @records*}
-              (do
+              (let [;; 临时提醒：有 memory filter 时钉在本次请求的 context 上，由它在展开历史
+                    ;; **之后**追加（不落库）；没有就直接拼进本轮 delta（本就不落库）
+                    call-delta (if (and notes (not memory?))
+                                 (conj (vec delta) (memory-filter/notes-message notes))
+                                 delta)
+                    call-ctx (cond-> tctx (and notes memory?) (assoc :loop/notes (vec notes)))
+                    t0 (System/currentTimeMillis)
+                    first-tok (volatile! nil)
+                    call-opts (cond-> (assoc chat-opts :context call-ctx)
+                                (and (:on-token chat-opts) (:on-event callbacks))
+                                (update :on-token (fn [f] (fn [tok]
+                                                            (when-not @first-tok
+                                                              (vreset! first-tok (System/currentTimeMillis)))
+                                                            (f tok)))))]
+                (emit-event! callbacks :iteration/started {:index index})
                 ;; 每次 LLM 调用前触发（观察用，不影响流程）
-                (cb/invoke callbacks :on-llm-call delta meta)
+                (cb/invoke callbacks :on-llm-call call-delta meta)
                 ;; 唯一的异步点：LLM 调用。其后整段（工具批次、屏障、收尾判定）
                 ;; 是 fmap 的续延——同步下当场执行，异步下在 LLM 完成时执行。
                 (flt/fmap
-                 (chat-fn chat-client delta (assoc chat-opts :context tctx) token)
+                 (chat-fn chat-client call-delta call-opts token)
                  (fn [{:keys [response context]}]
-                  (let [tctx context
-                      calls (response/response-tool-calls response)]
+                  (let [tctx (dissoc context :loop/notes)
+                        calls (response/response-tool-calls response)
+                        usage (response/response-usage response)]
+                  (when (:on-event callbacks)
+                    (let [total (swap! usage* add-usage usage)]
+                      (emit-event! callbacks :llm/finished
+                                   (cond-> {:index index
+                                            :elapsed-ms (- (System/currentTimeMillis) t0)
+                                            :usage usage
+                                            :finish-reason (response/response-finish-reason response)}
+                                     @first-tok (assoc :ttft-ms (- @first-tok t0))))
+                      (emit-event! callbacks :usage {:index index :round usage :total total})))
                   ;; 每次 LLM 返回后触发（观察用，不影响流程）
                   (cb/invoke callbacks :on-llm-result response meta)
                   (cond
                     (streaming/cancelled? token)
                     {:status :cancelled :response response
                      :tool-context tctx :tool-calls-made @records*}
+
+                    ;; R-13 pause_turn：服务端工具跑久了先交回来——原样续跑，不加 user 消息
+                    (and (empty? calls) (pause-turn? chat-client response))
+                    (if (<= @remaining* 0)
+                      {:status :completed :response response
+                       :tool-context tctx :tool-calls-made @records*}
+                      (do (vswap! remaining* dec)
+                          {:status :continue
+                           :messages (if memory? [] [(response->plain-assistant response)])
+                           :context tctx :calls [] :errors [] :pause-turn true}))
 
                     (empty? calls)
                     {:status :completed :response response
@@ -680,23 +814,28 @@
                                        (into {} (mapv #(vector (:id %) (gate %)) calls)))
                           cached-gate (when gate-cache
                                         (fn [tc] (get gate-cache (:id tc) :proceed)))
-                          paused-call (when gate-cache
-                                        (first (filter #(= :pause (get gate-cache (:id %) :proceed)) calls)))]
+                          paused-calls (when gate-cache
+                                         (filterv #(pause-decision? (get gate-cache (:id %) :proceed)) calls))
+                          paused-call (first paused-calls)]
                       (cond
                         (some? paused-call)
-                        {:status :paused
-                         :pause-reason (str "需要审批: " (:name paused-call))
-                         ;; 批次尚未执行，故这里**预扣**一次：resume 时执行它就是那一次消耗。
-                         ;; :loop-state 只放可 EDN 往返的值（不放 record）——理由同
-                         ;; env-pause 的 docstring；护栏是 loop-state-edn-roundtrip-test
-                         :loop-state {:tool-calls calls :remaining (dec @remaining*)
-                                      :records @records*
-                                      :pending-id (:id paused-call)}   ;; resume payload 定位用
-                         :pending-tool {:name (:name paused-call)
-                                        :args (:args paused-call)
-                                        :tool-call paused-call}
-                         :tool-calls-made @records*
-                         :tool-context tctx}
+                        (let [pending (fn [tc]
+                                        (let [d (get gate-cache (:id tc))]
+                                          (cond-> {:name (:name tc) :args (:args tc) :tool-call tc}
+                                            (map? d) (assoc :approval (:pause d)))))]
+                          {:status :paused
+                           :pause-reason (str "需要审批: " (clojure.string/join ", " (map :name paused-calls)))
+                           ;; 批次尚未执行，故这里**预扣**一次：resume 时执行它就是那一次消耗。
+                           ;; :loop-state 只放可 EDN 往返的值（不放 record）——理由同
+                           ;; env-pause 的 docstring；护栏是 loop-state-edn-roundtrip-test
+                           :loop-state {:tool-calls calls :remaining (dec @remaining*)
+                                        :records @records*
+                                        :pending-id (:id paused-call)   ;; resume payload 定位用
+                                        :pending-ids (mapv :id paused-calls)}
+                           :pending-tool (pending paused-call)
+                           :pending-tools (mapv pending paused-calls)
+                           :tool-calls-made @records*
+                           :tool-context tctx})
 
                         (<= @remaining* 0)
                         (throw (ex-info "工具调用循环次数超过上限（max-iterations）"
@@ -708,11 +847,15 @@
                         (let [batch-opts {:gate cached-gate
                                           :tool-context tctx
                                           :records @records*
-                                          :on-tool-result on-tool-result}
+                                          :on-tool-result on-tool-result
+                                          :on-event (:on-event callbacks)
+                                          :metadata meta
+                                          :index index}
                               {:keys [messages records context errors]}
                               (if-let [tm (:tool-manager chat-client)]
                                 (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
-                                (execute-batch chat-client calls cached-gate tctx @records* on-tool-result))
+                                (execute-batch-via nil chat-client calls cached-gate tctx @records*
+                                                   (batch-obs batch-opts)))
                               ;; 批次真跑了 → 当场记账。filter 重入会再跑一次，也再记一次。
                               _ (vreset! records* records)
                               _ (vswap! remaining* dec)
@@ -730,6 +873,10 @@
                             (seq env-errors)
                             (env-pause env-errors messages records @remaining* context)
 
+                            ;; 工具侧请求停回合（tool-guard / 拒绝熔断，§0 挂点 2）
+                            (:loop/stop context)
+                            (stop-result context messages records)
+
                             ;; return direct：结果即最终答案，不再回灌 LLM。
                             ;; :direct-messages 交给调用方落库——正常路径下工具结果是靠
                             ;; **下一次 invoke-chat** 经 memory filter 落库的，这里没有
@@ -743,11 +890,12 @@
                              :return-direct true}
 
                             :else
-                            (let [messages (if (chat-client-memory-store chat-client)
-                                             messages
-                                             (into [(response->assistant-message response)]
-                                                   messages))]
-                              {:status :continue :messages messages :context context})))))))))))))
+                            (let [next-delta (if memory?
+                                               messages
+                                               (into [(response->assistant-message response)]
+                                                     messages))]
+                              {:status :continue :messages next-delta :context context
+                               :calls calls :errors errors})))))))))))))
         iteration-chain ((:iteration (flt/filter-hooks chat-client)) iteration-terminal)]
     (drive iteration-chain remaining* delta tctx)))
 
@@ -785,6 +933,16 @@
       (dissoc result :direct-messages))
     result))
 
+(defn- emit-turn-finished!
+  "`:turn/finished`（R-11）：正常结果带 :status，异常带 :status :error 与 :error 消息。"
+  [callbacks t0 result ^Throwable t]
+  (emit-event! callbacks :turn/finished
+               (cond-> {:status (if t :error (:status result))
+                        :elapsed-ms (- (System/currentTimeMillis) t0)
+                        :usage (some-> (::usage callbacks) deref)}
+                 (:stopped-by result) (assoc :stopped-by (:stopped-by result))
+                 t (assoc :error (or (.getMessage t) (str (class t)))))))
+
 (defn- invoke*
   "invoke / invoke-async 的**唯一**实现；两者只差一个 `run`（跑法）。
 
@@ -810,7 +968,8 @@
         max-iter (or (:max-iterations opts)
                      (get-in chat-client [:settings :max-tool-iterations])
                      default-max-iterations)
-        callbacks (or (:callbacks opts) {})
+        callbacks (assoc (or (:callbacks opts) {}) ::usage (atom nil))
+        t0 (System/currentTimeMillis)
         ;; turn 链：包整个工具循环（每 turn 一次；filter 可改写 :messages/:context、
         ;; 递归重入——每次重入获得全新 max-iterations 预算）。设计见 §14。
         ;; 异步 loop-fn 直接返回 deferred，turn filter 因此**真的**拿到 deferred
@@ -825,6 +984,7 @@
                                      {:on-env-error (or (:on-env-error opts) :proceed)})
                             (flt/fmap #(persist-direct-messages! % chat-client conv-id))))
         turn-chain ((:turn (flt/filter-hooks chat-client)) turn-terminal)]
+    (emit-event! callbacks :turn/started {:resumed? false})
     ;; heal 也走 run：异步模式下它是 store IO，不该占住调用线程
     (flt/fcatch
       (-> (run (fn [] (heal-dangling-tool-calls! store conv-id)))
@@ -832,9 +992,11 @@
           (flt/fmap (fn [result]
                       (when (and ephemeral? store (= :completed (:status result)))
                         (memory/mem-clear store conv-id))
+                      (emit-turn-finished! callbacks t0 result nil)
                       result)))
       (fn [t]
         (when (and ephemeral? store) (memory/mem-clear store conv-id))
+        (emit-turn-finished! callbacks t0 nil t)
         (throw t)))))
 
 (defn invoke
@@ -975,7 +1137,10 @@
 (defn- resume*
   "resume / resume-async 的唯一实现；两者只差 `run` / `loop-fn` 两个注入项，见 `invoke*`。"
   [chat-client loop-state decision opts run loop-fn]
-  (let [continuation
+  (let [opts (update opts :callbacks #(assoc (or % {}) ::usage (atom nil)))
+        callbacks (:callbacks opts)
+        t0 (System/currentTimeMillis)
+        continuation
         (fn []
           (case (:phase loop-state)
             :env-retry          (resume-env chat-client loop-state decision opts run loop-fn)
@@ -1001,7 +1166,11 @@
                        ;; 延续与重入都可能撞上 return-direct 收尾
                        (flt/fmap #(persist-direct-messages! % chat-client (ctx/conversation-id tctx)))))
         turn-chain ((:turn (flt/filter-hooks chat-client)) terminal)]
-    (turn-chain {:resume? true :messages nil :context tctx})))
+    (emit-event! callbacks :turn/started {:resumed? true})
+    (flt/fcatch
+      (flt/fmap (turn-chain {:resume? true :messages nil :context tctx})
+                (fn [result] (emit-turn-finished! callbacks t0 result nil) result))
+      (fn [t] (emit-turn-finished! callbacks t0 nil t) (throw t)))))
 
 (defn resume
   "从 paused 的 loop-state 继续工具循环。**同步**：阻塞到出结果。
@@ -1057,50 +1226,130 @@
         tctx (or (:context opts) (ctx/create))]
     (-> (run #(resume-approval-batch chat-client loop-state decision opts))
         (flt/fbind (fn [{:keys [messages records context]}]
-                     (loop-fn chat-client messages remaining records context
-                              gate
-                              (build-chat-opts chat-client opts)
-                              callbacks
-                              {:on-env-error (or (:on-env-error opts) :proceed)}))))))
+                     (if (:loop/stop context)
+                       ;; 续跑那一批里有工具请求停回合（失败保护 / 拒绝熔断）
+                       (stop-result context messages records)
+                       (loop-fn chat-client messages remaining records context
+                                gate
+                                (build-chat-opts chat-client opts)
+                                callbacks
+                                {:on-env-error (or (:on-env-error opts) :proceed)})))))))
+
+(defn- decision-kw
+  "决定词归一：接受 keyword 或字符串（JSON 过来的是字符串）。"
+  [d]
+  (case (if (keyword? d) (name d) (str d))
+    ("approved" "approve" "allow") :approved
+    "reply" :reply
+    :rejected))
+
+(defn- per-call-decisions
+  "payload `:decisions` → {call-id(字符串) {:decision kw :args? :message?}}（§15）。"
+  [payload]
+  (into {}
+        (map (fn [[k v]]
+               (let [v (if (map? v) v {:decision v})]
+                 [(if (keyword? k) (name k) (str k))
+                  (assoc v :decision (decision-kw (:decision v)))])))
+        (:decisions payload)))
+
+(defn check-decisions!
+  "校验 resume payload 的逐件决定 `:decisions`（§15）：每条 :reply 都带 :message，
+   且**答全、答对**——点名了不在待审批里的 id → ex-info `:interrupt-unknown`；
+   有待审批的调用没答 → `:interrupt-incomplete`。没有 `:decisions` 时什么都不做。
+   旧暂停态没有 :pending-ids 时以 [:pending-id] 为准。
+
+   公开出来，是为了让调用方（simple-agent 的 resume）在**动暂停态之前**先校验：
+   答错是调用方的输入错误，不该把暂停快照（连同整批待审批）清掉。"
+  [loop-state payload]
+  (let [{:keys [pending-id pending-ids]} loop-state
+        per (per-call-decisions payload)]
+    (doseq [[id d] per]
+      (when (and (= :reply (:decision d)) (not (string? (:message d))))
+        (throw (ex-info (str "调用 " id " 的 :reply 需要 :message") {:decision d}))))
+    (when (seq per)
+      (let [pending (set (or (seq pending-ids) (when pending-id [pending-id])))
+            unknown (remove pending (keys per))
+            missing (remove (set (keys per)) pending)]
+        (when (seq unknown)
+          (throw (ex-info (str "resume :decisions 里有未知的调用 id：" (vec unknown))
+                          {:type :interrupt-unknown :unknown (vec unknown) :pending (vec pending)})))
+        (when (seq missing)
+          (throw (ex-info (str "resume :decisions 漏答了待审批调用：" (vec missing))
+                          {:type :interrupt-incomplete :missing (vec missing) :pending (vec pending)})))))
+    nil))
 
 (defn- resume-approval-batch
   "审批延续的**阻塞段**：校验 payload、组 resume-gate、执行工具批次。
-   返回 {:messages :records :context}。"
+   返回 {:messages :records :context}。
+
+   逐件决定（§15，为 AG-UI「一次暂停多条审批 / 审批时改参数」预留）：payload
+   `:decisions {call-id {:decision :approved|:rejected|:reply :args? :message?}}`
+   点名的调用按各自决定（`:approved` + `:args` = 改参数后批准，**整体替换不合并**）；
+   给了 `:decisions` 就必须覆盖全部待审批调用（漏答抛 `:interrupt-incomplete`、
+   未知 id 抛 `:interrupt-unknown`）。不给 `:decisions` 时按顶层 decision——与今天逐字相同。"
   [chat-client loop-state decision opts]
-  (let [{:keys [tool-calls records pending-id]} loop-state
+  (let [{:keys [tool-calls records pending-id pending-ids]} loop-state
         payload (:payload opts)
+        per (per-call-decisions payload)
         _ (when (and (= :reply decision) (not (string? (:message payload))))
             (throw (ex-info ":reply 需要 opts :payload {:message \"...\"}"
                             {:payload payload})))
         _ (when (and (= :reply decision) (nil? pending-id))
             (throw (ex-info "loop-state 缺少 :pending-id（旧版本暂停态不支持 :reply）"
                             {})))
-        ;; 编辑后批准：替换 pending 工具的参数
-        tool-calls (if-let [new-args (and (= :approved decision) (:args payload))]
-                     (mapv #(if (= pending-id (:id %)) (assoc % :args new-args) %)
-                           tool-calls)
-                     tool-calls)
+        _ (check-decisions! loop-state payload)
+        ;; 编辑后批准：替换参数（顶层 :args 作用于 pending-id；逐件 :args 作用于各自）
+        tool-calls (mapv (fn [tc]
+                           (let [d (get per (:id tc))]
+                             (cond
+                               (and d (= :approved (:decision d)) (contains? d :args))
+                               (assoc tc :args (:args d))
+
+                               (and (nil? d) (= :approved decision) (= pending-id (:id tc))
+                                    (:args payload))
+                               (assoc tc :args (:args payload))
+
+                               :else tc)))
+                         tool-calls)
         tctx (or (:context opts) (ctx/create))
         gate (:tool-gate opts)
         callbacks (or (:callbacks opts) {})
         on-tool-result (:on-tool-result callbacks)
-        resume-gate
+        pending-set (when (seq pending-ids) (set pending-ids))
+        base-gate
         (case decision
           :approved (constantly :proceed)
           :reply    (fn [tc] (if (= pending-id (:id tc))
                                {:reply (:message payload)}
                                :proceed))
-          ;; 缺省 :rejected：gate 判敏感的拒绝（可带理由）
-          (fn [tc] (if (and gate (= :pause (gate tc)))
+          ;; 缺省 :rejected：当时被叫停的那几件拒绝（可带理由）；旧暂停态没有
+          ;; :pending-ids 时回落到「gate 判暂停的」
+          (fn [tc] (if (if pending-set
+                         (contains? pending-set (:id tc))
+                         (and gate (pause-decision? (gate tc))))
                      (if-let [m (:message payload)] {:reject m} :reject)
-                      :proceed)))
+                     :proceed)))
+        resume-gate
+        (if (empty? per)
+          base-gate
+          (fn [tc]
+            (if-let [{d :decision m :message} (get per (:id tc))]
+              (case d
+                :approved :proceed
+                :reply {:reply m}
+                (if m {:reject m} :reject))
+              (base-gate tc))))
         response (response/make-response :tool-calls tool-calls)
         batch-opts {:gate resume-gate
                     :tool-context tctx
                     :records records
-                    :on-tool-result on-tool-result}
+                    :on-tool-result on-tool-result
+                    :on-event (:on-event callbacks)
+                    :metadata (:metadata callbacks)}
         {:keys [messages records context]}
         (if-let [tm (:tool-manager chat-client)]
           (tool-calling-manager/execute-tool-calls tm chat-client response batch-opts)
-          (execute-batch chat-client tool-calls resume-gate tctx records on-tool-result))]
+          (execute-batch-via nil chat-client tool-calls resume-gate tctx records
+                             (batch-obs batch-opts)))]
     {:messages messages :records records :context context}))

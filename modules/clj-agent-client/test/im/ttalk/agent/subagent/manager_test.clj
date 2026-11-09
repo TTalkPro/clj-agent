@@ -258,3 +258,19 @@
         (is (= [0 1] (mapv #(:attempt (second %)) (events-of log :made))))
         (is (= 2 (count (events-of log :start))))
         (is (= 2 (count (events-of log :settle))))))))
+
+(deftest resume-passes-payload-and-chat-opts-separately-test
+  (testing "resume! 用 4-arity 调 simple-agent/resume：payload 原样、:chat-opts 进 opts（回归：曾把 {:payload … :on-token …} 整个当 payload）"
+    (require 'im.ttalk.agent.simple-agent)
+    (let [seen (atom nil)
+          on-tok (fn [_])]
+      (with-redefs [im.ttalk.agent.subagent.manager/do-run
+                    (fn [_ _] {:suspended {:agent ::agent :reason "审批"}})]
+        (let [{id :ok} (mgr/spawn! {:prompt "x"})]
+          (mgr/await! id 5000)
+          (is (= :suspended (wait-status id :suspended 2000)))
+          (with-redefs-fn {(resolve 'im.ttalk.agent.simple-agent/resume)
+                           (fn [& args] (reset! seen (vec args)) {:status :completed :text "ok"})}
+            (fn []
+              (is (= {:ok "ok"} (mgr/resume! id :approved {:args {:path "/safe"}} {:chat-opts {:on-token on-tok}})))))
+          (is (= [::agent :approved {:args {:path "/safe"}} {:on-token on-tok}] @seen)))))))

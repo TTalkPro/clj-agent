@@ -79,13 +79,18 @@
   (let [[ctx stripped] (strip-unserializable (:tool-context paused-result))]
     (when (seq stripped)
       (log/warn "暂停快照剥离了不可序列化的 context key（恢复时请自行注回）:" stripped))
-    {:version         1
+    (cond->
+     {:version         1
      :conversation-id conv-id
      :paused-at       (System/currentTimeMillis)
      :pause-reason    (:pause-reason paused-result)
      :pending-tool    (:pending-tool paused-result)
      :loop-state      (:loop-state paused-result)
-     :tool-context    ctx}))
+     :tool-context    ctx}
+    ;; designs/runtime-borrow.md §5 §15：一次暂停的全部待审批调用、会话审批缓存快照
+    ;; （都是框架构造的纯 EDN 数据，同 loop-state 不走剥离）
+    (:pending-tools paused-result)     (assoc :pending-tools (:pending-tools paused-result))
+    (:session-approvals paused-result) (assoc :session-approvals (:session-approvals paused-result)))))
 
 ;;; ============================================================
 ;;; In-memory 实现（测试 / 单进程）

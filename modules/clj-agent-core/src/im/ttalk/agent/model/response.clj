@@ -386,3 +386,61 @@
   "检查是否正常停止"
   [resp]
   (= :stop (response-finish-reason resp)))
+
+;;; ============================================================
+;;; 可靠性元数据（designs/provider-reliability.md §2 / §6 / §10）
+;;; ============================================================
+
+(defn response-attempts
+  "这条响应经 ChatModel 重试层一共试了几次（含第一次）；没经过（FnChatModel 等）→ nil。"
+  [resp]
+  (:attempts resp))
+
+(defn response-rate-limit
+  "这次响应抄下来的限流快照（OpenAI x-ratelimit-* / Anthropic anthropic-ratelimit-* 折成同一形状）：
+   {:requests-limit :requests-remaining :requests-reset :tokens-limit :tokens-remaining :tokens-reset}，
+   头缺哪格就没有哪格；provider 没给任何限流头 → nil。"
+  [resp]
+  (:rate-limit resp))
+
+(def ^:private conclusive-empty-reasons
+  "这些收尾原因说明「没吐字是服务端刻意的结论」（安全截断 / 长度截断 / 暂停续跑 / 拒答），不算空补全。"
+  #{:content-filter :max-tokens :pause :refusal})
+
+(defn empty-completion?
+  "整个补全是不是空的（designs/provider-reliability.md §2，Keelson `RetryingChatClient.IsEmptyCompletion`）。
+
+   只认真正会进历史的几类为「有内容」：非空白文本、非空白推理、工具调用、回放块
+   （thinking / 服务端工具块）、原始响应里的 audio。usage / finish-reason 不是回答。
+   收尾原因是厂商结论（content-filter / max-tokens / pause / refusal）的不算空。"
+  [resp]
+  (let [raw (response-raw resp)]
+    (not (or (not (str/blank? (response-text resp)))
+             (not (str/blank? (response-reasoning resp)))
+             (has-tool-calls? resp)
+             (seq (:data (response-replay-blocks resp)))
+             (and (map? raw) (some? (get-in raw [:choices 0 :message :audio])))
+             (contains? conclusive-empty-reasons (response-finish-reason resp))))))
+
+(defn pause-turn?
+  "这一轮是不是被服务端暂停了（Anthropic stop_reason pause_turn → :pause）。"
+  [resp]
+  (= :pause (response-finish-reason resp)))
+
+(defn pause-turn-resumable?
+  "pause_turn 能不能原样续跑（Keelson `PauseTurn.CanResume`）：
+
+   - finish-reason 是 :pause；
+   - 没有要本地执行的工具调用（有的话走正常工具循环）；
+   - 有回放块（server_tool_use 等不透明块）——没有块就没有可原样接回历史的东西，续不了；
+   - 不是最后一轮（`last-iteration?` 为真时不续，以 :pause 正常收尾）。
+
+   续跑做法（react 侧）：把这条 assistant 消息（含 :blocks）原样追加到历史末尾，**不加 user 消息**，
+   再请求一次；计入迭代预算。见 designs/provider-reliability.md §10.4。"
+  ([resp] (pause-turn-resumable? resp false))
+  ([resp last-iteration?]
+   (boolean
+     (and (not last-iteration?)
+          (pause-turn? resp)
+          (not (has-tool-calls? resp))
+          (seq (:data (response-replay-blocks resp)))))))

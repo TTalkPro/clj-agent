@@ -47,7 +47,10 @@ core 对记忆与循环零感知。
 | `im.ttalk.agent.model.embedding` | `IEmbeddingProvider` 协议（**可选**能力，无 Object 兜底 → `satisfies?` 可信） |
 | `im.ttalk.agent.model.request` | `ChatRequest`（消息 + 选项）—— 发往 ChatModel 的那一段 |
 | `im.ttalk.agent.chat-model` | `IChatModel` 协议 + `DefaultChatModel` / `FnChatModel`；`create-chat-model`；**异步**：可选协议 `IAsyncChatModel` + `call-async*` / `stream-call-async*`（`satisfies?` 探测，否则虚拟线程兜底） |
-| `im.ttalk.agent.retry` | 通用重试（判据取自 canonical error 的 `:retryable?`），无外部依赖；`run` / `run-async` 共用同一套判据与退避曲线 |
+| `im.ttalk.agent.retry` | 通用重试（判据取自 canonical error 的 `:retryable?`），无外部依赖；`run` / `run-async` 共用同一套判据与退避曲线；三格预算（`:max-retries` / 空补全 `:empty-retries` / 流式首 token 前 `:stream-retries`）+ `:attempts` 记录 |
+| `im.ttalk.agent.chat-model.fallback` | 主备模型切换 `fallback-chat-model`（按错误类型判定、流式首 token 前切、跨 provider 剪 `:blocks`、备用惰性构造、`report` 报账）；`from-registry` 按模型注册表展开备用链 |
+| `im.ttalk.agent.admission` | 并发准入票据池：按键分池、退避不占票（经 `chat-model/with-admission` 每次尝试取票）、`acquire-async` 不占线程 |
+| `im.ttalk.agent.model.spec` | ModelSpec 元数据（上下文窗口 / 输出上限 / thinking 档位 / vision / fallbacks）与实例注册表；只有结构与查询 API，不内置模型表 |
 | `im.ttalk.agent.tool-calling-manager` | `ToolCallingManager` 工具批次执行协议 |
 
 **ChatClient 原语**
@@ -62,6 +65,8 @@ core 对记忆与循环零感知。
 | `im.ttalk.agent.async` | 异步适配层：`IChainResult` 的 CompletionStage 实现 + 虚拟线程入口 `vthread` + Ring 回调 sink `on-complete` / `join`（给 `react/invoke-async`、`agent/chat-async` 用） |
 | `im.ttalk.agent.context` | Context 状态管理 |
 | `im.ttalk.agent.streaming` | 流式取消令牌 |
+| `im.ttalk.agent.tokens` | token 粗估（压缩 / 截断 / 审阅证据预算共用口径，零依赖） |
+| `im.ttalk.agent.tool-args` | 按 JSON Schema 完整校验工具参数（一次报全、带路径；`deftool` 调用前自动执行） |
 
 **对齐 Spring AI 2.0 Advisor 的内置 filter（各自独立命名空间）**
 
@@ -70,6 +75,10 @@ core 对记忆与循环零感知。
 | `im.ttalk.agent.filter.tool-search` | `ToolSearchToolCallingAdvisor` | 渐进式工具披露；`IToolIndex` 协议 + 零依赖内置索引 |
 | `im.ttalk.agent.filter.structured-output` | `StructuredOutputValidationAdvisor` | JSON Schema 判据 + 人话报错（配 `validation-turn-filter` 用） |
 | `im.ttalk.agent.filter.rag` | `QuestionAnswerAdvisor` | 检索增强注入；`IRetriever` 协议 |
+| `im.ttalk.agent.filter.tool-output` | Keelson `ToolOutputTruncation` | 工具结果头尾保留截断 + 全文另存（`:spill`） |
+| `im.ttalk.agent.filter.tool-guard` | Keelson `RepeatLimit` / `FailureDisableAdvisor` | 同参失败提醒/停回合、连续失败门禁拒绝（计数进暂停快照） |
+| `im.ttalk.agent.filter.instructions` | Keelson `InstructionsAdvisor` | 分层指令文件（如 AGENTS.md） → system prompt（不进历史） |
+| `im.ttalk.agent.filter.normalize` | Keelson `MessageNormalizer` / `MessagePruner` | 删孤儿结果、补悬空调用、媒体占位、裁本轮之前的思考块 |
 
 > 三者**都不引任何检索/向量依赖**（core 外部依赖仍为零）——向量库/embedding
 > 经协议注入。`filter.memory`（memory filter）在 `clj-agent-client`。

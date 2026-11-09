@@ -43,6 +43,7 @@
        (resume a \"approved\")))"
   (:refer-clojure :exclude [reset!])
   (:require [clojure.string :as str]
+            [im.ttalk.agent.approval :as approval]
             [im.ttalk.agent.filter.memory :as memory-filter]
             [im.ttalk.agent.chat-client :as chat-client]
             [im.ttalk.agent.tool-registry :as registry]
@@ -51,6 +52,7 @@
             [im.ttalk.agent.callbacks :as cb]
             [im.ttalk.agent.context :as ctx]
             [im.ttalk.agent.model.message :as msg]
+            [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.memory :as memory]
             [im.ttalk.agent.pause :as pause]
@@ -113,7 +115,14 @@
                     pause/resume**——声明 `deftool {:sensitive true}` 的工具在执行
                     前自动暂停，等 `resume`。暂停发生时本回调被触发。
    - :callbacks     回调 map（:on-turn-start/:on-turn-end/:on-turn-error/:on-llm-call/
-                              :on-llm-result/:on-tool-call/:on-tool-result/:on-interrupt/:on-resume）
+                              :on-llm-result/:on-tool-call/:on-tool-result/:on-interrupt/:on-resume；
+                              :on-event 收生命周期事件，见 im.ttalk.agent.events）
+   - :approval      声明式审批（designs/runtime-borrow.md §5 §6，可选）：
+                    {:policy     策略（im.ttalk.agent.approval 的 rule-policy / hint-policy …）
+                     :cache      会话缓存（缺省每个 agent 一份；false = 不缓存）
+                     :timeout-ms 暂停超过这么久再 resume → 按「拒绝：审批超时」处理
+                     :breaker    拒绝熔断参数 {:max-consecutive 3 …}（resume 的拒绝计数）}
+                    配置即启用暂停；与 :on-pause / :on-tool-call 并存时三路取最严
 
    **两条 pause 启用路径，可并存**（缺省两条都不配 = 永不暂停，`chat` 只会返回
    `:completed`/`:error`，无人值守调用方不会收到意外的暂停态）：
@@ -171,6 +180,11 @@
      ;; ⚠️ 允许放活对象（函数之类）：它**不进状态快照**（`emit-state!` 按
      ;; `edn-safe?` 滤）也**不进暂停快照**（`pause/strip-unserializable`）。
      :tool-context    (:tool-context opts)
+     :approval        (when-let [a (:approval opts)]
+                        (cond-> (assoc a :cache (if (contains? a :cache)
+                                                  (when (:cache a) (:cache a))
+                                                  (approval/session-cache)))
+                          (:breaker a) (assoc :breaker-atom (approval/denial-breaker (:breaker a)))))
      :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error :on-pause])}))
 
 ;;; ============================================================
@@ -253,17 +267,26 @@
    照跑，只是敏感工具直接执行了。2026-08-25 修复并补测试钉住。"
   [agent]
   (let [on-tool-call (get-in agent [:callbacks :on-tool-call])
-        on-pause     (:on-pause (:settings agent))]
-    (when (or on-tool-call on-pause)
+        on-pause     (:on-pause (:settings agent))
+        policy-gate  (when-let [a (:approval agent)]
+                       (approval/gate (:chat-client agent) a))]
+    (when (or on-tool-call on-pause policy-gate)
       (fn [tc]
         (let [tool-name (let [n (:name tc)] (if (keyword? n) (name n) (str n)))
               cb-result (when on-tool-call
                           (try (on-tool-call tool-name (:args tc))
-                               (catch Throwable _ nil)))]
+                               (catch Throwable _ nil)))
+              legacy (cond
+                       (and (map? cb-result) (:interrupt cb-result)) :pause
+                       (and on-pause (sensitive-tool? agent tc))     :pause
+                       :else                                          :proceed)
+              ;; 声明式策略（§5）与旧两路取最严：拒 > 暂停 > 放行；带信息的暂停优先
+              policy (if policy-gate (policy-gate tc) :proceed)]
           (cond
-            (and (map? cb-result) (:interrupt cb-result)) :pause
-            (and on-pause (sensitive-tool? agent tc))     :pause
-            :else                                          :proceed))))))
+            (and (map? policy) (contains? policy :reject)) policy
+            (and (map? policy) (contains? policy :pause))  policy
+            (= :pause legacy)                              :pause
+            :else                                          policy))))))
 
 (defn- sys-prompts
   "本轮的 system 段。
@@ -320,12 +343,16 @@
                                          (update :turn-count (fnil inc 0))))
         (pause-clear* agent)   ;; 循环已越过暂停点，持久化快照随之失效
         (cb/invoke callbacks :on-turn-end (build-meta agent))
-        {:status :completed
-         :text (get-in result [:response :text])
-         :tool-calls-made (:tool-calls-made result)})
+        (cond-> {:status :completed
+                 :text (get-in result [:response :text])
+                 :tool-calls-made (:tool-calls-made result)}
+          (:stopped-by result) (assoc :stopped-by (:stopped-by result)
+                                      :stop-reason (:stop-reason result))))
 
       :paused
-      (do
+      (let [result (cond-> (assoc result :paused-at (System/currentTimeMillis))
+                     (get-in agent [:approval :cache])
+                     (assoc :session-approvals (approval/snapshot (get-in agent [:approval :cache]))))]
         (swap! (:state-atom agent) assoc :status :paused :paused-state result :run-id nil)
         (pause-save* agent result)   ;; 暂停快照自动持久化（配置 :pause-store 时）
         (cb/invoke callbacks :on-interrupt
@@ -343,6 +370,7 @@
          :text nil
          :pause-reason (:pause-reason result)
          :pending-tool (:pending-tool result)
+         :pending-tools (or (:pending-tools result) (when (:pending-tool result) [(:pending-tool result)]))
          :tool-calls-made (:tool-calls-made result)})
 
       :cancelled
@@ -412,6 +440,9 @@
    发 `:on-turn-start`。返回 run-id。"
   [agent]
   (cancel-pending! agent)
+  ;; 拒绝熔断的作用域 = 一个回合（resume 是同一回合的延续，不清零）
+  (when-let [b (get-in agent [:approval :breaker-atom])]
+    (clojure.core/reset! b (approval/breaker-state (get-in agent [:approval :breaker]))))
   (let [run-id (str (java.util.UUID/randomUUID))]
     (swap! (:state-atom agent) assoc :run-id run-id)
     (cb/invoke (:callbacks agent) :on-turn-start (build-meta agent run-id))
@@ -510,6 +541,47 @@
        #(agent-loop/invoke (:chat-client agent) (store agent) [(msg/user message)]
           (build-invoke-opts agent run-id (assoc opts :on-token on-token)))))))
 
+(defn- approval-resume
+  "resume 时的声明式审批记账（designs/runtime-borrow.md §5 §6 §15）。返回
+   `{:loop-decision :payload :stop?}`：
+   - 暂停超过 `:timeout-ms` → 一律按「拒绝：审批超时」（逐件决定作废）；
+   - 批准且 `:remember :session`（顶层或逐件）→ 把那几件的审批键记进会话缓存
+     （`:allow-session? false` 的不记）；
+   - 拒绝计入拒绝熔断，跳闸 → `:stop` 文案（resume 直接以 :completed 收尾）。"
+  [agent paused loop-decision payload]
+  (let [{:keys [cache timeout-ms breaker-atom]} (:approval agent)
+        _ (approval/restore! cache (:session-approvals paused))
+        expired? (and timeout-ms (:paused-at paused)
+                      (> (- (System/currentTimeMillis) (:paused-at paused)) timeout-ms))
+        [loop-decision payload] (if expired?
+                                  [:rejected {:message "审批超时"}]
+                                  [loop-decision payload])
+        pendings (or (:pending-tools paused) (when (:pending-tool paused) [(:pending-tool paused)]))
+        per (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v])) (:decisions payload))
+        decided (map (fn [p]
+                       (let [id (get-in p [:tool-call :id])
+                             d (get per id)
+                             dk (if d
+                                  (let [x (if (map? d) (:decision d) d)]
+                                    (if (contains? #{"approved" :approved} x) :approved :other))
+                                  (if (= :approved loop-decision) :approved :other))]
+                         {:p p :approved? (= :approved dk)
+                          :args (or (when (map? d) (:args d))
+                                    (when (and (nil? d) (= id (get-in paused [:loop-state :pending-id])))
+                                      (:args payload))
+                                    (:args p))
+                          :remember (or (when (map? d) (:remember d)) (:remember payload))}))
+                     pendings)]
+    (doseq [{:keys [p approved? args remember]} decided
+            :when (and approved? (= :session remember)
+                       (not (false? (get-in p [:approval :allow-session?]))))]
+      (approval/remember! cache (approval/approval-key (:name p) args)))
+    (let [tripped? (when breaker-atom
+                     (some true? (doall (map #(approval/record! breaker-atom (not (:approved? %))) decided))))]
+      {:loop-decision loop-decision
+       :payload payload
+       :stop (when tripped? approval/breaker-stop-note)})))
+
 (defn- resume-prep
   "resume / resume-async 共用的前置：校验暂停态、翻译 decision、登记 run-id、
    发 `:on-resume`，返回 `{:ls :loop-decision :opts}`（喂给 react/resume(-async)）。
@@ -526,12 +598,21 @@
         reply? (contains? #{"reply" :reply} decision)
         _ (when (and env? reply?)
             (throw (ex-info "环境类暂停不支持 :reply（用 \"retry\" 或 \"proceed\"）" {})))
+        ;; 逐件决定答错（漏答 / 未知 id）是调用方输入错误：在动任何状态之前就抛，
+        ;; 暂停快照原样保留，调用方改正后可再 resume（G-02）。
+        _ (when-not env? (agent-loop/check-decisions! ls payload))
         approved? (contains? #{"approved" :approved "retry" :retry} decision)
         loop-decision (cond
                         env?    (if approved? :retry :proceed)
                         reply?  :reply
                         approved? :approved
                         :else   :rejected)
+        ;; 声明式审批（§5 §6）：超时转拒绝 / 会话批准记账 / 拒绝熔断
+        {:keys [loop-decision payload stop]}
+        (if (and (:approval agent) (not env?))
+          (approval-resume agent paused loop-decision payload)
+          {:loop-decision loop-decision :payload payload})
+        approved? (if (:approval agent) (= :approved loop-decision) approved?)
         run-id (str (java.util.UUID/randomUUID))
         meta (build-meta agent run-id)
         callbacks (:callbacks agent)]
@@ -542,6 +623,8 @@
                meta)
     {:ls ls
      :loop-decision loop-decision
+     :stop stop
+     :paused paused
      :opts (-> (cond-> {:context (resume-context agent paused)
                         :tool-gate (gate-of agent)
                         :on-env-error (env-error-policy agent opts)
@@ -549,6 +632,16 @@
                  payload (assoc :payload payload)
                  (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))
                (passthrough opts))}))
+
+(defn- breaker-stop-result
+  "拒绝熔断跳闸：这次 resume 不再续跑，直接以 :completed 收尾。暂停那批工具调用在历史里
+   悬空，下一个 turn 开头由 `heal-dangling-tool-calls!` 补「已取消」。"
+  [paused note]
+  {:status :completed
+   :response (response/make-response :text note :finish-reason :stop)
+   :tool-calls-made (:tool-calls-made paused)
+   :stopped-by :denial-breaker
+   :stop-reason note})
 
 (defn paused?
   "是否处于暂停态（本进程 state-atom 或 PauseStore 中的持久化快照）。"
@@ -580,9 +673,11 @@
   ([agent decision] (resume agent decision nil nil))
   ([agent decision payload] (resume agent decision payload nil))
   ([agent decision payload opts]
-   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload opts)]
+   (let [{:keys [ls loop-decision opts stop paused]} (resume-prep agent decision payload opts)]
      (run-loop agent
-       #(agent-loop/resume (:chat-client agent) ls loop-decision opts)))))
+       (if stop
+         #(breaker-stop-result paused stop)
+         #(agent-loop/resume (:chat-client agent) ls loop-decision opts))))))
 
 (defn resume-async
   "同 `resume`，但立刻返回 `CompletableFuture`，延续跑在虚拟线程上。
@@ -593,9 +688,11 @@
   (^java.util.concurrent.CompletableFuture [agent decision] (resume-async agent decision nil nil))
   (^java.util.concurrent.CompletableFuture [agent decision payload] (resume-async agent decision payload nil))
   (^java.util.concurrent.CompletableFuture [agent decision payload opts]
-   (let [{:keys [ls loop-decision opts]} (resume-prep agent decision payload opts)]
+   (let [{:keys [ls loop-decision opts stop paused]} (resume-prep agent decision payload opts)]
      (run-loop-async agent
-       #(agent-loop/resume-async (:chat-client agent) ls loop-decision opts)))))
+       (if stop
+         #(async/vthread (fn [] (breaker-stop-result paused stop)))
+         #(agent-loop/resume-async (:chat-client agent) ls loop-decision opts))))))
 
 (defn reset!
   "清空会话历史、持久化暂停快照并重置控制状态"

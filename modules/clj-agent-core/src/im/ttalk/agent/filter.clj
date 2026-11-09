@@ -586,6 +586,80 @@
                 (chain req)))))))
 
 ;;; ============================================================
+;;; 内置 filter: 收尾闸门（turn 链，递归重入）
+;;; ============================================================
+
+(defn- gate-verdict
+  "把 gate 的返回值归一成 [kind payload]：:accept / [:continue note] / [:stop reason]。"
+  [v]
+  (cond
+    (or (nil? v) (= :accept v)) [:accept nil]
+    (= :stop v) [:stop nil]
+    (and (map? v) (contains? v :stop)) [:stop (:stop v)]
+    (and (map? v) (contains? v :continue)) [:continue (:continue v)]
+    :else (throw (ex-info (str "收尾闸门返回值非法：" (pr-str v)
+                               "（应为 :accept | :stop | {:stop 理由} | {:continue 一句话}）")
+                          {:verdict v}))))
+
+(defn completion-gate-filter
+  "收尾闸门 turn filter（designs/runtime-borrow.md §9，借 Keelson `CompletionGate`，
+   它又借 Codex Stop hook）。`validation-turn-filter` 是它的特例。
+
+   回合正要以 :completed 收尾时，按注册顺序问每道闸门；第一个非 :accept 的说了算：
+   - `:accept`（或 nil）       放行，交给下一道；都放行才真收尾
+   - `{:continue \"一句话\"}`  不许收尾：这句话作为反馈消息重入循环（新 delta，完整
+                               上下文由 memory filter 拼接，故须与 memory 同挂）
+   - `:stop` / `{:stop 理由}`  就此停下：结果加 `:stopped-by :completion-gate`
+                               与 `:stop-reason`
+
+   gate: (fn [{:keys [result attempt gate-active?]}] -> 上述之一)
+   - attempt      已经重入了几次（0 起）
+   - gate-active? 本轮是不是由闸门的 continue 引出来的（防止闸门无限逼模型续写）
+   gate 抛的异常照常往外抛（闸门是宿主写的策略，不替它吞）。
+
+   :paused / :cancelled / :error 结果透传、不问闸门（HITL 硬规则）。
+
+   opts:
+   - :max-continues  continue 重入上限（缺省 2），耗尽后原样返回最后一次结果
+   - :note-fn        (fn [一句话] -> 中立消息)，缺省 `msg/user`
+   - :name           filter 名（缺省 :completion-gate）"
+  [gates & {:keys [max-continues note-fn name]
+            :or {max-continues 2 name :completion-gate}}]
+  (let [mk-note (or note-fn msg/user)
+        gates (vec gates)]
+    (create-filter name
+     :turn (fn [req chain]
+             ;; fbind 自递归：同步下逐字等价于循环，异步下变成 flatMap 链（§2.6.4）
+             (letfn [(verdict [result attempt]
+                       (reduce (fn [_ g]
+                                 (let [[k _ :as v] (gate-verdict
+                                                    (g {:result result :attempt attempt
+                                                        :gate-active? (pos? attempt)}))]
+                                   (if (= :accept k) v (reduced v))))
+                               [:accept nil]
+                               gates))
+                     (step [attempt req]
+                       (fbind (chain req)
+                              (fn [result]
+                                (if (not= :completed (:status result))
+                                  result                    ;; 暂停/取消/错误：透传
+                                  (let [[k payload] (verdict result attempt)]
+                                    (case k
+                                      :accept result
+                                      :stop (cond-> (assoc result :stopped-by :completion-gate)
+                                              payload (assoc :stop-reason payload))
+                                      :continue
+                                      (if (>= attempt max-continues)
+                                        result              ;; 耗尽：原样返回
+                                        ;; 重入是有真实入口消息的新循环：摘掉可能继承的
+                                        ;; :resume? 标记，让下游请求侧 filter 照常工作
+                                        (step (inc attempt)
+                                              (-> req
+                                                  (dissoc :resume?)
+                                                  (assoc :messages [(mk-note payload)]))))))))))]
+               (step 0 req))))))
+
+;;; ============================================================
 ;;; 内置 filter: 最终答案校验（turn 链，递归重试）
 ;;; ============================================================
 
@@ -600,37 +674,26 @@
 
    :paused / :cancelled / :error 结果透传不重试（HITL 硬规则）。
 
+   是 `completion-gate-filter` 只有一道闸门、只会 continue 的特例
+   （designs/runtime-borrow.md §9）。
+
    opts:
    - :max-retries  重试上限（缺省 2）
    - :feedback-fn  (fn [原因] -> 中立消息)，缺省生成
                    「你的上一个回答未通过校验：<原因>。请修正后重新回答。」"
   [validate-fn & {:keys [max-retries feedback-fn]
                   :or {max-retries 2}}]
-  (let [mk-feedback (or feedback-fn
-                        (fn [problem]
-                          (msg/user (str "你的上一个回答未通过校验：" problem
-                                         "。请修正后重新回答。"))))]
-    (create-filter :validation
-     :turn (fn [req chain]
-             ;; fbind 自递归而非 loop/recur：终端同步时逐字等价于原来的循环，
-             ;; 终端返回 deferred 时同一份代码变成 flatMap 链（§2.6.4）。
-             ;; 递归深度 ≤ max-retries，不吃栈。
-             (letfn [(step [attempt req]
-                       (fbind (chain req)
-                              (fn [result]
-                                (if (not= :completed (:status result))
-                                  result                    ;; 暂停/取消/错误：透传
-                                  (if-let [problem (validate-fn result)]
-                                    (if (>= attempt max-retries)
-                                      result                ;; 耗尽：原样返回
-                                      ;; 重入是有真实入口消息的新循环：摘掉可能继承的
-                                      ;; :resume? 标记，让下游请求侧 filter 照常工作
-                                      (step (inc attempt)
-                                            (-> req
-                                                (dissoc :resume?)
-                                                (assoc :messages [(mk-feedback problem)]))))
-                                    result)))))]
-               (step 0 req))))))
+  (completion-gate-filter
+   [(fn [{:keys [result]}]
+      (if-let [problem (validate-fn result)]
+        {:continue problem}
+        :accept))]
+   :max-continues max-retries
+   :name :validation
+   :note-fn (or feedback-fn
+                (fn [problem]
+                  (msg/user (str "你的上一个回答未通过校验：" problem
+                                 "。请修正后重新回答。"))))))
 
 ;;; ============================================================
 ;;; 内置 filter: token 流变换（:token-xform，流式专用）

@@ -16,7 +16,7 @@
    **重试在这里，位于整个 filter 栈之下**（与 beamai `beamai_chat_model` 同一
    取舍，理由见 `im.ttalk.agent.retry` 的 ns 文档）：filter 看到的是「一次逻辑
    调用」，重试重入碰不到任何 filter，memory/计时的副作用每轮只发生一次。
-   **`call` 重试、`stream` 不重试**——token 已经投递给 sink，重跑会让下游看到
+   **`call` 重试、`stream` 只在首个 token 之前重试**——token 已经投递给 sink 后重跑会让下游看到
    重复内容；流式要容错请在 turn 层重跑整轮。
 
    两个实现：
@@ -34,6 +34,7 @@
 
    (chat-model/call cm (req/chat-request messages {:tools [...]}))"
   (:require [clojure.string]
+            [im.ttalk.agent.admission :as admission]
             [im.ttalk.agent.async :as async]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model :as provider]
@@ -69,7 +70,8 @@
         tools (when (not= tool-choice :none)
                 (:tools opts))
         system-prompt (:system-prompt opts)]
-    (cond-> config
+    ;; :admission 是 ChatModel 自己的装配（票据池），不下发给 provider
+    (cond-> (dissoc config :admission)
       (seq tools)
       (assoc :tools tools)
       ;; 只在有 tools 且非 :none 时透传中立 tool-choice（provider 侧翻译）
@@ -104,7 +106,8 @@
                   (get-in raw-response [:choices 0 :usage]))
         finish-reason (or (:stop_reason raw-response)
                           (get-in raw-response [:choices 0 :finish_reason]))]
-    (response/make-response
+    (cond->
+     (response/make-response
       :id (:id raw-response)
       :model (:model raw-response)
       :text (when (seq text) text)
@@ -119,13 +122,16 @@
       ;; 让下一轮的 wire 转换器原样吐回去。厂商 wire 知识仍归 provider
       ;; （见 docs/response-path-consolidation.md）。
       :replay-blocks (when (satisfies? provider/IReplayableResponse provider)
-                       (provider/replay-blocks provider raw-response)))))
+                       (provider/replay-blocks provider raw-response)))
+    ;; 限流快照（provider 边界从响应头折出来挂在原始响应上，见 provider.common.rate-limit）
+    (and (map? raw-response) (:rate-limit raw-response))
+    (assoc :rate-limit (:rate-limit raw-response)))))
 
 (defprotocol IChatModel
   "一次 LLM 调用的契约。对标 Spring AI 的 `ChatModel` 接口。
 
-   两个方法故意不对称：`call` 内建重试，`stream-call` 不重试（token 已出门，
-   重跑即重复投递）。这不是遗漏，是流式语义的硬约束。"
+   `call` 内建重试；`stream-call` 只在**首个 token 之前**重试（token 已出门之后
+   重跑即重复投递——这条是流式语义的硬约束，designs/provider-reliability.md §2）。"
 
   (call [this request]
     "同步调用。
@@ -141,7 +147,7 @@
      provider 不支持流式时回退同步，并把全文作为单个 token emit——保证
      chat-stream 对任何 provider 都可用。
 
-     **不重试**：见本 ns 文档。")
+     **只在首个 token 之前重试**：见本 ns 文档。")
 
   (model-options [this]
     "该 ChatModel 的缺省调用选项（{:model ... :max-tokens ...}）。
@@ -149,7 +155,7 @@
 
 (defprotocol IAsyncChatModel
   "**可选**协议：ChatModel 能异步调用时实现它。语义与 `IChatModel` 逐字相同
-   （含重试策略：`call-async` 重试、`stream-call-async` 不重试），只是不阻塞调用线程。
+   （含重试策略：`call-async` 重试、`stream-call-async` 只在首个 token 前重试），只是不阻塞调用线程。
 
    **不实现也能异步**：`call-async*` / `stream-call-async*` 探测不到会用虚拟线程包
    同步调用兜底——调用方永远拿得到 deferred。实现本协议只省掉那根线程。
@@ -158,7 +164,7 @@
   (call-async [this request]
     "-> deferred<ChatResponse>。语义同 `call`（含重试）。")
   (stream-call-async [this request on-token]
-    "-> deferred<ChatResponse>。语义同 `stream-call`（**不重试**）。
+    "-> deferred<ChatResponse>。语义同 `stream-call`（**只在首个 token 前重试**）。
 
      on-token 的调用线程不保证——原生异步实现里 token 在传输层 executor 上派发。"))
 
@@ -183,7 +189,7 @@
     (async/vthread #(call chat-model request))))
 
 (defn stream-call-async*
-  "`call-async*` 的流式版 → deferred<ChatResponse>。**不重试**（同 `stream-call`）。
+  "`call-async*` 的流式版 → deferred<ChatResponse>。**只在首个 token 前重试**（同 `stream-call`）。
 
    ⚠️ on-token 的调用线程不保证：原生异步路径上 token 在传输层 executor 上派发，
    虚拟线程兜底路径上则在那根虚拟线程上。sink 自行保证线程安全。"
@@ -191,6 +197,67 @@
   (if (satisfies? IAsyncChatModel chat-model)
     (stream-call-async chat-model request on-token)
     (async/vthread #(stream-call chat-model request on-token))))
+
+;;; ============================================================
+;;; DefaultChatModel 的重试 / 准入辅助（designs/provider-reliability.md §2 / §5）
+;;; ============================================================
+
+(defn- retry-opts
+  "三级合并后的重试配置 + 单次 :options 里的观测/测试钩子。"
+  [config request]
+  (let [wo (req/wire-options request)]
+    (merge (retry/resolve-opts config wo)
+           (select-keys wo [:on-retry :sleep-fn :rand-fn]))))
+
+(defn- call-retry-opts
+  "非流式：按 :max-retries 退避重试 + 空补全独立预算（:empty-retries 0 ⇒ 不判空，空响应原样返回）。"
+  [config request provider]
+  (let [ro (retry-opts config request)]
+    (cond-> (assoc ro :record-attempts? true :provider (provider/provider-name provider))
+      (pos? (long (or (:empty-retries ro) 0))) (assoc :empty? response/empty-completion?))))
+
+(defn- stream-retry-opts
+  "流式：预算换成 :stream-retries，且只在本次尝试**还没交付任何 token** 时重试（gate）。"
+  [config request provider emitted]
+  (assoc (call-retry-opts config request provider)
+         :max-retries (long (or (:stream-retries (retry-opts config request)) 0))
+         :retry-gate #(not @emitted)
+         :retry-kind :stream))
+
+(defn- delivered?
+  "这条 token-data 交付给 sink 后，重发会不会让下游看到重复内容。
+   全是空串 / nil 的（如 {:token \"\"}）不算交付。"
+  [t]
+  (if (map? t)
+    (boolean (some (fn [[_ v]] (not (or (nil? v) (= "" v)))) t))
+    (some? t)))
+
+(defn- tracking-on-token
+  "包一层 on-token：交付过非空 token 即把 emitted 置真。"
+  [on-token emitted]
+  (fn [t]
+    (when (delivered? t) (reset! emitted true))
+    (when on-token (on-token t))))
+
+(defn- admission-key [config provider request]
+  (let [{:keys [key key-fn]} (:admission config)]
+    (cond
+      key-fn (key-fn request)
+      key    key
+      :else  (str (some-> (provider/provider-name provider) name) "/"
+                  (or (req/option request :model) (:model config) "model")))))
+
+(defn- admitted
+  "每次**尝试**取一张票（config 挂了 :admission 时）；退避等待因此发生在票外。"
+  [config provider request thunk]
+  (if-let [pool (get-in config [:admission :pool])]
+    (admission/with-permit pool (admission-key config provider request) thunk)
+    (thunk)))
+
+(defn- admitted-async [config provider request thunk]
+  (if-let [pool (get-in config [:admission :pool])]
+    (admission/with-permit-async pool (admission-key config provider request) thunk)
+    (thunk)))
 
 ;;; ============================================================
 ;;; DefaultChatModel —— 包一个 ILLMProvider
@@ -202,30 +269,34 @@
     (let [request     (req/as-chat-request request)
           call-config (build-call-config config (req/wire-options request))
           tools       (:tools call-config)
-          messages    (:messages request)
-          ;; 重试三级取值：单次 :options 的 :retry > provider config 的 :retry > 框架默认
-          ropts       (merge (retry/resolve-opts config (req/wire-options request))
-                             (select-keys (req/wire-options request) [:on-retry]))]
-      (normalize-response
-        provider
-        (retry/run #(provider/call-llm provider call-config messages tools) ropts))))
+          messages    (:messages request)]
+      ;; 归一化放进重试循环：空补全要在 ChatResponse 上判（designs/provider-reliability.md §2）
+      (retry/run #(normalize-response
+                    provider
+                    (admitted config provider request
+                              (fn [] (provider/call-llm provider call-config messages tools))))
+                 (call-retry-opts config request provider))))
 
-  (stream-call [_ request on-token]
+  (stream-call [this request on-token]
     (let [request     (req/as-chat-request request)
-          call-config (build-call-config config (req/wire-options request))
+          ;; 传输层不再叠一层 :retry（stream-client 的 opt-in 重试）——ChatModel 统一做，免得 m×n
+          call-config (dissoc (build-call-config config (req/wire-options request)) :retry)
           tools       (:tools call-config)
           messages    (:messages request)]
       (if (provider/supports-stream? provider)
-        ;; 不包 retry/run：token 已投递给 sink，重跑 = 下游看到重复内容
-        (normalize-response
-          provider
-          (provider/call-llm-stream provider call-config messages tools on-token))
-        ;; 不支持流式：同步调用（这一条**走重试**——还没有任何 token 出门），
+        ;; 只在「首个 token 之前」重试：token 已投递给 sink 之后重跑 = 下游看到重复内容
+        (let [emitted (atom false)
+              tok     (tracking-on-token on-token emitted)]
+          (retry/run (fn []
+                       (reset! emitted false)
+                       (normalize-response
+                         provider
+                         (admitted config provider request
+                                   (fn [] (provider/call-llm-stream provider call-config messages tools tok)))))
+                     (stream-retry-opts config request provider emitted)))
+        ;; 不支持流式：同步调用（**走重试**——还没有任何 token 出门），
         ;; 再把全文作为单个 token emit，保证调用方契约一致
-        (let [ropts (retry/resolve-opts config (req/wire-options request))
-              resp  (normalize-response
-                      provider
-                      (retry/run #(provider/call-llm provider call-config messages tools) ropts))]
+        (let [resp (call this request)]
           (when-let [t (response/response-text resp)]
             (when on-token (on-token {:token t})))
           resp))))
@@ -245,13 +316,12 @@
       (let [request     (req/as-chat-request request)
             call-config (build-call-config config (req/wire-options request))
             tools       (:tools call-config)
-            messages    (:messages request)
-            ropts       (merge (retry/resolve-opts config (req/wire-options request))
-                               (select-keys (req/wire-options request) [:on-retry]))]
-        (-> (retry/run-async
-              #(provider/call-llm-async provider call-config messages tools)
-              ropts)
-            (flt/fmap #(normalize-response provider %))))))
+            messages    (:messages request)]
+        (retry/run-async
+          #(flt/fmap (admitted-async config provider request
+                                     (fn [] (provider/call-llm-async provider call-config messages tools)))
+                     (fn [raw] (normalize-response provider raw)))
+          (call-retry-opts config request provider)))))
 
   (stream-call-async [this request on-token]
     (cond
@@ -268,13 +338,20 @@
       (async/vthread #(stream-call this request on-token))
 
       :else
-      ;; 不包 retry：token 已投递给 sink，重跑 = 下游看到重复内容（硬约束不因异步而改）
+      ;; 只在首个 token 之前重试（硬约束不因异步而改）
       (let [request     (req/as-chat-request request)
-            call-config (build-call-config config (req/wire-options request))
+            call-config (dissoc (build-call-config config (req/wire-options request)) :retry)
             tools       (:tools call-config)
-            messages    (:messages request)]
-        (flt/fmap (provider/call-llm-stream-async provider call-config messages tools on-token)
-                  #(normalize-response provider %))))))
+            messages    (:messages request)
+            emitted     (atom false)
+            tok         (tracking-on-token on-token emitted)]
+        (retry/run-async
+          (fn []
+            (reset! emitted false)
+            (flt/fmap (admitted-async config provider request
+                                      (fn [] (provider/call-llm-stream-async provider call-config messages tools tok)))
+                      (fn [raw] (normalize-response provider raw))))
+          (stream-retry-opts config request provider emitted))))))
 
 ;;; ============================================================
 ;;; FnChatModel —— 包 {:chat-fn :stream-fn} 两个闭包
@@ -347,9 +424,51 @@
    返回：`DefaultChatModel`（实现 IChatModel）
 
    - `call`        同步调用，**内建重试**（判据为 canonical error 的 :retryable?）
-   - `stream-call` 流式调用，**不重试**（token 已投递，重跑即重复）
+   - `stream-call` 流式调用，只在首个 token 前重试（token 已投递后重跑即重复）
 
    说明：历史的 :build-result-msgs 已移除——对话历史由 filter/memory 的
    response->neutral 用中立消息统一构建，ChatModel 无需再提供该函数。"
   [provider config]
   (->DefaultChatModel provider (or config {})))
+
+;;; ============================================================
+;;; 并发准入（designs/provider-reliability.md §5）
+;;; ============================================================
+
+(defrecord AdmittingChatModel [inner pool key-fn]
+  IChatModel
+  (call [_ request]
+    (admission/with-permit pool (key-fn request) #(call inner request)))
+  (stream-call [_ request on-token]
+    (admission/with-permit pool (key-fn request) #(stream-call inner request on-token)))
+  (model-options [_] (model-options inner))
+  IAsyncChatModel
+  (call-async [_ request]
+    (admission/with-permit-async pool (key-fn request) #(call-async* inner request)))
+  (stream-call-async [_ request on-token]
+    (admission/with-permit-async pool (key-fn request) #(stream-call-async* inner request on-token))))
+
+(defn with-admission
+  "给 ChatModel 套上在途票据池（`im.ttalk.agent.admission`）。
+
+   - `chat-model` 是 DefaultChatModel → 返回同一种 DefaultChatModel，config 挂 `:admission`：
+     **每次尝试**（流式为整条流）取一张票、尝试结束即还，**退避等待不占票**。
+   - 其它 ChatModel（FnChatModel / FallbackChatModel / 自定义）→ `AdmittingChatModel` 装饰器，
+     票覆盖**整次调用**（它看不见内层的重试）。
+
+   opts：
+   - :key-fn (fn [request] key)  按请求算池的键；缺省 DefaultChatModel 为 \"<provider>/<model>\"，
+                                  其它为 \"default\"
+   - :key    固定键（与 :key-fn 二选一）"
+  ([chat-model pool] (with-admission chat-model pool nil))
+  ([chat-model pool {:keys [key key-fn]}]
+   (let [cm (as-chat-model chat-model)]
+     (if (instance? DefaultChatModel cm)
+       (update cm :config assoc :admission (cond-> {:pool pool}
+                                             key-fn (assoc :key-fn (fn [r] (key-fn (req/as-chat-request r))))
+                                             key    (assoc :key key)))
+       (->AdmittingChatModel cm pool
+                             (cond
+                               key-fn (fn [r] (key-fn (req/as-chat-request r)))
+                               key    (constantly key)
+                               :else  (constantly "default")))))))

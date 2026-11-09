@@ -11,6 +11,12 @@
    - :validation-error 参数验证失败（不可重试）
    - :parse-error      响应解析失败（不可重试）
    - :provider-error   Provider 特定错误
+   - :quota-exhausted-error  欠费 / 额度用尽 / 402（不可重试；**不是限流**，可切备用模型）
+   - :context-overflow-error 请求超出上下文窗口（不可重试、不切备用，留给压缩恢复）
+   - :empty-completion-error HTTP 200 但无有效内容（可重试，但只走 ChatModel 的独立预算）
+
+   厂商业务码（智谱 1309、OpenAI insufficient_quota@429 …）的细分在 provider 边界做
+   （`im.ttalk.agent.provider.common.business-codes`），core 只认状态码能下的结论（402）。
 
    使用示例：
 
@@ -35,11 +41,17 @@
 
 (def ^:private retryable-types
   "可重试的错误类型"
-  #{:network-error :timeout-error :rate-limit-error :provider-error})
+  #{:network-error :timeout-error :rate-limit-error :provider-error
+    ;; 空补全：可重试，但 retry.clj 只让它走 :empty-retries 那一格预算
+    :empty-completion-error})
 
 (def ^:private non-retryable-types
   "不可重试的错误类型"
-  #{:auth-error :validation-error :parse-error})
+  #{:auth-error :validation-error :parse-error
+    ;; 欠费：退避变不出额度（designs/provider-reliability.md §1）
+    :quota-exhausted-error
+    ;; 超长：原样重发只会再超一次
+    :context-overflow-error})
 
 ;;; ============================================================
 ;;; 错误创建
@@ -56,6 +68,7 @@
      - :status     HTTP 状态码
      - :provider   Provider 名称
      - :context    上下文信息
+     - :code       厂商业务码 / 细分码（如 \"insufficient_quota\"、:model-mismatch），可选
 
    返回：
    错误 map {:type :xxx :message \"...\" :retryable? bool}
@@ -78,7 +91,8 @@
        (:cause opts)    (assoc :cause (:cause opts))
        (:status opts)   (assoc :status (:status opts))
        (:provider opts) (assoc :provider (:provider opts))
-       (:context opts)  (assoc :context (:context opts))))))
+       (:context opts)  (assoc :context (:context opts))
+       (:code opts)     (assoc :code (:code opts))))))
 
 ;;; ============================================================
 ;;; 工具错误分类（S2：屏障策略路由，见 docs/agent-loop-concurrency-design.md §5）
@@ -110,7 +124,8 @@
       (:error-class data) (:error-class data)
       (contains? data :retryable?) (cond
                                      (:retryable? data)          :transient
-                                     (= :auth-error (:type data)) :environment
+                                     ;; 认证失效 / 欠费：模型修不了、重试无用 → 等人
+                                     (#{:auth-error :quota-exhausted-error} (:type data)) :environment
                                      :else                        :semantic)
       (or (instance? java.net.SocketTimeoutException e)
           (instance? java.net.ConnectException e)
@@ -198,9 +213,27 @@
   (#{401 403} (:status err)))
 
 (deferrpred rate-limit-error?
-  "检查是否为速率限制错误（429 或 :rate-limit-error 类型）"
+  "检查是否为速率限制错误（:rate-limit-error 类型，或 429 且**不是欠费**）。
+
+   OpenAI 兼容端点欠费也回 429（insufficient_quota）——那不是限流，
+   provider 边界已把它细分为 :quota-exhausted-error，这里不能再认回去。"
   (= :rate-limit-error (:type err))
-  (= 429 (:status err)))
+  (and (= 429 (:status err)) (not= :quota-exhausted-error (:type err))))
+
+(defn quota-exhausted?
+  "欠费 / 额度用尽（:quota-exhausted-error）。不可重试，但可切备用模型。"
+  [err]
+  (and (error? err) (= :quota-exhausted-error (:type err))))
+
+(defn context-overflow?
+  "请求超出上下文窗口（:context-overflow-error）。不重试、不切备用，交压缩恢复。"
+  [err]
+  (and (error? err) (= :context-overflow-error (:type err))))
+
+(defn empty-completion?
+  "空补全（:empty-completion-error）。"
+  [err]
+  (and (error? err) (= :empty-completion-error (:type err))))
 
 ;;; ============================================================
 ;;; 异常转换
@@ -279,6 +312,8 @@
         opts {:status status :provider provider}]
     (cond
       (#{401 403} status) (error :auth-error message opts)
+      ;; 402 Payment Required：状态码层面唯一能直接下结论的欠费（厂商码表在 provider 边界）
+      (= 402 status)      (error :quota-exhausted-error message opts)
       (= 429 status)      (error :rate-limit-error message opts)
       (>= status 500)     (error :provider-error message (assoc opts :retryable? true))
       (>= status 400)     (error :validation-error message opts)
@@ -300,6 +335,28 @@
   ;; ex-info 要求 message 为 String；canonical error 的 :message 理应是字符串，
   ;; 但保险起见强制 str（避免上游构造失误导致 ClassCastException 掩盖真实错误）。
   (throw (ex-info (str (:message err)) err)))
+
+;;; ============================================================
+;;; 给异常追加 ex-data
+;;; ============================================================
+
+(defn with-ex-data
+  "返回一个**追加了 extra 键**的等价异常（重试的 :attempts、主备切换的 :fallback 报告用）。
+
+   ex-info 的 data 不可变，只能换一个实例：消息、cause、栈逐字保留，data = (merge 原 data extra)
+   ——调用方拿到的仍是同一个 canonical error（:type/:status/:retryable? 不丢），只是多了几个键。
+   非 ExceptionInfo（IOException 等）先 `exception->error` 归一，原异常作为 cause——
+   保证 D5「ex-data 即 canonical error」不破。"
+  ^Throwable [^Throwable t extra]
+  (if (instance? clojure.lang.ExceptionInfo t)
+    (let [e (clojure.lang.ExceptionInfo. (or (.getMessage t) "") (merge (ex-data t) extra) (.getCause t))]
+      (.setStackTrace e (.getStackTrace t))
+      (doseq [s (.getSuppressed t)] (.addSuppressed e s))
+      e)
+    (let [err (exception->error t)
+          e (clojure.lang.ExceptionInfo. (str (:message err)) (merge err extra) t)]
+      (.setStackTrace e (.getStackTrace t))
+      e)))
 
 ;;; ============================================================
 ;;; 错误格式化

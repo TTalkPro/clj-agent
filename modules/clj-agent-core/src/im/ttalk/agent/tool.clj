@@ -7,6 +7,9 @@
 
    参数声明使用向量格式: [名称 类型 描述]
    支持可选参数: [名称 类型 描述 :default 默认值]
+   支持参数约束: [名称 类型 描述 :enum [..] :pattern \"..\" :minimum 1 :maximum 9
+                 :min-length n :max-length n :items {:type \"string\"} :min-items n :max-items n]
+                 （进 input_schema，模型看得到；调用前按 schema 完整校验，见 tool-args）
    支持敏感标记: {:sensitive true}
    支持只读 context: {:context true}
    支持串行标记: {:serial true}（副作用工具，批内并行时整批退化为按序执行）
@@ -62,9 +65,9 @@
      \"获取当前时间\"
      []
      (str (java.time.LocalDateTime/now)))"
-  (:require [clojure.set]
-            [clojure.string]
-            [im.ttalk.agent.model.error :as err]))
+  (:require [clojure.string]
+            [im.ttalk.agent.model.error :as err]
+            [im.ttalk.agent.tool-args :as tool-args]))
 
 (set! *warn-on-reflection* true)
 
@@ -102,25 +105,44 @@
 ;;; 参数解析
 ;;; ============================================================
 
+(def ^:private constraint-keys
+  "deftool 参数约束选项 → JSON Schema 关键字（designs/runtime-borrow.md §8）。"
+  {:enum :enum
+   :pattern :pattern
+   :minimum :minimum
+   :maximum :maximum
+   :exclusive-minimum :exclusiveMinimum
+   :exclusive-maximum :exclusiveMaximum
+   :min-length :minLength
+   :max-length :maxLength
+   :items :items
+   :min-items :minItems
+   :max-items :maxItems})
+
 (defn- parse-param
   "解析单个参数声明向量
 
    输入格式: [name type description] 或 [name type description :default val]
+            约束选项（:enum :pattern :minimum …，见 constraint-keys）可与 :default 并列
 
    返回:
    {:name        参数名（symbol）
     :type        类型关键字
     :description 描述字符串
     :required    是否必需（无 :default 为 true）
-    :default     默认值（如有）}"
+    :default     默认值（如有）
+    :constraints {JSON Schema 关键字 值}（如有）}"
   [param-vec]
   (let [[pname ptype pdesc & opts] param-vec
-        opts-map (apply hash-map opts)]
-    {:name        pname
-     :type        ptype
-     :description pdesc
-     :required    (not (contains? opts-map :default))
-     :default     (:default opts-map)}))
+        opts-map (apply hash-map opts)
+        constraints (into {} (keep (fn [[k jk]] (when (contains? opts-map k) [jk (get opts-map k)])))
+                          constraint-keys)]
+    (cond-> {:name        pname
+             :type        ptype
+             :description pdesc
+             :required    (not (contains? opts-map :default))
+             :default     (:default opts-map)}
+      (seq constraints) (assoc :constraints constraints))))
 
 ;;; ============================================================
 ;;; Schema 生成
@@ -135,10 +157,11 @@
     :required   [\"param1\" ...]}"
   [parsed-params]
   (let [properties (reduce
-                     (fn [acc {:keys [name type description]}]
+                     (fn [acc {:keys [name type description constraints]}]
                        (assoc acc (keyword name)
-                              {:type        (clj-type->json-type type)
-                               :description description}))
+                              (merge {:type        (clj-type->json-type type)
+                                      :description description}
+                                     constraints)))
                      {}
                      parsed-params)
         required (->> parsed-params
@@ -470,25 +493,20 @@
 ;;; ============================================================
 
 (defn validate-args
-  "验证工具参数（基于 var 元数据中的 schema）
+  "按 var 元数据中的 input_schema **完整**校验工具参数（type / enum / pattern /
+   min·max / minLength / items / required …，一次报全，见 `tool-args`）。
 
    参数:
    - v:    tool function 的 var 引用
    - args: 参数 map
 
    返回:
-   {:valid bool :errors [string]}"
+   {:valid bool :errors [string]}——每处错误一行（带路径与期望）"
   [v args]
-  (let [schema (get-schema v)
-        required (set (map keyword (get-in schema [:input_schema :required] [])))]
-    (if (empty? required)
+  (let [errors (tool-args/validate (:input_schema (get-schema v)) args)]
+    (if (empty? errors)
       {:valid true :errors []}
-      (let [provided (set (keys args))
-            missing (clojure.set/difference required provided)]
-        (if (empty? missing)
-          {:valid true :errors []}
-          {:valid false
-           :errors (mapv #(str "缺少必需参数: " (name %)) missing)})))))
+      {:valid false :errors (tool-args/error-lines errors)})))
 
 (defn invoke
   "执行 tool function 并返回标准结果
@@ -509,7 +527,9 @@
    ;; （:default 参数不在 required 中，不受影响）。
    (let [{:keys [valid errors]} (validate-args v (or args {}))]
      (if-not valid
-       {:success false :error (clojure.string/join "; " errors)}
+       {:success false
+        :error (str (clojure.string/join "; " errors)
+                    "。请按工具的参数 schema 修正后重试。")}
        (try
          (let [f (var-get v)
                needs-ctx? (context-tool? v)
