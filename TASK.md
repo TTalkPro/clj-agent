@@ -4,6 +4,83 @@
 
 ---
 
+# 【当前轮】借鉴 Keelson：运行时 / Provider / AG-UI / 编码工具（2026-11-08）
+
+> 起因：通读 `~/workspace/keelson` 的 `Keelson.Agent*` 与 `Keelson.Agui*`，把适合直接放进
+> clj-agent 的能力全部立项（用户拍板：先设计、再开发，**只开发不提交**）。
+> 总览与取舍：[designs/keelson-borrow.md](designs/keelson-borrow.md)（含「不搬的」「已持平」「缺省行为变化」「待拍板」）。
+> **从本轮起改为索引制**：每个任务的范围 / 验收 / 完成记录在 `tasks/<编号>.md`，
+> 「为什么这样定」在 `designs/`。编号前缀 `P` provider · `R` runtime · `G` AG-UI · `T` tools 模块。
+> 状态：⬜ 未开始 · 🟡 进行中 · ✅ 完成。门禁：`bb test`（五模块）+ `clojure -M:test:copilotkit --focus :examples` + `bb check-docs`。
+
+## Provider 可靠性（[provider-reliability.md](designs/provider-reliability.md)）
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [P-01](tasks/P-01.md) | 错误细分 + 厂商业务码表 | ✅ |
+| [P-02](tasks/P-02.md) | 重试增强：空补全独立预算、流式首增量前重试、attempts 记录 | ✅ |
+| [P-03](tasks/P-03.md) | 主备模型切换 FallbackChatModel | ✅ |
+| [P-04](tasks/P-04.md) | 流式首字节 / 空闲超时 + 回包模型名核对 | ✅ |
+| [P-05](tasks/P-05.md) | 并发准入票据池 | ✅ |
+| [P-06](tasks/P-06.md) | 统一限流快照 | ✅ |
+| [P-07](tasks/P-07.md) | thinking 档位统一 | ✅ |
+| [P-08](tasks/P-08.md) | ModelSpec 元数据与注册表 | ✅ |
+| [P-09](tasks/P-09.md) | Anthropic 服务端工具块可读描述（低优先） | ✅ |
+| [P-10](tasks/P-10.md) | pause_turn 续跑判定 | ✅ |
+
+## Agent 运行时（[runtime-borrow.md](designs/runtime-borrow.md)）
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [R-01](tasks/R-01.md) | 摘要式上下文压缩（compaction-filter） | ✅ |
+| [R-02](tasks/R-02.md) | 工具结果截断 + 全文另存（tool-output-filter） | ✅ |
+| [R-03](tasks/R-03.md) | 同参失败保护 + 失败摘除（tool-guard-filter） | ✅ |
+| [R-04](tasks/R-04.md) | 死循环提醒（dead-loop-filter）+ react 临时提醒挂点 | ✅ |
+| [R-05](tasks/R-05.md) | 声明式审批策略 + 会话审批缓存 | ✅ |
+| [R-06](tasks/R-06.md) | 审批链 + 拒绝熔断 + 审批超时 | ✅ |
+| [R-07](tasks/R-07.md) | 模型审阅者 | ✅ |
+| [R-08](tasks/R-08.md) | 按 schema 完整校验工具参数 | ✅ |
+| [R-09](tasks/R-09.md) | 收尾闸门（completion-gate-filter） | ✅ |
+| [R-10](tasks/R-10.md) | 分层指令文件（instructions-filter） | ✅ |
+| [R-11](tasks/R-11.md) | 回合生命周期事件 + 指标挂点 | ✅ |
+| [R-12](tasks/R-12.md) | 消息规范化补全（normalize-filter） | ✅ |
+| [R-13](tasks/R-13.md) | pause_turn 续跑 | ✅ |
+| [R-14](tasks/R-14.md) | 子代理异步工具组（低优先） | ✅ |
+| [R-15](tasks/R-15.md) | 压缩的可替换挂点：CompactionStore + 写回策略 | ✅ |
+
+## AG-UI（[agui-borrow.md](designs/agui-borrow.md)）
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [G-01](tasks/G-01.md) | 审批时改参数（approveWithEdits）+ 拒绝理由透传 | ✅ |
+| [G-02](tasks/G-02.md) | 同一轮多条审批 | ✅ |
+| [G-03](tasks/G-03.md) | SSE 心跳 | ✅ |
+| [G-04](tasks/G-04.md) | 多 agent 注册表 | ✅ |
+| [G-05](tasks/G-05.md) | 取消原因 + 孤儿自动停 | ✅ |
+| [G-06](tasks/G-06.md) | 线程元数据持久化 | ✅ |
+| [G-07](tasks/G-07.md) | 入参校验与 HTTP 面补齐 | ✅ |
+| [G-08](tasks/G-08.md) | 事件存储可替换挂点（EventStore） | ✅ |
+| [G-09](tasks/G-09.md) | `stop-semantics-test` 间歇失败：加诊断（待复现） | 🟡 |
+
+## 新模块 clj-agent-tools（[tools-module.md](designs/tools-module.md)）
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [T-01](tasks/T-01.md) | clj-agent-tools 模块骨架 + 工作区 / 路径策略 + 工具集合构造 | ✅ |
+| [T-02](tasks/T-02.md) | read_file / write_file / list_dir / glob / grep / delete_path | ✅ |
+| [T-03](tasks/T-03.md) | edit_file 精确替换 + ReadFreshness 读写新鲜度闸 | ✅ |
+| [T-04](tasks/T-04.md) | apply_patch（Codex 补丁文法，内存推演后才落盘） | ✅ |
+| [T-05](tasks/T-05.md) | exec + HeadTailBuffer + 有状态 exec 会话 | ✅ |
+| [T-06](tasks/T-06.md) | web_fetch / skill / notes | ✅ |
+| [T-07](tasks/T-07.md) | 写后语法守卫（「不更糟」闸） | ✅ |
+
+### 已拍板（2026-11-08）
+
+- AG-UI 事件持久化**不做**；事件存储做成可替换挂点（G-08），持久化由外部库实现（同 Keelson `Agui.Bitcask`）。
+- R-01 压缩**保持缺省不改写**；摘要缓存与写回策略做成可替换挂点（R-15）。
+
+---
+
 # 【当前轮】补齐 CopilotKit 的后台能力（2026-09-03）
 
 > 起因：把 `generateSandboxedUi`（Open Generative UI）移植进来之后，通盘查了一遍

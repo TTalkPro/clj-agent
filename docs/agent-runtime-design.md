@@ -733,6 +733,13 @@ sqlite-runner 那套（`agent_runs` + `run_state` 表）是 durable execution �
 `hitl-timeline-design.md` §3.4 **已经明确出界**：只保证「暂停点」这个一致快照跨
 进程存活，批次执行中途的崩溃恢复不做。本文不推翻那条结论。
 
+> **补注（2026-11-08，用户拍板）**：事件持久化本库仍**不做**，但事件存储改为可替换挂点
+> `im.ttalk.agent.agui.event-store/EventStore`（缺省 `ring-store` = 原环形缓冲，行为不变）。
+> 外部库实现该协议即可持久化事件（角色同 Keelson `Agui.Bitcask`）；即便如此它也只是回放设施，
+> §8.1 的真相分工不变——`:since` 补不上仍以 ChatMemory 快照 resync。这一条同时是对 §8.3
+> 「出现第二个真实后端再抽协议」的显式修订（用户拍板，外部持久化后端是既定方向）。
+> 见 `designs/agui-borrow.md` §8、`tasks/G-08.md`。
+
 ### 8.3 `AgentRunner` 抽象协议
 
 四问：现在有第二个实现吗？**没有**（in-memory 一个）。不建的话怎么办？
@@ -1207,6 +1214,11 @@ agent 框架并不执行它们，所以中间件在 run 收尾时自己扫「没
 
 `/threads/subscribe` **如实 404**：那是 Intelligence（云产品）的实时通道，
 我们没有。客户端收到 404 会降级成轮询——比假装订阅成功然后永远不推送强。
+
+> **2026-11-08 更新**：边界 1、3 已由线程**元数据**存储解决（`agui.thread-store`，
+> 进程内 + 可选 sqlite；`/threads` 列表改读它，驱逐 / 重启后照样列得出来）；
+> 边界 2 **不变**——事件仍不落库，与 §8.1 / §8.2 一致。见
+> [designs/agui-borrow.md](../designs/agui-borrow.md) §6。
 
 ---
 

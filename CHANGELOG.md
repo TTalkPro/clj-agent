@@ -2,6 +2,60 @@
 
 本项目版本号形如 `0.x.<git-count>`（各模块同步）。本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织。
 
+## [未发布] - 2026-11-08 借鉴 Keelson
+
+总览：`designs/keelson-borrow.md`；任务 `tasks/P-*`、`R-*`、`G-*`、`T-*`（索引见 TASK.md 顶部一轮）。
+
+### ✨ 新增
+
+- **provider 可靠性**（`designs/provider-reliability.md`）：错误细分 `:quota-exhausted-error` /
+  `:context-overflow-error` / `:empty-completion-error` + 厂商业务码表（`provider.common.business-codes`）；
+  重试增强（空补全独立预算、流式首增量前可重试、`:attempts` 记录）；主备切换
+  `im.ttalk.agent.chat-model.fallback`；流式 `:first-byte-ms` / `:idle-ms` 死线与回包模型名核对；
+  并发准入 `im.ttalk.agent.admission`（`chat-model/with-admission`）；统一限流快照
+  `provider.common.rate-limit`；thinking 档位 `provider.common.thinking`；ModelSpec
+  `im.ttalk.agent.model.spec`；`response/pause-turn-resumable?`；`provider.anthropic-server-tools`。
+- **Agent 运行时**（`designs/runtime-borrow.md`）：上下文压缩 `filter.compaction`；工具结果截断 / 另存
+  `filter.tool-output`；同参失败保护 / 失败摘除 `filter.tool-guard`；死循环提醒 `filter.dead-loop`；
+  声明式审批策略、会话审批缓存、审批链、拒绝熔断、超时 `im.ttalk.agent.approval`，模型审阅
+  `approval.model`；工具参数按 schema 完整校验 `tool-args`；收尾闸门 `completion-gate-filter`；
+  分层指令文件 `filter.instructions`；生命周期事件 `:on-event` + `events`；消息规范化
+  `filter.normalize`；子代理异步工具组 `subagent.tools`；暂停可含多条待审批（`:pending-tools`，
+  resume `{:decisions {id …}}`）。
+- **AG-UI**（`designs/agui-borrow.md`）：审批改参数 approveWithEdits + 拒绝理由透传；一轮多条审批；
+  SSE 心跳；多 agent 注册表 `agui.registry`；取消原因（stop / superseded / shutdown / orphan）与
+  可选孤儿自动停；线程元数据持久化 `agui.thread-store`（内存 + 按需加载 sqlite）；入参校验
+  400 / 413、`/stop` 带 interrupt、`/threads` 过滤 / 分页 / 缺槽 501。
+- **可替换的持久化挂点**（用户拍板：本库不做持久化，留给外部库）：AG-UI 事件存储
+  `agui.event-store/EventStore`（runtime `:event-store`，缺省环形缓冲；新 `rt/purge!`）；
+  压缩状态 `filter.compaction/CompactionStore`（`:store`）与写回策略 `:write-back`。
+- **新模块 `clj-agent-tools`**（`designs/tools-module.md`）：工作区路径策略、read / write / list /
+  glob / grep / delete、edit_file + 读写新鲜度闸、apply_patch（Codex 文法，署名见模块
+  `LICENSE-codex.txt`）、exec 与有状态会话、web_fetch / skill / notes、写后语法闸。
+
+### 🧪 测试
+
+- `agui` `runtime_test/stop-semantics-test` 曾间歇失败一次（`stop!` 返回 false），压测约 45 次未复现：
+  加诊断（闸门状态 / 实际等待、时间线、run 状态、事件序列随断言打印），并改为放行测试自己持有的闸门，
+  不再回读全局 atom（原写法会 NPE 吞掉诊断）。只改测试。见 `tasks/G-09.md`。
+
+### ⚠️ 缺省行为变化
+
+- 流式在首个增量之前失败缺省重试 2 次（原 0 次）；config 里的 `:retry` 改由 ChatModel 统一执行，
+  不再叠加传输层重试。空补全缺省补打 1 次，仍空原样返回（`:empty-exhausted :throw` 才抛）。
+- 欠费类 429 不再当限流重试，`classify-exception` 归 `:environment`；普通 429 照旧重试。
+- var 工具的参数按 schema 完整校验（原先只查必需参数）。
+- Anthropic `pause_turn` 现在续跑（原以 `:pause` 收尾）。
+- AG-UI 审批答复 `{approved:false}` 一律当拒绝（原被误判为批准）。
+
+### 🐛 修复
+
+- Retry-After 在真实请求上从未生效（响应头值是 List，原代码按字符串解析失败）。
+- Anthropic 流内 error 事件被吞成「流式响应未产出结果」，现转为 canonical error。
+- openai 兼容 provider 的错误 `:provider` 为 nil。
+- `subagent.manager/resume!` 把 `{:payload … :on-token …}` 整个当 payload 传给 `simple-agent/resume`：
+  子 agent 审批改参数不生效、`:reply` 抛异常、续跑不流式。改为 payload 与 chat-opts 分开传。
+
 ## [0.3.0] - 未发布（2026-07-17 定稿；2026-07-11 启动）
 
 v0.3 追加整合（2026-10-22）：provider 层补齐第三个主流协议栈
