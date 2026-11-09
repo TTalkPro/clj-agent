@@ -69,7 +69,14 @@
     :lib 'im.ttalk/clj-agent-agui
     :dir "modules/clj-agent-agui"
     :override-libs ['im.ttalk/clj-agent-core 'im.ttalk/clj-agent-client]
-    :description "clj-agent AGUI - Agent runtime backend (run registry / event stream / AG-UI codec)"}])
+    :description "clj-agent AGUI - Agent runtime backend (run registry / event stream / AG-UI codec)"}
+   {:key :tools
+    :lib 'im.ttalk/clj-agent-tools
+    :dir "modules/clj-agent-tools"
+    :override-libs ['im.ttalk/clj-agent-core]
+    ;; 第三方署名随 jar 发（Apache-2.0 §4：再分发须附许可证原文与 NOTICE）
+    :extra-files ["LICENSE-codex.txt" "THIRD-PARTY-NOTICES.md"]
+    :description "clj-agent Tools - workspace coding tools for agents (files / edit / apply_patch / exec / web_fetch)"}])
 
 (def ^:private class-dir "target/classes")
 (def ^:private src-dirs ["src"])
@@ -175,6 +182,8 @@
                                 [:id "clj-agent"]
                                 [:name "clj-agent team"]]]]})
      (b/copy-dir {:src-dirs src-dirs :target-dir class-dir})
+     (doseq [f (:extra-files m)]
+       (b/copy-file {:src f :target (str class-dir "/META-INF/" (name lib) "/" f)}))
      (b/jar {:class-dir class-dir :jar-file (jar-file m)})))
   opts)
 

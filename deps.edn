@@ -2,7 +2,8 @@
           "modules/clj-agent-client/src"
           "modules/clj-agent-provider/src"
           "modules/clj-agent-mcp/src"
-          "modules/clj-agent-agui/src"]
+          "modules/clj-agent-agui/src"
+          "modules/clj-agent-tools/src"]
  :deps {org.clojure/clojure {:mvn/version "1.11.4"}
 
         ;; JSON
@@ -18,7 +19,8 @@
                                "modules/clj-agent-client/test"
                                "modules/clj-agent-core/test"
                                "modules/clj-agent-mcp/test"
-                               "modules/clj-agent-agui/test"]
+                               "modules/clj-agent-agui/test"
+                               "modules/clj-agent-tools/test"]
                  :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
                  :main-opts ["-m" "kaocha.runner"]}
 

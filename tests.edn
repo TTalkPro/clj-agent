@@ -1,7 +1,8 @@
 #kaocha/v1
-;; :examples —— examples/ 下**可离线跑**的测试。今天只有 genui（Open Generative UI
+;; :examples —— examples/ 下**可离线跑**的测试：genui（Open Generative UI
 ;; 插件，2026-09-03 从 clj-agent-agui 模块移出：它是 CopilotKit Runtime 的一个可选
-;; 中间件约定，不是 AG-UI 的核心能力）。
+;; 中间件约定，不是 AG-UI 的核心能力）与 http-kit 路由层（2026-11-08）。
+;; 跑法：clojure -M:test:copilotkit --focus :examples
 ;;
 ;; `:ns-patterns` 必须钉死到具体 ns：同目录下的 `copilotkit.agui-live-test` 也叫
 ;; `*-test`，缺省模式会把它一并收进来，那是要 MINIMAX_API_KEY 打真实端点的。
@@ -10,7 +11,11 @@
                        "modules/clj-agent-client/test"
                        "modules/clj-agent-core/test"
                        "modules/clj-agent-mcp/test"
-                       "modules/clj-agent-agui/test"]}
+                       "modules/clj-agent-agui/test"
+                       "modules/clj-agent-tools/test"]}
          {:id :examples
           :test-paths ["examples"]
-          :ns-patterns ["copilotkit\\.genui-test"]}]}
+          :ns-patterns ["copilotkit\\.genui-test"
+                        ;; 路由层（designs/agui-borrow.md）：直接调 handler + 本机回环
+                        ;; 起一台 http-kit，mock provider，不打外部端点
+                        "copilotkit\\.http-kit-routes-test"]}]}

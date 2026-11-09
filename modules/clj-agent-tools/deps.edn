@@ -1,0 +1,21 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ ;; 只依赖 core：工具是 deftool var（tool/* 元数据约定），不认识 react 循环 / memory / pause。
+ ;; 设计见 designs/tools-module.md §2。
+ :deps {org.clojure/clojure {:mvn/version "1.11.4"}
+
+        im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
+
+        ;; JSON 语法检查器（T-07）要 Jackson 的错误位置；cheshire 已是 client/provider/mcp 的依赖
+        cheshire/cheshire {:mvn/version "5.12.0"}}
+
+ ;; 零新依赖：HTTP 走 JDK java.net.http，XML 走 JDK SAX，进程走 ProcessBuilder。
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}

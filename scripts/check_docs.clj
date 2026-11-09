@@ -86,7 +86,8 @@
    "modules/clj-agent-core/README.md"
    "modules/clj-agent-client/README.md"
    "modules/clj-agent-provider/README.md"
-   "modules/clj-agent-agui/README.md"])
+   "modules/clj-agent-agui/README.md"
+   "modules/clj-agent-tools/README.md"])
 
 ;;; 允许不被任何 README 提及的 ns（内部实现细节）
 (def ^:private coverage-allowlist
