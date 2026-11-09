@@ -11,7 +11,8 @@ clj-agent/
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
 │   ├── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
 │   ├── clj-agent-mcp/       # (可选)MCP 协议两侧(client + server),**零内部依赖**
-│   └── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议,依赖 core + client + mcp
+│   ├── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议,依赖 core + client + mcp
+│   └── clj-agent-tools/     # (可选)编码类 agent 工具(文件 / 补丁 / exec / web_fetch),依赖 core
 ├── bb.edn                   # 开发任务(bb test / bb jar / bb release …)
 ├── build.clj                # 三模块统一构建发布(tools.build)
 └── deps.edn                 # 根配置(开发/测试一次性加载全部模块)
@@ -108,6 +109,25 @@ deprecated。所以这不是升级而是重写——原来那份 legacy 实现�
 
 **依赖**: 无内部依赖; cheshire, timbre
 (设计与判据见 `docs/mcp-module-design.md`)
+
+---
+
+### 1.8 clj-agent-tools — 编码类 agent 工具(可选)
+
+**职责**: 一行 `(tools/workspace-tools {:root ".." :groups #{:files :edit}})` 拿到一组绑定好工作区的
+`deftool` 工具 var(`read_file` / `write_file` / `edit_file` / `apply_patch` / `list_dir` / `glob` / `grep` /
+`delete_path` / `exec` / `exec_command` / `write_stdin` / `web_fetch` / `skill` / `notes_*`)。所有碰文件的工具先过
+**工作区路径策略**(根 / 只读根 / 受保护名 / 符号链接逃逸),写类工具过**读写新鲜度闸**与**「不更糟」语法闸**,
+敏感工具用 `{:sensitive true}` 标注——现有 `approval-filter` / `:on-pause` 原样生效。
+
+- `im.ttalk.agent.tools` - 门面(`workspace-tools` / `preview` 审批预览 / `close!`)
+- `im.ttalk.agent.tools.{workspace,files,edit,patch,exec,web,skill,notes,syntax,freshness,text,walk}` - 见模块 README
+
+**为什么不进 core**: core 零依赖零 I/O;这些工具碰文件系统、起子进程、出网。**只依赖 core**(不依赖 client),
+工具不认识 react 循环 / memory / pause。
+
+**依赖**: `clj-agent-core`; cheshire(HTTP / XML / 进程全走 JDK)
+(设计与判据见 `designs/tools-module.md`;Codex 署名见 `clj-agent-tools/THIRD-PARTY-NOTICES.md`)
 
 ---
 
