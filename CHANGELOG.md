@@ -2,7 +2,10 @@
 
 本项目版本号形如 `0.x.<git-count>`（各模块同步）。本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织。
 
-## [未发布] - 2026-11-08 借鉴 Keelson
+## [0.4.0] - 未发布（2026-11-08 借鉴 Keelson）
+
+版本方案 `0.x.<git-count>`：本轮起 minor 走到 `0.4`（新增模块 `clj-agent-tools` +
+provider/运行时/AG-UI 三面能力齐涨），各模块同步 `0.4.<git-count>`。
 
 总览：`designs/keelson-borrow.md`；任务 `tasks/P-*`、`R-*`、`G-*`、`T-*`（索引见 TASK.md 顶部一轮）。
 

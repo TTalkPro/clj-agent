@@ -579,23 +579,23 @@ Context manages shared state within a conversation:
 Dev tasks all go through [babashka](https://babashka.org/) (`bb tasks` lists them all):
 
 ```bash
-bb test          # test all three modules; `bb test core` for just one
+bb test          # test all five modules; `bb test core` for just one
 bb check-docs    # docs-vs-code gate (ghost APIs / missing index entries)
 bb check         # test + check-docs — run this before committing
 
-bb jar           # jar all three modules; `bb jar core` for just one
+bb jar           # jar all five modules; `bb jar core` for just one
 bb install       # install into the local ~/.m2
 bb release       # per module: clean → jar → install (full pre-release flow)
 bb deploy        # push to Clojars (needs CLOJARS_USERNAME / CLOJARS_PASSWORD)
-bb version       # current version (0.3.<git-count-revs>)
+bb version       # current version (0.4.<git-count-revs>)
 
 bb repl                       # REPL with all module sources on the classpath
 bb repl simpleagent_examples  # load an example first, then drop into the REPL
 ```
 
 The build itself lives in the root `build.clj` (tools.build) — `bb` is just the entry
-point, `clojure -T:build jar :module core` works too. All three modules share one build:
-same pom-data, same `0.3.<git-count>` version scheme, switched per module via
+point, `clojure -T:build jar :module core` works too. All five modules share one build:
+same pom-data, same `0.4.<git-count>` version scheme, switched per module via
 `b/set-project-root!`.
 
 > **Why core must be installed before client/provider are jarred**: their `deps.edn`

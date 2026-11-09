@@ -175,7 +175,7 @@ clj-agent/
 
 ```bash
 cd /path/to/clj-agent
-bb release            # 三个模块按 core → client → provider 打包 + 装进 ~/.m2
+bb release            # 五个模块按 core → client → provider → agui → tools 打包 + 装进 ~/.m2
 bb release core       # 或只装某一个
 ```
 
@@ -183,8 +183,9 @@ bb release core       # 或只装某一个
 
 ```clojure
 ;; deps.edn
-{:deps {im.ttalk/clj-agent-client {:mvn/version "0.3.xxx"}     ;; agent 运行时（引 core）
-        im.ttalk/clj-agent-provider {:mvn/version "0.3.xxx"}}}  ;; 厂商适配器
+{:deps {im.ttalk/clj-agent-client {:mvn/version "0.4.xxx"}     ;; agent 运行时（引 core）
+        im.ttalk/clj-agent-provider {:mvn/version "0.4.xxx"}     ;; 厂商适配器
+        im.ttalk/clj-agent-tools {:mvn/version "0.4.xxx"}}}      ;; 编码工具集
 ```
 
 > **建议**：本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。
@@ -868,23 +869,23 @@ embedding 模型与对话模型是两种模型，因此走**独立实例 + 独�
 开发任务统一走 [babashka](https://babashka.org/)（`bb tasks` 列全部）：
 
 ```bash
-bb test          # 三个模块全测；bb test core 只测一个
+bb test          # 五个模块全测；bb test core 只测一个
 bb check-docs    # 文档一致性门禁（幽灵 API / 模块索引缺漏）
 bb check         # test + check-docs，提交前跑这个
 
-bb jar           # 打包三个模块；bb jar core 只打一个
+bb jar           # 打包五个模块；bb jar core 只打一个
 bb install       # 装到本地 ~/.m2
 bb release       # 逐模块 clean → jar → install（发布前完整流程）
 bb deploy        # 推 Clojars（需 CLOJARS_USERNAME / CLOJARS_PASSWORD）
-bb version       # 当前版本号（0.3.<git-count-revs>）
+bb version       # 当前版本号（0.4.<git-count-revs>）
 
 bb repl                       # 带全部模块源码的 REPL
 bb repl simpleagent_examples  # 先加载某个 example 再进 REPL
 ```
 
 构建/发布本体在根 `build.clj`（tools.build），`bb` 只是入口——也可以直接
-`clojure -T:build jar :module core`。三个模块共用一份构建代码：同一套 pom-data、
-同一个 `0.3.<git-count>` 版本方案，靠 `b/set-project-root!` 切模块目录。
+`clojure -T:build jar :module core`。五个模块共用一份构建代码：同一套 pom-data、
+同一个 `0.4.<git-count>` 版本方案，靠 `b/set-project-root!` 切模块目录。
 
 > **为什么 client/provider 打包前要先 install core**：它俩的 `deps.edn` 里 core 是
 > `{:local/root ".."}`，而 `write-pom` 写不出本地路径的合法 Maven 坐标——不处理的话
@@ -892,7 +893,7 @@ bb repl simpleagent_examples  # 先加载某个 example 再进 REPL
 > 把它换成同版本 `:mvn/version`，代价是这个版本的 core 必须已在本地仓库里。
 > `bb release` 逐模块 clean→jar→install 天然满足；单独 `bb jar client` 则会自动补一次 core。
 
-> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对三个模块并行跑
+> CI：`.github/workflows/test.yml` 在 push / PR 到 `main` 时对五个模块并行跑
 > `bb test <module>`，外加一个 `docs` job 跑 `bb check-docs`（与本地同一条命令）。
 
 <!-- check-docs:ignore-start -->

@@ -40,13 +40,13 @@
 
   ;; ---------------- 构建 / 发布（均转发到根 build.clj）----------------
 
-  clean       {:doc "清理三个模块的 target/（bb clean core 只清一个）"
+  clean       {:doc "清理五个模块的 target/（bb clean core 只清一个）"
                :task (build-task "clean")}
 
-  jar         {:doc "打包三个模块（bb jar core 只打一个）"
+  jar         {:doc "打包五个模块（bb jar core 只打一个）"
                :task (build-task "jar")}
 
-  install     {:doc "装到本地 ~/.m2（core → client → provider）"
+  install     {:doc "装到本地 ~/.m2（core → client → provider → agui → tools）"
                :task (build-task "install")}
 
   release     {:doc "发布前完整流程：逐模块 clean → jar → install"
@@ -55,14 +55,14 @@
   deploy      {:doc "推 Clojars（需 CLOJARS_USERNAME / CLOJARS_PASSWORD）"
                :task (build-task "deploy")}
 
-  version     {:doc "打印当前版本号（0.3.<git-count-revs>）"
+  version     {:doc "打印当前版本号（0.4.<git-count-revs>）"
                :override-builtin true
-               :task (println (str "0.3." (str/trim (:out (shell {:out :string} "git rev-list HEAD --count")))))}
+               :task (println (str "0.4." (str/trim (:out (shell {:out :string} "git rev-list HEAD --count")))))}
 
   ;; ---------------- 测试 / 门禁 ----------------
 
   test
-  {:doc "跑三个模块的测试（bb test core 只跑一个）"
+  {:doc "跑五个模块的测试（bb test core 只跑一个）"
    ;; 先把参数全解析成目录再开跑：否则 `bb test core bogus` 会先跑完 core
    ;; 的整套测试，才在第二个模块上炸出「未知模块」。
    :task (let [targets (mapv (fn [m] [m (module-dir m)])

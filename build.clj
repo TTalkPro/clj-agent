@@ -12,13 +12,13 @@
 
    用法（-T:build，模块顺序 core → client → provider 已内建）：
 
-     clojure -T:build clean            # 清理三个模块的 target/
-     clojure -T:build jar              # 打包三个模块
+     clojure -T:build clean            # 清理五个模块的 target/
+     clojure -T:build jar              # 打包五个模块
      clojure -T:build install          # 装到本地 ~/.m2
      clojure -T:build release          # 每模块 clean → jar → install（发布前的完整流程）
      clojure -T:build deploy           # 推 Clojars（需 CLOJARS_USERNAME/PASSWORD）
 
-     clojure -T:build jar :module core # 只做单个模块（core/client/provider）
+     clojure -T:build jar :module core # 只做单个模块（core/client/provider/agui/tools）
 
    或经 babashka：bb jar / bb install / bb release / bb deploy（见 bb.edn）。"
   (:require [clojure.java.io :as io]
@@ -26,9 +26,9 @@
             [clojure.tools.build.api :as b]
             [deps-deploy.deps-deploy :as dd]))
 
-;; 版本在项目根算一次：git-count-revs 跟着 *project-root* 走，但三个模块同属一个
-;; 仓库、共用 0.3.<git-count> 逐提交对齐的版本方案，故不允许按模块各算各的。
-(def version (format "0.3.%s" (b/git-count-revs nil)))
+;; 版本在项目根算一次：git-count-revs 跟着 *project-root* 走，但五个模块同属一个
+;; 仓库、共用 0.4.<git-count> 逐提交对齐的版本方案，故不允许按模块各算各的。
+(def version (format "0.4.%s" (b/git-count-revs nil)))
 
 (def ^:private scm-url "https://github.com/TTalkPro/clj-agent")
 

@@ -49,13 +49,13 @@
 (def ^:private this-file (.getAbsolutePath (io/file *file*)))
 
 (defn- release-version
-  "与 build.clj 同一套：0.3.<git-count-revs>。"
+  "与 build.clj 同一套：0.4.<git-count-revs>。"
   []
   (let [{:keys [exit out]} (shell/sh "git" "rev-list" "HEAD" "--count")]
     (when-not (zero? exit)
       (println "拿不到 git rev count——本脚本要在仓库里跑")
       (System/exit 1))
-    (str "0.3." (str/trim out))))
+    (str "0.4." (str/trim out))))
 
 (defn- m2-jar [artifact version]
   (io/file (System/getProperty "user.home") ".m2" "repository" "im" "ttalk"
@@ -63,7 +63,8 @@
 
 (defn- run-parent! []
   (let [version (release-version)
-        artifacts ["clj-agent-core" "clj-agent-client" "clj-agent-provider"]
+        artifacts ["clj-agent-core" "clj-agent-client" "clj-agent-provider"
+         "clj-agent-agui" "clj-agent-tools"]
         missing (remove #(.exists (m2-jar % version)) artifacts)]
     (println "=== 发布产物消费方验证 ===")
     (println "版本：" version)
