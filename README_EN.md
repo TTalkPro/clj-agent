@@ -671,7 +671,7 @@ Core:
 - cheshire/cheshire 5.12.0 (provider, JSON)
 - com.taoensso/timbre 6.3.0 (client / provider, logging)
 
-> The core module has zero external deps; HTTP uses the JDK's built-in java.net.http.
+> The core module has zero external deps; HTTP transport lives in the zero-dependency `clj-http` module (the JDK's built-in java.net.http).
 
 Persistent ChatMemory (client module, SQLite backend, opt-in via `im.ttalk.agent.memory.sqlite`):
 

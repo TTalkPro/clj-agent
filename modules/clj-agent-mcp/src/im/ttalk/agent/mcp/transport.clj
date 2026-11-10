@@ -41,13 +41,12 @@
   (:require [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [im.ttalk.http :as http]
+            [im.ttalk.http.sse :as sse]
             [im.ttalk.agent.mcp.protocol :as p]
             [taoensso.timbre :as log])
   (:import [java.io BufferedWriter]
-           [java.net URI]
-           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-            HttpResponse$BodyHandlers]
-           [java.time Duration]
+           [java.net.http HttpClient]
            [java.util.concurrent Callable Executors ExecutorService TimeUnit]))
 
 (set! *warn-on-reflection* true)
@@ -79,16 +78,17 @@
 ;;; ============================================================
 
 (defn- parse-sse
-  "SSE 响应体 → 第一条能解析成 JSON 的 `data:`。
+  "SSE 响应体 → 第一个 `:data` 能解析成 JSON 的事件。分帧走 `im.ttalk.http.sse`（WHATWG）：
+   多行 `data:` 按规范以换行拼接（此前只取第一行，一条 JSON 拆成多行 data 就解析失败）、
+   `\\r\\n` / `\\r` 行尾都认。末尾补一个空行：服务端写完最后一个事件就关连接、没写收尾空行时也不丢它。
 
-   够用的理由：本传输只做**请求/响应**。真正的长流（`subscriptions/listen`）是
+   只取第一条够用的理由：本传输只做**请求/响应**。真正的长流（`subscriptions/listen`）是
    另一件事，等有需求再开——现在把它做出来就是替想象中的用户写代码。"
   [body]
-  (some (fn [line]
-          (when (str/starts-with? line "data:")
-            (try (json/parse-string (str/trim (subs line 5)))
-                 (catch Exception _ nil))))
-        (str/split-lines (str body))))
+  (some (fn [{:keys [data]}]
+          (try (json/parse-string data)
+               (catch Exception _ nil)))
+        (sse/parse-all (str body "\n\n"))))
 
 (defn- json-rpc-error-of
   "从响应体里挖 JSON-RPC 错误信封（挖不出就 nil）。
@@ -107,49 +107,50 @@
     (let [pv (p/protocol-version-of msg)
           method (get msg "method")
           rname (p/routing-name msg)
-          b (-> (HttpRequest/newBuilder (URI/create url))
-                (.timeout (Duration/ofMillis (long timeout-ms)))
-                (.header "Content-Type" "application/json")
-                (.header "Accept" "application/json, text/event-stream"))]
-      (doseq [[k v] headers] (.header b (name k) (str v)))
-      ;; 三个必填头。**都从信封反读**，不另记一份
-      (when pv (.header b "MCP-Protocol-Version" (str pv)))
-      (when method (.header b "Mcp-Method" (str method)))
-      (when rname (.header b "Mcp-Name" (str rname)))
-      ;; legacy 兼容：老 server 给了 session id 就一路带着
-      (when-let [s @session] (.header b "Mcp-Session-Id" ^String s))
-      (let [req (-> b (.POST (HttpRequest$BodyPublishers/ofString (p/encode msg))) (.build))
-            resp (.send http req (HttpResponse$BodyHandlers/ofString))
-            status (.statusCode resp)
-            ctype (str (-> resp .headers (.firstValue "content-type") (.orElse "")))
-            body (.body resp)]
-        (when-let [s (-> resp .headers (.firstValue "mcp-session-id") (.orElse nil))]
-          (reset! session s))
-        (cond
-          (>= status 400)
-          (throw (transport-error (str "MCP HTTP " status)
-                                  {:status status
-                                   :url url
-                                   :jsonrpc-error (json-rpc-error-of body)
-                                   :body (subs (str body) 0 (min 500 (count (str body))))}))
+          hs (cond-> (merge {"Content-Type" "application/json"
+                             "Accept" "application/json, text/event-stream"}
+                            headers)
+               ;; 三个必填头。**都从信封反读**，不另记一份；调用方的同名头不得盖掉它们
+               pv (http/assoc-header "MCP-Protocol-Version" (str pv))
+               method (http/assoc-header "Mcp-Method" (str method))
+               rname (http/assoc-header "Mcp-Name" (str rname))
+               ;; legacy 兼容：老 server 给了 session id 就一路带着
+               @session (http/assoc-header "Mcp-Session-Id" @session))
+          resp (http/request {:method :post :url url :headers hs :body (p/encode msg)
+                              :timeout-ms timeout-ms :client http})
+          status (:status resp)
+          ctype (str (http/header resp "content-type"))
+          body (:body resp)]
+      (when-let [s (http/header resp "mcp-session-id")]
+        (reset! session s))
+      (cond
+        (>= status 400)
+        (throw (transport-error (str "MCP HTTP " status)
+                                {:status status
+                                 :url url
+                                 :jsonrpc-error (json-rpc-error-of body)
+                                 :body (subs (str body) 0 (min 500 (count (str body))))}))
 
-          (str/blank? (str body)) nil
-          (str/includes? ctype "text/event-stream") (parse-sse body)
-          :else (p/parse body)))))
+        (str/blank? (str body)) nil
+        (str/includes? ctype "text/event-stream") (parse-sse body)
+        :else (p/parse body))))
   (close! [_] nil))
 
 (defn http-transport
-  "Streamable HTTP 传输。
+  "Streamable HTTP 传输（传输层是 `im.ttalk.http`）。
 
    - `:url`        必填
    - `:headers`    额外头（鉴权走这里；MCP 的 auth 框架只管 HTTP）
-   - `:timeout-ms` 单次请求上限（缺省 30s）"
-  [{:keys [url headers timeout-ms] :or {timeout-ms 30000}}]
+   - `:timeout-ms` 单次请求上限（缺省 30s）
+   - `:client`     自带 `java.net.http.HttpClient`；缺省共享的 `im.ttalk.http/default-client`
+                   （HTTP/1.1、虚拟线程、connect 30s——designs/http-module.md §6）
+   - `:proxy`      没给 `:client` 时用：`:env`（读 https_proxy / no_proxy …）、代理地址串，或 ProxySelector"
+  [{:keys [url headers timeout-ms client proxy] :or {timeout-ms 30000}}]
   (when (str/blank? (str url))
     (throw (ex-info "http-transport 需要 :url" {})))
-  (->HttpTransport (-> (HttpClient/newBuilder)
-                       (.connectTimeout (Duration/ofMillis (long timeout-ms)))
-                       (.build))
+  (->HttpTransport (or client
+                       (when proxy (http/client {:proxy proxy}))
+                       (http/default-client))
                    url headers timeout-ms (atom nil)))
 
 ;;; ============================================================

@@ -1,8 +1,10 @@
 (ns im.ttalk.agent.provider.http.stream-client
-  "真流式 HTTP 传输 —— 基于 JDK 内置 java.net.http（替代 http-kit 的伪流式，修 BUG2）。
+  "provider 的真流式 —— 传输是 `im.ttalk.http/stream-lines`（clj-http，designs/http-module.md；
+   最初为替代 http-kit 的伪流式而写，修 BUG2）。本 ns 只留 provider 语义：parse-fn / process-fn、canonical error
+   （超时 / 非 2xx / IO）、模型名核对、限流头、重试与取消登记。
 
    与 http-kit 客户端的根本区别：http-kit 的 `:as :stream` 等整段响应收完才兑现
-   promise（伪流式）；本实现用 `BodyHandlers/fromLineSubscriber`（响应式 Flow.Subscriber），
+   promise（伪流式）；`stream-lines` 用 `BodyHandlers/fromLineSubscriber`（响应式 Flow.Subscriber），
    **每行 SSE 到达即回调**——真增量、非阻塞、可取消、原生背压。
 
    与现有 stream 处理器无缝衔接：parse-fn / process-fn 复用 stream.anthropic / stream.openai
@@ -21,21 +23,16 @@
             [taoensso.timbre :as log]
             [im.ttalk.agent.async :as async]
             [im.ttalk.agent.filter :as flt]
+            [im.ttalk.http :as http]
+            [im.ttalk.http.failure :as failure]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
             [im.ttalk.agent.provider.http.retry :as retry]
             [im.ttalk.agent.provider.http.client :as http-client])
-  (:import [java.net URI]
-           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpHeaders
-                          HttpResponse HttpResponse$BodyHandler
-                          HttpResponse$BodySubscribers HttpResponse$ResponseInfo]
-           [java.util.concurrent Flow$Subscriber Executors ScheduledExecutorService
-                                 ThreadFactory TimeUnit]
-           [java.util.concurrent.atomic AtomicBoolean AtomicLong]
-           [java.util.function Function]
-           [java.time Duration]
-           [java.nio.charset StandardCharsets]))
+  (:import [java.util.concurrent CancellationException CompletableFuture]
+           [java.util.concurrent.atomic AtomicBoolean]
+           [java.util.function BiFunction]))
 
 (set! *warn-on-reflection* true)
 
@@ -48,48 +45,20 @@
   default-client
   http-client/default-client)
 
-(defonce ^:private watchdog
-  ;; 首字节 / 空闲超时的共享调度器：单个 daemon 线程，每条流一个「到点检查 → 未超时按剩余时间重排」
-  ;; 的任务（不是固定频率轮询，零空转）。designs/provider-reliability.md §4。
-  (delay (Executors/newSingleThreadScheduledExecutor
-           (reify ThreadFactory
-             (newThread [_ r]
-               (doto (Thread. ^Runnable r "clj-agent-stream-watchdog")
-                 (.setDaemon true)))))))
-
-(defn- headers->map
-  "ResponseInfo 的 HttpHeaders → {小写名 List<String>}（形状同 http.client 的 http-headers->map）。"
-  [^HttpHeaders hs]
-  (persistent!
-    (reduce (fn [m [^String k v]] (assoc! m (clojure.string/lower-case k) v))
-            (transient {})
-            (.map hs))))
-
 (defn- timeout-error [provider first? limit]
   (errors/error :timeout-error
                 (str "流式" (if first? "空闲" "首字节") "超时（" limit "ms 内没有收到数据）")
                 {:provider provider :retryable? true
                  :code (if first? :idle-timeout :first-byte-timeout)}))
 
-;;; ============================================================
-;;; 请求构建
-;;; ============================================================
-
-(defn- has-content-type? [headers]
-  (some (fn [[k _]] (= "content-type" (clojure.string/lower-case (name k)))) headers))
-
-(defn- build-request ^HttpRequest [url headers body timeout]
-  (let [b (-> (HttpRequest/newBuilder (URI/create url))
-              (.timeout (Duration/ofMillis (or timeout 300000)))
-              (.POST (HttpRequest$BodyPublishers/ofString
-                       (if (string? body) body (json/generate-string body)))))]
-    ;; 默认补 Content-Type: application/json（body 是 JSON）。http-kit 旧版会自动加，
-    ;; java.net.http 不会——缺了它部分服务端（如 MiniMax）解析不到 body 报"缺 messages"。
-    ;; 尊重调用方显式传入的 Content-Type。
-    (when-not (has-content-type? headers)
-      (.header b "Content-Type" "application/json"))
-    (doseq [[k v] headers] (.header b (name k) (str v)))
-    (.build b)))
+(defn- io-error
+  "传输层异常 ⇒ canonical error；网络错补上细分 `:code`（`im.ttalk.http.failure/classify`：
+   :name-resolution-error / :connection-error / :secure-connection-error），`:retryable?` 判定不变。"
+  [t]
+  (let [e (errors/exception->error t)
+        kind (when (instance? java.io.IOException t) (failure/classify t))]
+    (cond-> e
+      (and kind (not= kind :unknown) (nil? (:code e))) (assoc :code kind))))
 
 ;;; ============================================================
 ;;; 入口
@@ -119,23 +88,11 @@
                first-byte-ms idle-ms check-model]
         :or   {initial-state {}}}]
   (let [state         (atom initial-state)
-        cancel-p      (promise)
-        cf-p          (promise)
         done?         (AtomicBoolean. false)
-        got-first?    (AtomicBoolean. false)
-        last-activity (AtomicLong. (System/nanoTime))
-        resp-headers  (atom nil)
+        handle        (promise)
         model-done?   (atom (nil? check-model))
-        abort!        (fn []
-                        (when (realized? cancel-p)
-                          (.cancel ^java.util.concurrent.Flow$Subscription @cancel-p))
-                        (when (realized? cf-p)
-                          (.cancel ^java.util.concurrent.CompletableFuture @cf-p true)))
         finish-error! (fn [e] (when (.compareAndSet done? false true)
                                 (when on-error (on-error e))))
-        fail-abort!   (fn [e] (when (.compareAndSet done? false true)
-                                (when on-error (on-error e))
-                                (abort!)))
         mismatch      (fn [st]
                         (when-not @model-done?
                           (when-let [m (not-empty (some-> ((:model-fn check-model) st) str))]
@@ -146,76 +103,61 @@
                                               (str "请求的模型是 " req "，服务端却以 " m " 作答")
                                               {:provider provider :status 200 :retryable? false
                                                :code :model-mismatch}))))))
-        subscriber    (reify Flow$Subscriber
-                        (onSubscribe [_ s]
-                          (deliver cancel-p s)
-                          (.request s Long/MAX_VALUE))
-                        (onNext [_ line]
-                          (.set last-activity (System/nanoTime))
-                          (.set got-first? true)
-                          (when-not (.get done?)
-                            (try
-                              (when-let [ev (parse-fn line)]
-                                (let [[new-state token] (process-fn ev @state)]
-                                  (reset! state new-state)
-                                  (if-let [mm (when check-model (mismatch new-state))]
-                                    (fail-abort! mm)
-                                    (when (and token on-token) (on-token token)))))
-                              (catch Throwable t
-                                ;; 单行处理异常不应中断整条流；记录并继续
-                                (log/warn "流式行处理异常，已跳过" {:error (.getMessage t)})))))
-                        (onError [_ t]
-                          ;; 连接/IO 失败 → canonical error（D5：network/timeout 等，统一契约）
-                          (finish-error! (errors/exception->error t)))
-                        (onComplete [_]
-                          (when (.compareAndSet done? false true)
-                            (when on-complete (on-complete @state)))))
-        ;; BodyHandler：先看状态码——2xx 走流式 subscriber；非 2xx 收错误体字符串
-        handler  (reify HttpResponse$BodyHandler
-                   (apply [_ info]
-                     (let [^HttpResponse$ResponseInfo info info
-                           status (.statusCode info)
-                           hs (headers->map (.headers info))]
-                       (reset! resp-headers hs)
-                       (when on-headers (on-headers status hs))
-                       (if (<= 200 status 299)
-                         (HttpResponse$BodySubscribers/fromLineSubscriber subscriber)
-                         (HttpResponse$BodySubscribers/ofString StandardCharsets/UTF_8)))))
-        req      (build-request url headers body timeout)
-        ^HttpClient http-client (or client @default-client)
-        ^java.util.concurrent.CompletableFuture cf (.sendAsync http-client req handler)
-        _        (deliver cf-p cf)
-        ;; 非 2xx：在 future 完成时把错误体（+ 响应头）转 canonical error → on-error（D5）
-        cf2      (.thenApply cf
-                   (reify Function
-                     (apply [_ resp]
-                       (let [^HttpResponse resp resp
-                             status (.statusCode resp)]
-                         (when-not (<= 200 status 299)
-                           (let [body (.body resp)
-                                 parsed (try (json/parse-string body true)
-                                             (catch Exception _ body))]
-                             (finish-error! (http-client/response->error
-                                              {:status status :body parsed :headers @resp-headers}
-                                              (or provider :unknown)))))
-                         resp))))]
-    ;; watchdog：首字节 / 空闲超时
-    (when (or first-byte-ms idle-ms)
-      (letfn [(schedule [ms]
-                (.schedule ^ScheduledExecutorService @watchdog
-                           ^Runnable check (long (max 1 ms)) TimeUnit/MILLISECONDS))
-              (check []
-                (when-not (.get done?)
-                  (let [first? (.get got-first?)
-                        limit  (if first? idle-ms (or first-byte-ms idle-ms))]
-                    (when limit
-                      (let [elapsed (quot (- (System/nanoTime) (.get last-activity)) 1000000)]
-                        (if (>= elapsed limit)
-                          (fail-abort! (timeout-error provider first? limit))
-                          (schedule (- limit elapsed))))))))]
-        (schedule (or first-byte-ms idle-ms))))
-    {:future cf2
-     :cancel abort!}))
+        on-line       (fn [line]
+                        (when-not (.get done?)
+                          (try
+                            (when-let [ev (parse-fn line)]
+                              (let [[new-state token] (process-fn ev @state)]
+                                (reset! state new-state)
+                                (if-let [mm (when check-model (mismatch new-state))]
+                                  (do (finish-error! mm)
+                                      ((:cancel @handle)))
+                                  (when (and token on-token) (on-token token)))))
+                            (catch Throwable t
+                              ;; 单行处理异常不应中断整条流；记录并继续
+                              (log/warn "流式行处理异常，已跳过" {:error (.getMessage t)})))))
+        h             (http/stream-lines
+                        {:method :post
+                         :url url
+                         ;; Content-Type: application/json 由 http/build-request 在调用方没给时补上
+                         ;; （缺了它 MiniMax 解析不到 body 报"缺 messages"）
+                         :headers headers
+                         :body (if (string? body) body (json/generate-string body))
+                         :timeout-ms (or timeout 300000)
+                         :client (or client @default-client)
+                         :first-byte-ms first-byte-ms
+                         :idle-ms idle-ms
+                         :on-response (fn [status hs] (when on-headers (on-headers status hs)))
+                         :on-line on-line})
+        _             (deliver handle h)
+        ;; 终止回调在返回的 future 完成**之前**触发（调用方 @future 之后即可读 result / err）
+        fut           (.handle ^CompletableFuture (:future h)
+                               (reify BiFunction
+                                 (apply [_ v t]
+                                   (cond
+                                     (nil? t)
+                                     (if (contains? v :body)
+                                       ;; 非 2xx：错误体（+ 响应头）⇒ canonical error（业务码表、Retry-After）
+                                       (let [b (:body v)
+                                             parsed (try (json/parse-string b true) (catch Exception _ b))]
+                                         (finish-error! (http-client/response->error
+                                                          {:status (:status v) :body parsed :headers (:headers v)}
+                                                          (or provider :unknown))))
+                                       (when (.compareAndSet done? false true)
+                                         (when on-complete (on-complete @state))))
+
+                                     (http/timeout-error? t)
+                                     (finish-error! (timeout-error provider (= :idle (http/timeout-error? t))
+                                                                   (:limit-ms (ex-data t))))
+
+                                     (instance? CancellationException t)
+                                     (finish-error! (errors/exception->error t))
+
+                                     :else
+                                     (finish-error! (io-error t)))
+                                   v)))]
+    {:future fut
+     :cancel (:cancel h)}))
 
 (defn- deliver-built
   "on-complete 的公共实现：build-response 抛错进 err 通道（此前在 subscriber.onComplete 里抛，

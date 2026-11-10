@@ -4,6 +4,51 @@
 
 ---
 
+# 【当前轮】AG-UI 与 MCP 的 HTTP 服务端：clj-agent-server（Ring）+ clj-agent-server-jetty（2026-11-10）
+
+> 起因：把 Keelson `agui-server` 分支的 clj-net-server / clj-agui-server 移植过来，MCP 的 Streamable HTTP 端点转正。
+> **服务端协议就是 Ring SPEC**；Jetty 只是缺省 adapter，用户可换 http-kit / Undertow（这两家的 adapter 不实现 SPEC 的
+> 流式正文，由 adapter 侧垫片补齐——实测见设计 §1）。
+> 设计：[designs/server-module.md](designs/server-module.md)。**✅ 7 项全部完成**（2026-11-10，只编码未提交）。编号前缀 `S`。用户拍板：两个模块；写完设计直接开发，只编码不提交。
+> 状态：⬜ 未开始 · 🟡 进行中 · ✅ 完成。门禁：`bb test` + `clojure -M:test:copilotkit --focus :examples` + `bb check-docs`。
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [S-01](tasks/S-01.md) | clj-http 补 SSE 拼帧 | ✅ |
+| [S-02](tasks/S-02.md) | clj-agent-server 骨架 + strings / http / routing / guard | ✅ |
+| [S-03](tasks/S-03.md) | SSE（Ring 流式正文）+ http-kit / Undertow 垫片 | ✅ |
+| [S-04](tasks/S-04.md) | clj-agent-server-jetty：Jetty 12 宿主 | ✅ |
+| [S-05](tasks/S-05.md) | AG-UI 路由（移植 clj-agui-server） | ✅ |
+| [S-06](tasks/S-06.md) | MCP Streamable HTTP 端点 | ✅ |
+| [S-07](tasks/S-07.md) | 示例与文档 | ✅ |
+
+---
+
+# 【当前轮】HTTP 传输收成独立模块 clj-http（2026-11-09）
+
+> 起因：讨论「换 hato 是否更好」——结论是不换（hato 只是 `java.net.http` 的封装，能力无增量），但仓库里
+> provider / mcp / tools 有 4 套各自的 `java.net.http` 用法，值得收成一个零依赖模块；Keelson `jvm/modules/clj-net`
+> 的纯逻辑部分（头工具 / SSE 分帧 / 代理 / 网络错分类 / HTTP 日期）移植进来。
+> 设计：[designs/http-module.md](designs/http-module.md)（含 §1.3 clj-net 取舍、§2 四问、§6 缺省行为变化、§7 否决记录）。
+> 状态：**✅ 6 项全部完成**（2026-11-09；只编码，未提交）。真机：LiteGate 上 MiniMax-M3.1-Flash / glm-5.3-flash 全路径通过（见 H-04）。
+> 编号前缀 `H`。状态：⬜ 未开始 · 🟡 进行中 · ✅ 完成。门禁：`bb test` + `clojure -M:test:copilotkit --focus :examples` + `bb check-docs`。
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [H-01](tasks/H-01.md) | 模块骨架 + client 构造 + request / request-async + 头工具 | ✅ |
+| [H-02](tasks/H-02.md) | 移植 clj-net：SSE 分帧 / 代理（opt-in）/ 网络错分类 / HTTP 日期 | ✅ |
+| [H-03](tasks/H-03.md) | 按行真流式 stream-lines（watchdog / 取消 / 单次终止） | ✅ |
+| [H-04](tasks/H-04.md) | provider 迁移（门面保留公开 API，判定口径不变） | ✅ |
+| [H-05](tasks/H-05.md) | mcp / tools 迁移 | ✅ |
+| [H-06](tasks/H-06.md) | 文档与收尾 | ✅ |
+
+### 已拍板（2026-11-09）
+
+- 不换 hato，只借 API 形状；Keelson clj-net **移植**纯逻辑部分，不依赖（clj-net 依赖 clj-core，错误模型不同）。
+- 环境变量代理做成选项 `:proxy :env`，**缺省不变**。
+
+---
+
 # 【当前轮】借鉴 Keelson：运行时 / Provider / AG-UI / 编码工具（2026-11-08）
 
 > 起因：通读 `~/workspace/keelson` 的 `Keelson.Agent*` 与 `Keelson.Agui*`，把适合直接放进

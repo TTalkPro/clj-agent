@@ -5,6 +5,9 @@
         ;; 内部依赖 - Core（protocol/契约：im.ttalk.agent.model.*）
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
 
+        ;; 内部依赖 - HTTP 传输（零依赖；designs/http-module.md）
+        im.ttalk/clj-http {:local/root "../clj-http"}
+
         ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
 

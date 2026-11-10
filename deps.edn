@@ -1,9 +1,12 @@
-{:paths ["modules/clj-agent-core/src"
+{:paths ["modules/clj-http/src"
+          "modules/clj-agent-core/src"
           "modules/clj-agent-client/src"
           "modules/clj-agent-provider/src"
           "modules/clj-agent-mcp/src"
           "modules/clj-agent-agui/src"
-          "modules/clj-agent-tools/src"]
+          "modules/clj-agent-tools/src"
+          "modules/clj-agent-server/src"
+          "modules/clj-agent-server-jetty/src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
         ;; JSON
@@ -14,14 +17,24 @@
 
         ;; 持久化 ChatMemory（SQLite 后端，按需加载 core.memory.sqlite）
         com.github.seancorfield/next.jdbc {:mvn/version "1.3.939"}
-        org.xerial/sqlite-jdbc {:mvn/version "3.45.1.0"}}
- :aliases {:test {:extra-paths ["modules/clj-agent-provider/test"
+        org.xerial/sqlite-jdbc {:mvn/version "3.45.1.0"}
+
+        ;; clj-agent-server（Ring SPEC）与它的缺省 adapter clj-agent-server-jetty
+        ring/ring-core {:mvn/version "1.15.6"}
+        ring/ring-jetty-adapter {:mvn/version "1.15.6"}}
+ :aliases {:test {:extra-paths ["modules/clj-http/test"
+                               "modules/clj-agent-provider/test"
                                "modules/clj-agent-client/test"
                                "modules/clj-agent-core/test"
                                "modules/clj-agent-mcp/test"
                                "modules/clj-agent-agui/test"
-                               "modules/clj-agent-tools/test"]
-                 :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+                               "modules/clj-agent-tools/test"
+                               "modules/clj-agent-server/test"
+                               "modules/clj-agent-server-jetty/test"]
+                 :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}
+                              ;; 只给 clj-agent-server 的 adapter 垫片测试用（designs/server-module.md §1）
+                              http-kit/http-kit {:mvn/version "2.8.0"}
+                              luminus/ring-undertow-adapter {:mvn/version "1.4.1"}}
                  :main-opts ["-m" "kaocha.runner"]}
 
            ;; CopilotKit 联调示例的 web 依赖——**只在这个 alias 里**
@@ -32,6 +45,11 @@
            ;; MCP server 示例的 web 依赖——**只在这个 alias 里**（同 :copilotkit 的理由）
            :mcp {:extra-paths ["examples"]
                  :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}}}
+
+           ;; clj-agent-server 的示例：同一套 AG-UI + MCP 路由跑在 Jetty / http-kit / Undertow 上（examples/server/demo.clj）
+           :server {:extra-paths ["examples"]
+                    :extra-deps {http-kit/http-kit {:mvn/version "2.8.0"}
+                                 luminus/ring-undertow-adapter {:mvn/version "1.4.1"}}}
 
            ;; 各模块的构建/发布统一在根 build.clj（见其 ns docstring）
            :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}

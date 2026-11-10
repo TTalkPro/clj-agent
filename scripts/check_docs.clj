@@ -87,7 +87,11 @@
    "modules/clj-agent-client/README.md"
    "modules/clj-agent-provider/README.md"
    "modules/clj-agent-agui/README.md"
-   "modules/clj-agent-tools/README.md"])
+   "modules/clj-agent-tools/README.md"
+   "modules/clj-agent-mcp/README.md"
+   "modules/clj-http/README.md"
+   "modules/clj-agent-server/README.md"
+   "modules/clj-agent-server-jetty/README.md"])
 
 ;;; 允许不被任何 README 提及的 ns（内部实现细节）
 (def ^:private coverage-allowlist
@@ -156,7 +160,7 @@
                (let [content (slurp f)]
                  (when-let [[_ n] (re-find #"\(ns\s+([\w.\-]+)" content)]
                    (symbol n)))))
-       (filter #(str/starts-with? (name %) "im.ttalk.agent"))
+       (filter #(or (str/starts-with? (name %) "im.ttalk.agent") (str/starts-with? (name %) "im.ttalk.http")))
        set))
 
 ;;; ============================================================
@@ -176,7 +180,7 @@
 ;; 2. 花括号形式必须先于裸形式：可选组 (?:...)? 不会为了匹配而回溯，
 ;;    写成 `[\w.-]*(?:\.\{...\})?` 时贪婪的 [\w.-]* 会吃掉 "." 并让可选组匹配空。
 (def ^:private ns-pattern
-  #"im\.ttalk\.agent[\w.\-]*(?:\.\{[\w.,\-]+\})?\.\*|im\.ttalk\.agent[\w.\-]*\.\{[\w.,\-]+\}|im\.ttalk\.agent[\w.\-]*")
+  #"im\.ttalk\.(?:agent|http)[\w.\-]*(?:\.\{[\w.,\-]+\})?\.\*|im\.ttalk\.(?:agent|http)[\w.\-]*\.\{[\w.,\-]+\}|im\.ttalk\.(?:agent|http)[\w.\-]*")
 
 (defn- mentioned-namespaces
   "README 里点名的 im.ttalk.agent.* ns（剥掉 /Symbol 后缀、展开花括号、跳过通配）。"
@@ -186,6 +190,8 @@
        (mapcat expand-braces)
        (remove #(str/ends-with? % "."))
        (remove #(str/includes? % "*"))
+       ;; 测试 ns（`--focus im.ttalk.agent.mcp.server-test` 这类跑法说明）不在 src 里，不参检——宁可漏报
+       (remove #(str/ends-with? % "-test"))
        (map #(str/replace % #"\.$" ""))
        set))
 
@@ -206,7 +212,7 @@
    跨代码块取并集：require 常写在一个块、用法在另一个块。"
   [text]
   (into {}
-        (for [[_ ns-str a] (re-seq #"\[(im\.ttalk\.agent[\w.\-]*)\s+:as\s+([\w\-]+)\]" text)]
+        (for [[_ ns-str a] (re-seq #"\[(im\.ttalk\.(?:agent|http)[\w.\-]*)\s+:as\s+([\w\-]+)\]" text)]
           [a (symbol ns-str)])))
 
 (defn- qualified-usages

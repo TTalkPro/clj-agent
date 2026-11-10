@@ -44,17 +44,17 @@
 服务端——不引 ring / http-kit，不认识 Request / Response、不产 SSE 响应帧、不管
 路由与 CORS。那些全在 [`examples/copilotkit/`](../../examples/copilotkit/)：
 
-> **一处要说清的例外**：`agui.mcp` 是**出站**客户端（JSON-RPC over Streamable
-> HTTP），它认 SSE——但只在读 server 响应体这一侧（`parse-sse-body`），传输走
-> JDK 自带的 `java.net.http`（**零新增依赖**），且 `:transport` 可注入，测试用
+> **一处要说清的例外**：`agui.mcp` 用的 MCP 客户端是**出站**的（JSON-RPC over Streamable
+> HTTP），它认 SSE——但只在读 server 响应体这一侧。协议栈在 `clj-agent-mcp`，传输走
+> `clj-http`（零依赖，JDK `java.net.http`），且 `:transport` 可注入，测试用
 > 纯函数、不起服务。
 
 | 文件 | 干什么 |
 |---|---|
 | `agui_example.clj` | 六场景端到端，**离线可跑**（桩 provider + 假 SSE 连接） |
 | `agui_live_test.clj` | 同样六场景，**真实 MiniMax 端点**（需 `MINIMAX_API_KEY`） |
-| `http_kit_routes.clj` | 真路由：四条 CopilotKit v2 端点 + `/suggest` + `/threads*` + SSE（`id:` 放 `:seq` = `Last-Event-ID`；闲 15s 发注释帧心跳）；多 agent 走 `start-registry!`；坏输入 400 / 超限 413 / 缺槽 501 |
-| `http_kit_routes_test.clj` | 路由层离线测试（直接调 handler + 本机回环 http-kit），`clojure -M:test:copilotkit --focus :examples` |
+| `http_kit_routes.clj` | http-kit 版装配：AG-UI 路由、SSE、CORS 全在 `clj-agent-server`（`im.ttalk.agent.server.agui`），这里只剩注册表 / host 选项、换 http-kit（`adapter.http-kit` 垫片）与两条 demo 自己的应用端点（`/pending`、`/approve`）；多 agent 走 `start-registry!` |
+| `http_kit_routes_test.clj` | 装配后的端到端离线测试（直接调 handler + 本机回环 http-kit：输入校验、多 agent、/stop、/threads*、心跳与线程记录、审批改参数、多条审批、/pending），`clojure -M:test:copilotkit --focus :examples` |
 | `genui.clj` | **可选插件**：Open Generative UI（`generateSandboxedUi`）——见下节「为什么它不在本模块里」 |
 | `mcp_server_example.clj` | 最小 MCP server（Streamable HTTP），验 `agui.mcp` 客户端那一半 |
 
@@ -238,8 +238,8 @@ A2UI 那位**发扁平位也发对象**：对象是上游新的真相源，扁�
 ## 可选插件：MCP
 
 对标上游的 `MCPMiddleware` + `MCPAppsMiddleware`。客户端是 JSON-RPC 2.0 over
-Streamable HTTP，走 JDK 自带的 `java.net.http`——**不加依赖**，而且 `:transport`
-可注入（测试用纯函数，不起服务）。
+Streamable HTTP，协议栈在 `clj-agent-mcp`、传输走 `clj-http`（零依赖，JDK `java.net.http`）——
+**不加 web 依赖**，而且 `:transport` 可注入（测试用纯函数，不起服务）。
 
 ```clojure
 (require '[im.ttalk.agent.agui.mcp :as mcp]

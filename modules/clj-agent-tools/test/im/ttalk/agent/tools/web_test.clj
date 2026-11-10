@@ -73,3 +73,27 @@
       (finally
         (.stop srv 0)
         (u/delete-tree! root)))))
+
+;; H-05（designs/http-module.md §5）：IO 失败按网络错分类给文案；:proxy 选项接进 client
+(deftest web-fetch-network-failures-are-classified
+  (let [root (u/tmp-dir)
+        ts (tools/workspace-tools {:root (str root) :web-fetch {:timeout-ms 5000}} {:groups #{:web-fetch}})
+        port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))]
+    (is (re-find #"域名解析不了" (err ts "web_fetch" {:url "http://no-such-host.invalid/"})))
+    (is (re-find #"连不上对方" (err ts "web_fetch" {:url (str "http://127.0.0.1:" port "/")})))))
+
+(deftest web-fetch-proxy-option-reaches-the-client
+  (let [root (u/tmp-dir)
+        ;; 黑洞代理：127.0.0.1:<关着的端口>——走了代理就连不上，证明 :proxy 生效
+        port (with-open [s (java.net.ServerSocket. 0)] (.getLocalPort s))
+        srv (serve! {"/p" [200 "text/plain" "direct" {}]})
+        b (base srv)
+        direct (tools/workspace-tools {:root (str root)} {:groups #{:web-fetch}})
+        proxied (tools/workspace-tools {:root (str root) :web-fetch {:proxy (str "http://10.255.255.1:" port)
+                                                                    :timeout-ms 1500}}
+                                       {:groups #{:web-fetch}})]
+    (try
+      (is (str/ends-with? (ok direct "web_fetch" {:url (str b "/p")}) "direct"))
+      ;; 回环目标不绕过 web-proxy（未设 :bypass-on-local?）⇒ 必然走代理 ⇒ 失败
+      (is (some? (err proxied "web_fetch" {:url (str b "/p")})))
+      (finally (.stop srv 0)))))

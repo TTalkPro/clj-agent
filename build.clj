@@ -12,8 +12,8 @@
 
    用法（-T:build，模块顺序 core → client → provider 已内建）：
 
-     clojure -T:build clean            # 清理五个模块的 target/
-     clojure -T:build jar              # 打包五个模块
+     clojure -T:build clean            # 清理全部模块的 target/
+     clojure -T:build jar              # 打包全部模块
      clojure -T:build install          # 装到本地 ~/.m2
      clojure -T:build release          # 每模块 clean → jar → install（发布前的完整流程）
      clojure -T:build deploy           # 推 Clojars（需 CLOJARS_USERNAME/PASSWORD）
@@ -26,9 +26,9 @@
             [clojure.tools.build.api :as b]
             [deps-deploy.deps-deploy :as dd]))
 
-;; 版本在项目根算一次：git-count-revs 跟着 *project-root* 走，但五个模块同属一个
-;; 仓库、共用 0.4.<git-count> 逐提交对齐的版本方案，故不允许按模块各算各的。
-(def version (format "0.4.%s" (b/git-count-revs nil)))
+;; 版本在项目根算一次：git-count-revs 跟着 *project-root* 走，但全部模块同属一个
+;; 仓库、共用 0.5.<git-count> 逐提交对齐的版本方案，故不允许按模块各算各的。
+(def version (format "0.5.%s" (b/git-count-revs nil)))
 
 (def ^:private scm-url "https://github.com/TTalkPro/clj-agent")
 
@@ -51,7 +51,11 @@
    **它是列表而不是布尔**（2026-09-03 随 agui 模块泛化）：agui 同时依赖 core 与
    client，原来的 `:override-core?` 只覆盖 core，pom 会**只缺 client 那一条**——
    同一个坑换个依赖再踩一遍。加模块时把它依赖的全部内部模块列进来。"
-  [{:key :core
+  [{:key :http
+    :lib 'im.ttalk/clj-http
+    :dir "modules/clj-http"
+    :description "im.ttalk clj-http - general-purpose zero-dependency HTTP client on java.net.http (request / async / line streaming / SSE / proxy)"}
+   {:key :core
     :lib 'im.ttalk/clj-agent-core
     :dir "modules/clj-agent-core"
     :description "clj-agent Core - ChatClient / ChatModel 原语与协议（对齐 Spring AI 命名）"}
@@ -63,20 +67,36 @@
    {:key :provider
     :lib 'im.ttalk/clj-agent-provider
     :dir "modules/clj-agent-provider"
-    :override-libs ['im.ttalk/clj-agent-core]
+    :override-libs ['im.ttalk/clj-agent-core 'im.ttalk/clj-http]
     :description "clj-agent LLM - LLM Provider Abstraction Module"}
+   ;; mcp 曾不在本表里——而 agui 依赖它，agui 的 pom 因此缺 mcp 这条依赖（2026-11-09 补上）
+   {:key :mcp
+    :lib 'im.ttalk/clj-agent-mcp
+    :dir "modules/clj-agent-mcp"
+    :override-libs ['im.ttalk/clj-http]
+    :description "clj-agent MCP - Model Context Protocol client + server (Streamable HTTP / stdio)"}
    {:key :agui
     :lib 'im.ttalk/clj-agent-agui
     :dir "modules/clj-agent-agui"
-    :override-libs ['im.ttalk/clj-agent-core 'im.ttalk/clj-agent-client]
+    :override-libs ['im.ttalk/clj-agent-core 'im.ttalk/clj-agent-client 'im.ttalk/clj-agent-mcp 'im.ttalk/clj-http]
     :description "clj-agent AGUI - Agent runtime backend (run registry / event stream / AG-UI codec)"}
    {:key :tools
     :lib 'im.ttalk/clj-agent-tools
     :dir "modules/clj-agent-tools"
-    :override-libs ['im.ttalk/clj-agent-core]
+    :override-libs ['im.ttalk/clj-agent-core 'im.ttalk/clj-http]
     ;; 第三方署名随 jar 发（Apache-2.0 §4：再分发须附许可证原文与 NOTICE）
     :extra-files ["LICENSE-codex.txt" "THIRD-PARTY-NOTICES.md"]
-    :description "clj-agent Tools - workspace coding tools for agents (files / edit / apply_patch / exec / web_fetch)"}])
+    :description "clj-agent Tools - workspace coding tools for agents (files / edit / apply_patch / exec / web_fetch)"}
+   {:key :server
+    :lib 'im.ttalk/clj-agent-server
+    :dir "modules/clj-agent-server"
+    :override-libs ['im.ttalk/clj-http 'im.ttalk/clj-agent-core 'im.ttalk/clj-agent-client 'im.ttalk/clj-agent-mcp 'im.ttalk/clj-agent-agui]
+    :description "clj-agent Server - AG-UI and MCP HTTP endpoints as Ring handlers (routing / guard / SSE / adapter shims)"}
+   {:key :server-jetty
+    :lib 'im.ttalk/clj-agent-server-jetty
+    :dir "modules/clj-agent-server-jetty"
+    :override-libs ['im.ttalk/clj-agent-server 'im.ttalk/clj-http 'im.ttalk/clj-agent-core 'im.ttalk/clj-agent-client 'im.ttalk/clj-agent-mcp 'im.ttalk/clj-agent-agui]
+    :description "clj-agent Server Jetty - default Jetty 12 adapter/host for clj-agent-server"}])
 
 (def ^:private class-dir "target/classes")
 (def ^:private src-dirs ["src"])
@@ -98,7 +118,7 @@
   [{:keys [module]}]
   (if-not module
     modules
-    (let [k (-> module name (str/replace #"^clj-agent-" "") keyword)]
+    (let [k (-> module name (str/replace #"^clj-(agent-)?" "") keyword)]
       (or (seq (filter #(= k (:key %)) modules))
           (throw (ex-info (format "未知模块 %s（可选：%s）"
                                   module (str/join " / " (map (comp name :key) modules)))

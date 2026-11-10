@@ -2,7 +2,7 @@
   "web_fetch（T-06；出处 Keelson `WebFetchTool.cs`，借鉴 coxswain `fetch.ss`）。
 
    它挡的是「模型要看一页文档只能 exec curl ⇒ 回来整页 HTML，几十 KB 的 <script> 把输出上限吃光、正文一个字都没到」
-   那一类：抓 → 认 Content-Type → HTML 简化成文本，一步到位。零新依赖：JDK `java.net.http`。
+   那一类：抓 → 认 Content-Type → HTML 简化成文本，一步到位。传输走 clj-http（零依赖，JDK `java.net.http`）。
 
    - **手动**跟随重定向（≤ :max-redirects），每一跳都过 `:allow-url`（宿主的网络策略钩子）；
    - 体积上限数**实际读到的**字节（⛔ 信 Content-Length）；
@@ -10,15 +10,17 @@
 
    选项（工作区 `:web-fetch`）：:allow-url (fn [^java.net.URI uri] bool)、:timeout-ms（30000）、
    :default-max-chars（40000）、:max-chars（200000）、:max-body-bytes（5 MiB）、:max-redirects（5）、:user-agent、
-   :client（自带 java.net.http.HttpClient；须不自动跟随重定向，否则中间跳转不过 :allow-url）。"
+   :client（自带 java.net.http.HttpClient；须不自动跟随重定向，否则中间跳转不过 :allow-url）、
+   :proxy（没给 :client 时用：`:env` 读 https_proxy / no_proxy …、代理地址串、或 ProxySelector；缺省直连）。"
   (:require [clojure.string :as str]
+            [im.ttalk.http :as http]
+            [im.ttalk.http.failure :as failure]
             [im.ttalk.agent.tool :refer [deftool]]
             [im.ttalk.agent.tools.workspace :as ws :refer [fail!]])
   (:import [java.io ByteArrayOutputStream InputStream]
            [java.net URI]
-           [java.net.http HttpClient HttpClient$Redirect HttpRequest HttpResponse HttpResponse$BodyHandlers HttpTimeoutException]
-           [java.nio.charset Charset StandardCharsets]
-           [java.time Duration]))
+           [java.net.http HttpClient HttpTimeoutException]
+           [java.nio.charset Charset StandardCharsets]))
 
 (set! *warn-on-reflection* true)
 
@@ -119,10 +121,18 @@
       (let [state (:state w)]
         (or (::client @state)
             (::client (swap! state update ::client
-                             #(or % (-> (HttpClient/newBuilder)
-                                        (.followRedirects HttpClient$Redirect/NEVER)
-                                        (.connectTimeout (Duration/ofMillis (:timeout-ms o)))
-                                        (.build)))))))))
+                             #(or % (http/client {:redirect :never
+                                                  :connect-timeout-ms (:timeout-ms o)
+                                                  :proxy (:proxy o)}))))))))
+
+(defn- io-failure-text
+  "IO 失败的文案按 `im.ttalk.http.failure/classify` 细分——模型据此决定换地址还是重试。"
+  [uri ^Throwable e]
+  (case (failure/classify e)
+    :name-resolution-error (format "抓 %s 失败：域名解析不了（主机名写错了，或这台机器上不了网）。" uri)
+    :connection-error (format "抓 %s 失败：连不上对方（拒绝连接、不可达或建连超时）。" uri)
+    :secure-connection-error (format "抓 %s 失败：TLS 握手失败（证书或协议问题）：%s" uri (or (.getMessage e) (class e)))
+    (format "抓 %s 失败：%s" uri (or (.getMessage e) (class e)))))
 
 (defn web-fetch*
   [w {:keys [url max_chars]}]
@@ -140,35 +150,35 @@
       (let [remaining (- deadline (System/currentTimeMillis))
             _ (when (<= remaining 0)
                 (fail! "tools/web-fetch-timeout" (format "抓 %s 超时（%d 秒）。" uri (quot (long (:timeout-ms o)) 1000))))
-            req (cond-> (-> (HttpRequest/newBuilder uri)
-                            (.timeout (Duration/ofMillis remaining))
-                            (.header "Accept" "text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.9, text/plain;q=0.8, */*;q=0.1"))
-                  (:user-agent o) (.header "User-Agent" (str (:user-agent o)))
-                  true (.GET))
-            ^HttpResponse resp (try (.send client (.build ^java.net.http.HttpRequest$Builder req) (HttpResponse$BodyHandlers/ofInputStream))
-                                    (catch HttpTimeoutException _
-                                      (fail! "tools/web-fetch-timeout" (format "抓 %s 超时（%d 秒）。" uri (quot (long (:timeout-ms o)) 1000))))
-                                    (catch java.io.IOException e
-                                      (fail! "tools/web-fetch-failed" (format "抓 %s 失败：%s" uri (or (.getMessage e) (class e)))))
-                                    (catch IllegalArgumentException e
-                                      (fail! "tools/web-fetch-failed" (format "抓 %s 失败：%s" uri (.getMessage e)))))
-            status (.statusCode resp)
-            headers (.headers resp)
-            location (.orElse (.firstValue headers "location") nil)]
+            resp (try (http/request {:url uri
+                                     :timeout-ms remaining
+                                     :headers (cond-> {"Accept" "text/html;q=1.0, application/xhtml+xml;q=0.9, text/markdown;q=0.9, text/plain;q=0.8, */*;q=0.1"}
+                                                (:user-agent o) (assoc "User-Agent" (str (:user-agent o))))
+                                     :as :input-stream
+                                     :client client})
+                      (catch HttpTimeoutException _
+                        (fail! "tools/web-fetch-timeout" (format "抓 %s 超时（%d 秒）。" uri (quot (long (:timeout-ms o)) 1000))))
+                      (catch java.io.IOException e
+                        (fail! "tools/web-fetch-failed" (io-failure-text uri e)))
+                      (catch IllegalArgumentException e
+                        (fail! "tools/web-fetch-failed" (format "抓 %s 失败：%s" uri (.getMessage e)))))
+            status (:status resp)
+            ^InputStream body-in (:body resp)
+            location (http/header resp "location")]
         (if (and (<= 300 status 399) location)
-          (do (.close ^InputStream (.body resp))
+          (do (.close body-in)
               (when (>= hop (long (:max-redirects o)))
                 (fail! "tools/web-fetch-too-many-redirects" (format "%s 重定向超过 %d 次，已停止。" url (:max-redirects o))))
               (let [next-uri (http-uri (str (.resolve uri ^String location)))]
                 (when-not next-uri (fail! "tools/web-fetch-bad-url" (str "重定向到了不支持的地址：" location)))
                 (recur next-uri (inc hop))))
-          (let [declared (.orElse (.firstValue headers "content-length") nil)
-                _ (when (and declared (> (or (parse-long declared) 0) (long (:max-body-bytes o))))
-                    (.close ^InputStream (.body resp))
+          (let [declared (http/header resp "content-length")
+                _ (when (and declared (> (or (parse-long (str/trim declared)) 0) (long (:max-body-bytes o))))
+                    (.close body-in)
                     (fail! "tools/web-fetch-too-large" (format "%s 的响应超过 %d 字节，没有读。" uri (:max-body-bytes o))))
-                body (or (read-limited (.body resp) (:max-body-bytes o))
+                body (or (read-limited body-in (:max-body-bytes o))
                          (fail! "tools/web-fetch-too-large" (format "%s 的响应超过 %d 字节，没有读。" uri (:max-body-bytes o))))
-                ctype (.orElse (.firstValue headers "content-type") "")
+                ctype (or (http/header resp "content-type") "")
                 mime (str/lower-case (str/trim (first (str/split ctype #";"))))
                 charset (second (re-find #"(?i)charset\s*=\s*\"?([\w-]+)" ctype))]
             (if-not (<= 200 status 299)

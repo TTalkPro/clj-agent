@@ -9,6 +9,9 @@
 
         im.ttalk/clj-agent-core {:local/root "../clj-agent-core"}
 
+        ;; web_fetch 的 HTTP 传输（clj-http 自身零依赖；designs/http-module.md）
+        im.ttalk/clj-http {:local/root "../clj-http"}
+
         ;; JSON 语法检查器（T-07）要 Jackson 的错误位置；cheshire 已是 client/provider/mcp 的依赖
         cheshire/cheshire {:mvn/version "5.12.0"}}
 

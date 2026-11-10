@@ -1,0 +1,29 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ ;; AG-UI 与 MCP 的 HTTP 服务端（designs/server-module.md）。**服务端协议就是 Ring SPEC**：本模块全是 Ring 处理器 / 中间件，
+ ;; 不认识任何具体服务端。缺省宿主在 clj-agent-server-jetty；换 http-kit / Undertow 见 im.ttalk.agent.server.adapter.*。
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
+
+        ;; Ring SPEC 的数据约定 + 流式正文协议（StreamableResponseBody）；没有服务端
+        ring/ring-core {:mvn/version "1.15.6"}
+
+        cheshire/cheshire {:mvn/version "5.12.0"}
+
+        ;; 内部依赖：SSE 拼帧 / AG-UI runtime（连带 core / client / mcp）/ MCP 服务端纯函数
+        im.ttalk/clj-http {:local/root "../clj-http"}
+        im.ttalk/clj-agent-agui {:local/root "../clj-agent-agui"}
+        im.ttalk/clj-agent-mcp {:local/root "../clj-agent-mcp"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]}
+
+  ;; 起真服务端的测试用 Jetty 宿主（仅测试期）；http-kit / Undertow 只用来验 adapter 垫片（仅测试期）
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}
+                      im.ttalk/clj-agent-server-jetty {:local/root "../clj-agent-server-jetty"}
+                      http-kit/http-kit {:mvn/version "2.8.0"}
+                      luminus/ring-undertow-adapter {:mvn/version "1.4.1"}}
+         :main-opts ["-m" "kaocha.runner"]}}}

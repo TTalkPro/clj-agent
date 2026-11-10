@@ -1,5 +1,8 @@
 (ns im.ttalk.agent.provider.http.client
-  "HTTP 客户端工具模块（基于 java.net.http）——**仅非流式**请求/响应。
+  "provider 的 HTTP 门面——**仅非流式**请求/响应。传输在 `im.ttalk.http`（clj-http，
+   designs/http-module.md）；本 ns 只留 provider 的约定：JSON 编解码、`{:status 0 :error …}`（IO 失败不抛）、
+   `:success?`、canonical error 映射（`response->error` / `success-body` / `check-model!`）。
+   公开函数的签名与返回形状自 0.4.0 起未变。
 
    流式（SSE）已迁移到 `im.ttalk.agent.provider.http.stream-client`（java.net.http 真增量，
    见 docs/streaming-async-design.md）；本模块不再提供流式 API。
@@ -14,17 +17,13 @@
   (:refer-clojure :exclude [get])
   (:require [cheshire.core :as json]
             [taoensso.timbre :as log]
-            [clojure.string :as str]
             [im.ttalk.agent.filter :as flt]
+            [im.ttalk.http :as http]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.business-codes :as codes]
             [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
             [im.ttalk.agent.provider.http.retry :as retry])
-  (:import [java.net URI URLEncoder]
-           [java.net.http HttpClient HttpRequest HttpRequest$Builder HttpRequest$BodyPublishers
-                          HttpResponse HttpResponse$BodyHandlers HttpHeaders]
-           [java.time Duration]
-           [java.nio.charset StandardCharsets]))
+  (:import [java.util.function Function]))
 
 (set! *warn-on-reflection* true)
 
@@ -32,17 +31,10 @@
 ;; 共享 HttpClient（连接池复用；executor 可换虚拟线程）
 ;; ============================================================
 
-(defonce ^{:doc "默认共享 HttpClient。executor 用虚拟线程：回调跑在虚拟线程上，
-   高并发不被固定线程池饿死；JDK 24+ 起 synchronized 不再 pin 虚拟线程。"}
+(defonce ^{:doc "默认共享 HttpClient（delay）——就是 `im.ttalk.http/default-client`：HTTP/1.1、虚拟线程
+   executor、connect 30s。保留这个 var 是因为宿主可能 `@default-client` 拿它。"}
   default-client
-  (delay
-    (-> (HttpClient/newBuilder)
-        (.connectTimeout (Duration/ofSeconds 30))
-        ;; LiteGate 等本地网关会在 HTTP/2 prior-knowledge 握手阶段直接断连；
-        ;; JDK 默认先试 HTTP/2。显式固定 HTTP/1.1，避免网关兼容性破坏 provider。
-        (.version java.net.http.HttpClient$Version/HTTP_1_1)
-        (.executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor))
-        (.build))))
+  (delay (http/default-client)))
 
 ;; ============================================================
 ;; 配置默认值
@@ -67,8 +59,7 @@
    示例:
    (url-encode \"hello world\") ; => \"hello+world\""
   [s]
-  (when s
-    (URLEncoder/encode (str s) "UTF-8")))
+  (when s (http/url-encode s)))
 
 (defn build-query-string
   "将 map 转换为查询字符串
@@ -77,11 +68,7 @@
    (build-query-string {:q \"test\" :page 1})
    ; => \"q=test&page=1\""
   [params]
-  (when (seq params)
-    (->> params
-         (map (fn [[k v]]
-                (str (url-encode (name k)) "=" (url-encode v))))
-         (str/join "&"))))
+  (http/query-string params))
 
 (defn build-url
   "构建带查询参数的 URL
@@ -90,11 +77,7 @@
    (build-url \"https://api.example.com/search\" {:q \"test\"})
    ; => \"https://api.example.com/search?q=test\""
   [base-url params]
-  (if (seq params)
-    (let [query (build-query-string params)
-          separator (if (str/includes? base-url "?") "&" "?")]
-      (str base-url separator query))
-    base-url))
+  (if (seq params) (http/with-query base-url params) base-url))
 
 ;; ============================================================
 ;; 响应处理
@@ -103,23 +86,12 @@
 (defn request-id
   "从响应头提取请求 ID（用于排障 / 上报），大小写无关
 
-   Anthropic 用 request-id，OpenAI 用 x-request-id。"
+   Anthropic 用 request-id，OpenAI 用 x-request-id。回**字符串**（此前直接 `get`，拿到的是
+   java.net.http 的 List）。"
   [headers]
   (when headers
-    (or (clojure.core/get headers :request-id)
-        (clojure.core/get headers "request-id")
-        (clojure.core/get headers :x-request-id)
-        (clojure.core/get headers "x-request-id"))))
-
-(defn- http-headers->map
-  "将 java.net.http.HttpHeaders 转换为 Clojure map，key 转为小写字符串。
-    HttpHeaders.map() 返回 Map<String,List<String>>，遍历得到 Map.Entry。"
-  [^HttpHeaders http-headers]
-  (persistent!
-    (reduce (fn [m [^String k v]]
-              (assoc! m (str/lower-case k) v))
-            (transient {})
-            (.map http-headers))))
+    (or (http/header headers "request-id")
+        (http/header headers "x-request-id"))))
 
 (defn- parse-response
   "解析 HTTP 响应
@@ -208,83 +180,51 @@
          (and rl (map? body)) (assoc :rate-limit rl))))))
 
 ;; ============================================================
-;; 请求构建
+;; 核心请求函数（传输在 im.ttalk.http）
 ;; ============================================================
 
-(defn- has-content-type?
-  [headers]
-  (some (fn [[k _]] (= "content-type" (str/lower-case (name k)))) headers))
+(defn- ->http-request
+  "provider 的请求约定 ⇒ `im.ttalk.http` 的请求 map：合并 `*default-headers*`、非串正文转 JSON、
+   `:as :byte-array` ⇒ 字节，其余（:json / :text / :stream）⇒ 串（`:stream` 一直是整段收完的串，名不副实，
+   真流式在 `stream-client`）。"
+  [method url {:keys [headers body query-params timeout as]}]
+  {:method method
+   :url url
+   :query-params query-params
+   :headers (merge *default-headers* headers)
+   :body (when (some? body) (if (string? body) body (json/generate-string body)))
+   :timeout-ms (or timeout *default-timeout*)
+   :as (if (= as :byte-array) :bytes :string)
+   :client @default-client})
 
-(defn- build-request
-  ^HttpRequest [method url headers body timeout]
-  (let [method-kw (keyword method)
-        body-str (when body
-                   (if (string? body) body (json/generate-string body)))
-        uri (URI/create url)
-        timeout-dur (Duration/ofMillis (or timeout *default-timeout*))
-        ^HttpRequest$Builder base-builder (-> (HttpRequest/newBuilder uri)
-                                              (.timeout timeout-dur))
-        base-builder (if-not (has-content-type? headers)
-                       (doto base-builder (.header "Content-Type" "application/json"))
-                       base-builder)
-        ;; 注：HttpRequest.Builder 没有 .PATCH 方法，PATCH 必须走通用 .method
-        ^HttpRequest$Builder req-builder
-        (cond
-          (= method-kw :get) (.GET base-builder)
-          (= method-kw :post) (.POST base-builder (HttpRequest$BodyPublishers/ofString body-str))
-          (= method-kw :put) (.PUT base-builder (HttpRequest$BodyPublishers/ofString body-str))
-          (= method-kw :patch) (.method base-builder "PATCH" (HttpRequest$BodyPublishers/ofString body-str))
-          (= method-kw :delete) (.DELETE base-builder))]
-    (doseq [[k v] headers]
-      (.header req-builder (name k) (str v)))
-    (.build req-builder)))
+(defn- finish [resp as]
+  (parse-response (select-keys resp [:status :headers :body]) as))
 
-(defn- body-handler
-  "根据 :as 参数返回合适的 HttpResponse.BodyHandler"
-  [as]
-  (case as
-    :json (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)
-    :text (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)
-    :byte-array (HttpResponse$BodyHandlers/ofByteArray)
-    :stream (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)
-    (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))
-
-;; ============================================================
-;; 核心请求函数
-;; ============================================================
+(defn- io-failure
+  "IO 失败 ⇒ `{:status 0 :error 串}`。⚠️ `:error` 必须非空：JDK 的 ConnectException 常常没有 message，
+   此前 `:error nil` 让 `response->error` 认不出这是连接失败（它靠 `(:error response)` 判），误当成 HTTP 0 状态码。"
+  [^Throwable t]
+  {:status 0 :error (or (.getMessage t) (.getName (class t))) :success? false})
 
 (defn request
   "发送 HTTP 请求"
   [method url & {:keys [async? callback headers body query-params timeout as]
                  :or {async? false
                       timeout *default-timeout*
-                      as :json}}]
-  (let [url (if query-params (build-url url query-params) url)
-        headers (merge *default-headers* headers)
-        req (build-request method url headers body timeout)
-        handler (body-handler as)
-        client @default-client]
+                      as :json}
+                 :as opts}]
+  (let [req (->http-request method url (assoc opts :timeout timeout :as as))]
     (if async?
-      (let [cf (.sendAsync ^HttpClient client req handler)]
-        (.thenApply cf
-          (reify java.util.function.Function
-            (apply [_ resp]
-              (let [^HttpResponse resp resp
-                    status (.statusCode resp)
-                    headers (http-headers->map (.headers resp))
-                    body (.body resp)
-                    parsed (parse-response {:status status :headers headers :body body} as)]
-                (when callback
-                  (callback parsed))
-                parsed)))))
+      (.thenApply (http/request-async req)
+                  (reify Function
+                    (apply [_ resp]
+                      (let [parsed (finish resp as)]
+                        (when callback (callback parsed))
+                        parsed))))
       (try
-        (let [^HttpResponse resp (.send ^HttpClient client req handler)
-              status (.statusCode resp)
-              headers (http-headers->map (.headers resp))
-              body (.body resp)]
-          (parse-response {:status status :headers headers :body body} as))
+        (finish (http/request req) as)
         (catch java.io.IOException e
-          {:status 0 :error (.getMessage e) :success? false})))))
+          (io-failure e))))))
 
 (defn request-deferred
   "`request` 的异步孪生：**不阻塞**，返回 deferred<响应 map>。
@@ -297,25 +237,16 @@
 
    非 IO 异常（如响应体解析失败）**原样落 error channel**，与同步版一致
    （同步版也不吞它们）。"
-  [method url & {:keys [headers body query-params timeout as]
+  [method url & {:keys [timeout as]
                  :or {timeout *default-timeout*
-                      as :json}}]
-  (let [url (if query-params (build-url url query-params) url)
-        headers (merge *default-headers* headers)
-        req (build-request method url headers body timeout)
-        handler (body-handler as)
-        ^HttpClient client @default-client]
+                      as :json}
+                 :as opts}]
+  (let [req (->http-request method url (assoc opts :timeout timeout :as as))]
     (flt/fcatch
-      (flt/fmap (.sendAsync client req handler)
-                (fn [resp]
-                  (let [^HttpResponse resp resp]
-                    (parse-response {:status (.statusCode resp)
-                                     :headers (http-headers->map (.headers resp))
-                                     :body (.body resp)}
-                                    as))))
+      (flt/fmap (http/request-async req) #(finish % as))
       (fn [t]
         (if (instance? java.io.IOException t)
-          {:status 0 :error (.getMessage ^Throwable t) :success? false}
+          (io-failure t)
           (throw t))))))
 
 (defn post-deferred

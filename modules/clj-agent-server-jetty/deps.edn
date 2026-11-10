@@ -1,0 +1,18 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ ;; clj-agent-server 的缺省 adapter：Jetty 12（designs/server-module.md）。只有这个模块认识 Jetty；
+ ;; 用别的 Ring 服务端就不要引它。
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
+        im.ttalk/clj-agent-server {:local/root "../clj-agent-server"}
+        ring/ring-jetty-adapter {:mvn/version "1.15.6"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]}
+
+  ;; 测试设施（JDK HttpClient、SSE 读者）与 clj-agent-server 共用一份
+  :test {:extra-paths ["test" "../clj-agent-server/test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}

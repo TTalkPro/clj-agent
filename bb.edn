@@ -9,12 +9,15 @@
     ;; 模块的**测试**顺序（构建顺序在 build.clj 的 modules 表里）。
     ;; client 曾长期缺席旧 test-all.sh 的列表——CI matrix 有它、脚本没有，
     ;; 于是本地跑 test 会静默跳过整个 Agent 运行时。别再删它。
-    (def modules ["clj-agent-core" "clj-agent-client" "clj-agent-provider" "clj-agent-agui" "clj-agent-tools"])
+    ;; mcp 同样缺席过（2026-11-09 补上，designs/http-module.md §8）。
+    (def modules ["clj-http" "clj-agent-core" "clj-agent-client" "clj-agent-provider" "clj-agent-mcp"
+                  "clj-agent-agui" "clj-agent-tools" "clj-agent-server" "clj-agent-server-jetty"])
 
     (defn module-dir
       "吃 core / clj-agent-core 两种写法。"
       [m]
-      (let [full (if (str/starts-with? m "clj-agent-") m (str "clj-agent-" m))]
+      ;; 吃三种写法：全名（clj-http / clj-agent-core）、去掉 clj-agent- 的（core）、去掉 clj- 的（http）
+      (let [full (or (some (set modules) [m (str "clj-agent-" m) (str "clj-" m)]) m)]
         (when-not (contains? (set modules) full)
           (binding [*out* *err*]
             (println (format "未知模块 %s（可选：%s）" m (str/join " / " modules))))
@@ -40,13 +43,13 @@
 
   ;; ---------------- 构建 / 发布（均转发到根 build.clj）----------------
 
-  clean       {:doc "清理五个模块的 target/（bb clean core 只清一个）"
+  clean       {:doc "清理全部模块的 target/（bb clean core 只清一个）"
                :task (build-task "clean")}
 
-  jar         {:doc "打包五个模块（bb jar core 只打一个）"
+  jar         {:doc "打包全部模块（bb jar core 只打一个）"
                :task (build-task "jar")}
 
-  install     {:doc "装到本地 ~/.m2（core → client → provider → agui → tools）"
+  install     {:doc "装到本地 ~/.m2（http → core → client → provider → mcp → agui → tools）"
                :task (build-task "install")}
 
   release     {:doc "发布前完整流程：逐模块 clean → jar → install"
@@ -55,14 +58,14 @@
   deploy      {:doc "推 Clojars（需 CLOJARS_USERNAME / CLOJARS_PASSWORD）"
                :task (build-task "deploy")}
 
-  version     {:doc "打印当前版本号（0.4.<git-count-revs>）"
+  version     {:doc "打印当前版本号（0.5.<git-count-revs>）"
                :override-builtin true
-               :task (println (str "0.4." (str/trim (:out (shell {:out :string} "git rev-list HEAD --count")))))}
+               :task (println (str "0.5." (str/trim (:out (shell {:out :string} "git rev-list HEAD --count")))))}
 
   ;; ---------------- 测试 / 门禁 ----------------
 
   test
-  {:doc "跑五个模块的测试（bb test core 只跑一个）"
+  {:doc "跑全部模块的测试（bb test core 只跑一个）"
    ;; 先把参数全解析成目录再开跑：否则 `bb test core bogus` 会先跑完 core
    ;; 的整套测试，才在第二个模块上炸出「未知模块」。
    :task (let [targets (mapv (fn [m] [m (module-dir m)])

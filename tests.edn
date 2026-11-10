@@ -7,12 +7,15 @@
 ;; `:ns-patterns` 必须钉死到具体 ns：同目录下的 `copilotkit.agui-live-test` 也叫
 ;; `*-test`，缺省模式会把它一并收进来，那是要 MINIMAX_API_KEY 打真实端点的。
 {:tests [{:id :unit
-          :test-paths ["modules/clj-agent-provider/test"
+          :test-paths ["modules/clj-http/test"
+                       "modules/clj-agent-provider/test"
                        "modules/clj-agent-client/test"
                        "modules/clj-agent-core/test"
                        "modules/clj-agent-mcp/test"
                        "modules/clj-agent-agui/test"
-                       "modules/clj-agent-tools/test"]}
+                       "modules/clj-agent-tools/test"
+                       "modules/clj-agent-server/test"
+                       "modules/clj-agent-server-jetty/test"]}
          {:id :examples
           :test-paths ["examples"]
           :ns-patterns ["copilotkit\\.genui-test"

@@ -1,0 +1,15 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ ;; **零依赖**（designs/http-module.md §3）：只用 JDK java.net.http。
+ ;; 不依赖 core（deferred 就是 CompletableFuture）、不依赖 cheshire（JSON 是调用方的事）、不打日志。
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}}
+
+ :aliases
+ {:dev {:extra-paths ["dev" "test"]}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}

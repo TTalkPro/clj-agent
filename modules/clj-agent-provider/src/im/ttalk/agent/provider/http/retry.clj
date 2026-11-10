@@ -35,7 +35,8 @@
 
    ;; 关闭重试（max-retries 0）即等价于直接调用
    "
-  (:require [clojure.string :as str]))
+  (:require [im.ttalk.http.date :as date]
+            [im.ttalk.agent.retry :as core-retry]))
 
 (set! *warn-on-reflection* true)
 
@@ -110,55 +111,28 @@
 ;; Retry-After 解析
 ;; ============================================================
 
-(defn- header-get
-  "大小写无关地取响应头（HTTP 客户端头通常是小写关键字或字符串，但不同栈大小写不一）。
-
-   值是 `List<String>` / 向量时取第一个——`http.client` 的 `http-headers->map` 存的正是
-   `java.net.http` 给的 List。此前直接 `(str v)` 得到 \"[120]\"，Retry-After 在真实请求上
-   **从未生效**（单测一直传字符串值所以没发现；designs/provider-reliability.md §1.3）。"
-  [headers k]
-  (when headers
-    (let [target (str/lower-case (name k))
-          v (some (fn [[hk hv]]
-                    (when (= target (str/lower-case (name hk))) hv))
-                  headers)]
-      (if (or (instance? java.util.List v) (sequential? v))
-        (first v)
-        v))))
-
 (defn parse-retry-after
-  "从响应头解析 Retry-After，返回毫秒数或 nil
+  "从响应头解析服务端要求的等待，返回毫秒数或 nil（不判上限，上限在 `with-retry` 里按 :max-delay 截）。
 
-   支持两种格式：
-   - 秒数：\"120\" -> 120000
-   - HTTP-date：\"Wed, 21 Oct 2025 07:28:00 GMT\" -> 距今毫秒（>=0）
+   解析在 `im.ttalk.http.date/retry-after-ms`：`retry-after-ms` 头（毫秒）优先，其次 `Retry-After`——
+   秒数（可带小数）或 HTTP 日期（IMF-fixdate / RFC 850 / asctime，距今毫秒，已过 ⇒ 0）。
+   头名大小写无关；值是 `List<String>` / 向量时取第一个——java.net.http 给的正是 List，此前直接 `(str v)` 得到
+   \"[120]\"，Retry-After 在真实请求上**从未生效**（designs/provider-reliability.md §1.3）。
 
    参数:
    - headers: 响应头 map
    - now-ms:  当前时间戳（毫秒），便于测试注入；缺省取系统时间"
   ([headers] (parse-retry-after headers (System/currentTimeMillis)))
   ([headers now-ms]
-   (when-let [v (header-get headers "retry-after")]
-     (let [s (str/trim (str v))]
-       (cond
-         (str/blank? s) nil
-         ;; 纯数字 -> 秒
-         (re-matches #"\d+" s) (* (parse-long s) 1000)
-         ;; HTTP-date
-         :else (try
-                 (let [instant (-> (java.time.format.DateTimeFormatter/RFC_1123_DATE_TIME)
-                                   (.parse s)
-                                   (java.time.Instant/from))
-                       delta (- (.toEpochMilli instant) now-ms)]
-                   (max 0 delta))
-                 (catch Exception _ nil)))))))
+   (date/retry-after-ms headers now-ms)))
 
 ;; ============================================================
 ;; 退避计算
 ;; ============================================================
 
 (defn compute-backoff
-  "计算第 attempt 次重试的退避毫秒（含满抖动）
+  "计算第 attempt 次重试的退避毫秒（含满抖动）——就是 `im.ttalk.agent.retry/compute-backoff`
+   （ChatModel 层重试用的同一份；两份曾逐字重复，2026-11-09 收成一份，designs/http-module.md §8）。
 
    attempt 从 0 开始。基础退避 = min(base * multiplier^attempt, max-delay)，
    再在 [0, 基础退避] 上取满抖动（full jitter）。
@@ -167,13 +141,8 @@
    - attempt: 第几次重试（0-based）
    - opts:    {:base-delay :multiplier :max-delay}
    - rand-fn: 取 [0,1) 随机数的函数，便于测试注入（缺省 rand）"
-  ([attempt opts] (compute-backoff attempt opts rand))
-  ([attempt {:keys [base-delay multiplier max-delay]
-             :or {base-delay 1000 multiplier 2.0 max-delay 30000}}
-    rand-fn]
-   (let [raw (* base-delay (Math/pow multiplier attempt))
-         capped (min raw (double max-delay))]
-     (long (* (rand-fn) capped)))))
+  ([attempt opts] (core-retry/compute-backoff attempt opts))
+  ([attempt opts rand-fn] (core-retry/compute-backoff attempt opts rand-fn)))
 
 ;; ============================================================
 ;; 重试执行

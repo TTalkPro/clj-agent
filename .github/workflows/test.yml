@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [ clj-agent-core, clj-agent-client, clj-agent-provider, clj-agent-agui, clj-agent-tools ]
+        module: [ clj-http, clj-agent-core, clj-agent-client, clj-agent-provider, clj-agent-mcp, clj-agent-agui, clj-agent-tools, clj-agent-server, clj-agent-server-jetty ]
     steps:
       - uses: actions/checkout@v4
 

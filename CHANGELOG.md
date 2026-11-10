@@ -2,6 +2,55 @@
 
 本项目版本号形如 `0.x.<git-count>`（各模块同步）。本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织。
 
+## [0.5.0] - 未发布（2026-11-09～11-10：clj-http + clj-agent-server）
+
+minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 客户端）、`clj-agent-server`、`clj-agent-server-jetty`，
+`clj-agent-mcp` 首次进发布表；另有缺省行为变化（见下）。各模块同步 `0.5.<git-count>`。
+0.4.435 原样留在本地仓库（Keelson 的 clj-agui-server 依赖它），不被覆盖。
+
+总览：`designs/http-module.md`、`designs/server-module.md`；任务 `tasks/H-*`、`S-*`。
+
+### ✨ 新增
+
+- **新模块 `clj-http`**（`designs/http-module.md`，任务 `tasks/H-*`，2026-11-09）：零依赖的 HTTP 传输，
+  provider / mcp / tools 原先各自的 4 套 `java.net.http` 用法收成一处——`http/client`、`request` /
+  `request-async`、按行真流式 `stream-lines`（首字节 / 空闲 watchdog）、大小写不敏感的头工具。
+  从 Keelson clj-net 移植：SSE 分帧（WHATWG）、环境变量代理（`:proxy :env`，opt-in）、网络错分类、
+  HTTP 日期三格式与 `retry-after-ms` 头。provider 的 `provider.http.*` 保留为门面，公开 API 不变；
+  MCP `http-transport` 与 web_fetch 新增 `:client` / `:proxy` 选项。
+  2026-11-10 改名为 **`im.ttalk/clj-http`**（目录 `modules/clj-http`，ns 前缀 `im.ttalk.http`），定位为与 agent 无关的通用 HTTP
+  客户端；并补上 SSE 拼帧（`event-frame` / `comment-frame` / `retry-frame`）。
+- **新模块 `clj-agent-server` + `clj-agent-server-jetty`**（`designs/server-module.md`，任务 `tasks/S-*`，2026-11-10）：AG-UI 与
+  MCP 的 HTTP 服务端，**服务端协议就是 Ring SPEC**。AG-UI 那组路由（/info、/run、/connect、/suggest、/stop、/threads*）移植自
+  Keelson clj-agui-server，路由 / 访问守卫 / SSE / Jetty 宿主移植自 clj-net-server；MCP Streamable HTTP 端点转正自
+  `examples/mcp/server_example.clj`。Jetty 12 是缺省 adapter；http-kit / Undertow 经 `im.ttalk.agent.server.adapter.*` 垫片
+  可直接替换（它们不实现 SPEC 的流式正文）。示例 `examples/server/demo.clj`（`clojure -M:server`）。
+  `server.agui` 另支持注册表条目（或 host 选项缺省）的 `:input-transform` 与 `:mcp-proxy`（MCP Apps 前端代理：不起 run）。
+- `examples/copilotkit/http_kit_routes.clj` 改为调用 `clj-agent-server`（1140 → 192 行）：只剩装配、换 http-kit 与两条 demo
+  自己的应用端点（`/pending`、`/approve`）。`start!` / `start-registry!` / `stop!` 签名不变。
+
+### ⚠️ 缺省行为变化
+
+- `examples/copilotkit` 的路由改走 `clj-agent-server` 后，线协议以它为准（上游 / C# 口径）：输入形状错误统一 `bad_input`
+  （原 `missing_thread_id` / `missing_run_id`，非对象体原 `bad_json`）；线程改动类请求（PATCH / archive / DELETE）体里要带
+  `agentId`，缺了 400；`GET /threads/:id` 与「POST 同义 PATCH」不再提供（405）；CORS 名单外带 Origin 的请求 403（原回 `*`）。
+- MCP Streamable HTTP 传输改用共享的 `im.ttalk.http/default-client`：固定 HTTP/1.1（原先 JDK 缺省先试
+  HTTP/2）、虚拟线程 executor、连接池共享、建连超时 30s（原 = `:timeout-ms`）。要原行为传 `:client`。
+- web_fetch 的缺省 client 换成虚拟线程 executor（其余设置不变：不跟随重定向、建连超时 = `:timeout-ms`）。
+
+### 🐛 修复
+
+- Retry-After 的解析：取头统一走 `im.ttalk.http/header`，另认 RFC 850 / asctime 日期、小数秒与 `retry-after-ms` 头。
+- MCP 的 SSE 响应只取第一行 `data:`：一条 JSON 拆成多行 data 时解析失败。现按 WHATWG 分帧拼接。
+- IO 失败时 JDK 异常常没有 message，`provider.http.client` 回 `{:status 0 :error nil}`，`response->error`
+  认不出连接失败、误当 HTTP 0；现 `:error` 用异常类名兜底。流式网络错另带细分 `:code`
+  （`:name-resolution-error` / `:connection-error` / `:secure-connection-error`）。
+- `clj-agent-mcp` 从未进 `bb test` / CI matrix / `build.clj` 模块表——agui 依赖它，agui 的 pom 因此缺 mcp 这条依赖。
+- `provider.http.client/request-id` 回的是 List 而不是字符串。
+- 移植 Keelson clj-net-server 时修正：ns 改名后宿主用 `::on-stopping`（自动解析）读路由元数据，与 AG-UI 路由写的键对不上，
+  停机钩子会丢——改为显式的 `:im.ttalk.agent.server/on-stopping`。
+
+
 ## [0.4.0] - 未发布（2026-11-08 借鉴 Keelson）
 
 版本方案 `0.x.<git-count>`：本轮起 minor 走到 `0.4`（新增模块 `clj-agent-tools` +

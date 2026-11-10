@@ -4,8 +4,10 @@ MCP（Model Context Protocol）的 **client + server 两侧**，实现到规范
 [`2026-07-28`](https://modelcontextprotocol.io/specification/2026-07-28)，
 并**向下兼容** `initialize` 握手时代的老 server / 老客户端。
 
-**零内部依赖**：本模块不认识 agent / chat-client / 事件流。工具接入产出的是普通
-map（`{:name :description :parameters :handler}`），谁要用谁 conj 进 `:tools`。
+**不依赖 agent 侧的任何模块**（core / client / provider）：本模块不认识 agent / chat-client / 事件流。
+工具接入产出的是普通 map（`{:name :description :parameters :handler}`），谁要用谁 conj 进 `:tools`。
+唯一的内部依赖是零依赖的 `clj-http`：Streamable HTTP 传输建在它上面（`http-transport` 的
+`:client` / `:proxy` 选项、SSE 响应体按 WHATWG 分帧），见 `designs/http-module.md`。
 
 ## 2026-07-28 改了什么（为什么这不是"升级"而是重写）
 

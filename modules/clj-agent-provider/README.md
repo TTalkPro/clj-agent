@@ -55,7 +55,8 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 - cheshire/cheshire 5.12.0（JSON）
 - com.taoensso/timbre 6.3.0（日志）
 
-> HTTP 客户端（同步 + SSE 真流式）走 JDK 内置 java.net.http，零额外依赖。
+> HTTP 传输（同步 + SSE 真流式）在 `clj-http`（零依赖，JDK `java.net.http`）；
+> `provider.http.*` 是它之上的 provider 门面（JSON、canonical error、重试判据）。
 
 ## 支持的 Provider
 
@@ -120,8 +121,8 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 | `im.ttalk.agent.provider.stream.anthropic` | Anthropic 流式处理 |
 | `im.ttalk.agent.provider.stream.dashscope` | DashScope 原生 SSE 流式处理 |
 | `im.ttalk.agent.provider.wire.{openai,openai-responses,anthropic}` | wire 格式转换（provider 内部） |
-| `im.ttalk.agent.provider.http.client` | HTTP 客户端（同步；走 JDK java.net.http） |
-| `im.ttalk.agent.provider.http.stream-client` | SSE 真流式传输（`fromLineSubscriber` + 虚拟线程 + cancel） |
+| `im.ttalk.agent.provider.http.client` | HTTP 门面（同步 / 异步；传输是 `im.ttalk.http`） |
+| `im.ttalk.agent.provider.http.stream-client` | SSE 真流式（传输是 `im.ttalk.http/stream-lines`；本 ns 管解析、canonical error、模型核对、重试与取消） |
 | `im.ttalk.agent.provider.http.retry` | 重试与错误分类（指数退避 + Retry-After） |
 
 ## 快速开始

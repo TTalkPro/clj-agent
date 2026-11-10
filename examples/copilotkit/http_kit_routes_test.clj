@@ -59,19 +59,24 @@
         (is (= 400 (:status resp)))
         (is (= "bad_json" (:error (body-of resp))))
         (is (string? (:message (body-of resp))))))
-    (testing "非对象 → 400 bad_json；空体 → 400"
-      (is (= "bad_json" (:error (body-of (h (req :post "/agent/default/run" nil :raw "[1,2]"))))))
+    ;; 错误种类码以 clj-agent-server 为准（上游 / C# 的线协议）：形状不对一律 bad_input，消息里点名缺哪个字段
+    (testing "非对象 → 400 bad_input；空体 → 400"
+      (is (= "bad_input" (:error (body-of (h (req :post "/agent/default/run" nil :raw "[1,2]"))))))
       (is (= 400 (:status (h (req :post "/agent/default/run"))))))
     (testing "缺 threadId / runId → 400"
-      (is (= "missing_thread_id" (:error (body-of (h (req :post "/agent/default/run" {:runId "r1"}))))))
-      (is (= "missing_run_id" (:error (body-of (h (req :post "/agent/default/run" {:threadId "t1"})))))))
+      (let [b (body-of (h (req :post "/agent/default/run" {:runId "r1"})))]
+        (is (= "bad_input" (:error b)))
+        (is (str/includes? (:message b) "threadId")))
+      (let [b (body-of (h (req :post "/agent/default/run" {:threadId "t1"})))]
+        (is (= "bad_input" (:error b)))
+        (is (str/includes? (:message b) "runId"))))
     (testing "超限 → 413 body_too_large"
       (let [resp (h (req :post "/agent/default/run" {:threadId "t1" :runId "r1"
                                                       :messages [{:role "user" :content (apply str (repeat 500 "x"))}]}))]
         (is (= 413 (:status resp)))
         (is (= "body_too_large" (:error (body-of resp))))))
     (testing "/connect 也校验 threadId"
-      (is (= "missing_thread_id" (:error (body-of (h (req :post "/agent/default/connect" {})))))))
+      (is (= "bad_input" (:error (body-of (h (req :post "/agent/default/connect" {})))))))
     (testing "/suggest 坏 JSON → 400（没开 suggest 的照旧 404）"
       (is (= 404 (:status (h (req :post "/agent/default/suggest" nil :raw "{oops"))))))
     (registry/shutdown! reg)))
@@ -159,27 +164,30 @@
         (is (= ["t3" "t2"] (mapv :id (:threads p1))))
         (is (= ["t1"] (mapv :id (:threads p2))))
         (is (nil? (:nextCursor p2)))))
+    ;; 改动类请求体要带 agentId（上游契约；缺了 400 bad_request）
+    (testing "改动类缺 agentId → 400"
+      (is (= "bad_request" (:error (body-of (h (req :post "/threads/t2/archive" {})))))))
     (testing "归档缺省隐藏；includeArchived=true 才列；PATCH 取消归档"
-      (is (= {:threadId "t2" :archived true} (body-of (h (req :post "/threads/t2/archive" {})))))
+      (is (= {:threadId "t2" :archived true} (body-of (h (req :post "/threads/t2/archive" {:agentId "ops"})))))
       (is (= ["t3" "t1"] (mapv :id (:threads (body-of (h (req :get "/threads")))))))
       (is (some #{"t2"} (mapv :id (:threads (body-of (h (req :get "/threads" nil :query "includeArchived=true")))))))
-      (is (false? (:archived (body-of (h (req :patch "/threads/t2" {:archived false}))))))
+      (is (false? (:archived (body-of (h (req :patch "/threads/t2" {:agentId "ops" :archived false}))))))
       (is (some #{"t2"} (mapv :id (:threads (body-of (h (req :get "/threads"))))))))
-    (testing "改名（POST 与 PATCH 同义）；不存在 → 404 thread_not_found；坏 JSON → 400"
-      (is (= "新名字" (:name (body-of (h (req :post "/threads/t1" {:name "新名字"}))))))
-      (is (= "thread_not_found" (:error (body-of (h (req :patch "/threads/nope" {:name "x"}))))))
+    (testing "改名（PATCH）；不存在 → 404 thread_not_found；坏 JSON → 400"
+      (is (= "新名字" (:name (body-of (h (req :patch "/threads/t1" {:agentId "default" :name "新名字"}))))))
+      (is (= "thread_not_found" (:error (body-of (h (req :patch "/threads/nope" {:agentId "default" :name "x"}))))))
       (is (= 400 (:status (h (req :patch "/threads/t1" nil :raw "{oops"))))))
-    (testing "messages 读 ChatMemory；单条 GET"
+    (testing "messages 读 ChatMemory；/threads/:id 不收 GET（上游只有 PATCH / DELETE）⇒ 405 带 Allow"
       (is (= 1 (count (:messages (body-of (h (req :get "/threads/t1/messages")))))))
-      (is (= "新名字" (:name (body-of (h (req :get "/threads/t1"))))))
-      (is (= 404 (:status (h (req :get "/threads/nope"))))))
+      (is (= "新名字" (:name (first (filter #(= "t1" (:id %)) (:threads (body-of (h (req :get "/threads")))))))))
+      (is (= 405 (:status (h (req :get "/threads/t1"))))))
     (testing "会话被驱逐之后线程仍在列表里（列表来自线程存储，不是会话表）"
       (rt/forget! (:runtime (registry/find-agent reg "default")) "t1")
       (is (some #{"t1"} (mapv :id (:threads (body-of (h (req :get "/threads"))))))))
     (testing "DELETE：删线程记录 + 清 ChatMemory；再删 404"
-      (is (= {:threadId "t1" :deleted true} (body-of (h (req :delete "/threads/t1" {})))))
+      (is (= {:threadId "t1" :deleted true} (body-of (h (req :delete "/threads/t1" {:agentId "default"})))))
       (is (empty? (memory/mem-get mem "t1")))
-      (is (= 404 (:status (h (req :delete "/threads/t1" {}))))))
+      (is (= 404 (:status (h (req :delete "/threads/t1" {:agentId "default"}))))))
     (testing "subscribe 如实 404"
       (is (= 404 (:status (h (req :get "/threads/subscribe"))))))
     (registry/shutdown! reg)))
@@ -211,41 +219,6 @@
 
 ;;; ============================================================
 ;;; G-03 心跳（纯函数部分）
-;;; ============================================================
-
-(deftest heartbeat-test
-  (testing "空闲就发；停止后不再发"
-    (let [sent (atom [])
-          stop (routes/heartbeat! {:period-ms 20 :send! #(swap! sent conj %)})]
-      (is (sup/wait-for #(>= (count @sent) 2) 2000))
-      (is (= routes/default-heartbeat-frame (first @sent)))
-      (stop)
-      (Thread/sleep 50)
-      (let [n (count @sent)]
-        (Thread/sleep 80)
-        (is (= n (count @sent)) "停了就不再发"))))
-  (testing "持续有真实帧（last-sent 一直被刷新）→ 不发"
-    (let [sent (atom [])
-          last-sent (atom (System/currentTimeMillis))
-          stop (routes/heartbeat! {:period-ms 60 :last-sent last-sent :send! #(swap! sent conj %)})]
-      (dotimes [_ 10] (reset! last-sent (System/currentTimeMillis)) (Thread/sleep 15))
-      (stop)
-      (is (empty? @sent) "忙的流上没有多余字节")))
-  (testing "自定义帧（函数）；period 0 = 关"
-    (let [sent (atom [])
-          stop (routes/heartbeat! {:period-ms 20 :frame (fn [] "event: ping\ndata: {}\n\n")
-                                   :send! #(swap! sent conj %)})]
-      (is (sup/wait-for #(seq @sent) 2000))
-      (is (= "event: ping\ndata: {}\n\n" (first @sent)))
-      (stop))
-    (let [sent (atom [])
-          stop (routes/heartbeat! {:period-ms 0 :send! #(swap! sent conj %)})]
-      (Thread/sleep 50)
-      (stop)
-      (is (empty? @sent)))))
-
-;;; ============================================================
-;;; 真 server：SSE 心跳 + /run 记进线程表
 ;;; ============================================================
 
 (defn- with-server [handler f]
@@ -294,32 +267,6 @@
 ;;; ============================================================
 ;;; G-01 审批时改参数 + 拒绝理由
 ;;; ============================================================
-
-(deftest resume-decision-test
-  (let [rd routes/resume-decision]
-    (testing "cancelled → 拒绝，载荷文本当理由"
-      (is (= ["rejected" nil] (rd {:status "cancelled"})))
-      (is (= ["rejected" {:message "不要"}] (rd {:status "cancelled" :payload {:reason "不要"}}))))
-    (testing "⚠️ {approved:false} 不带 decision → 拒绝（从前被判成批准）"
-      (is (= ["rejected" nil] (rd {:status "resolved" :payload {:approved false}})))
-      (is (= ["rejected" nil] (rd {:status "resolved" :payload {:approved "false"}})))
-      (is (= ["rejected" {:message "先退款"}]
-             (rd {:status "resolved" :payload {:approved false :reason "先退款"}})))
-      (is (= ["rejected" nil] (rd {:status "resolved" :payload {:approved false :editedArgs {:x 1}}}))
-          "拒绝时 editedArgs 不生效"))
-    (testing "批准 + editedArgs → {:args …}（整体替换）"
-      (is (= ["approved" {:args {:order-id "B-2"}}]
-             (rd {:status "resolved" :payload {:approved true :editedArgs {:order-id "B-2"}}})))
-      (is (= ["approved" {:args {:order-id "B-2"}}]
-             (rd {:status "resolved" :payload {:decision "approved" :editedArgs {:order-id "B-2"}}})))
-      (is (= ["approved" nil] (rd {:status "resolved" :payload {:approved true :editedArgs "坏的"}}))))
-    (testing "老前端的 {decision} 照旧"
-      (is (= ["approved" nil] (rd {:status "resolved" :payload {:decision "approved"}})))
-      (is (= ["rejected" {:message "太贵"}] (rd {:status "resolved" :payload {:decision "rejected" :reason "太贵"}}))))
-    (testing "无载荷 = 批准；字符串载荷按 decision-of"
-      (is (= ["approved" nil] (rd {:status "resolved"})))
-      (is (= ["approved" nil] (rd {:status "resolved" :payload "同意"})))
-      (is (= ["rejected" {:message "no"}] (rd {:status "resolved" :payload "no"}))))))
 
 (def refunded (atom []))
 
@@ -392,39 +339,6 @@
    :pending-tool {:name "refund-order" :args {:order-id "A"} :tool-call {:id "tcA"}}
    :pending-tools [{:name "refund-order" :args {:order-id "A"} :tool-call {:id "tcA"}}
                    {:name "refund-order" :args {:order-id "B"} :tool-call {:id "tcB"}}]})
-
-(deftest resume-plan-test
-  (let [plan #(routes/resume-plan %1 %2 #{"refund-order"})
-        ok {:interruptId "tcA" :status "resolved" :payload {:approved true}}]
-    (testing "没带 resume → nil（走原来的推断）"
-      (is (nil? (plan nil two-pending)))
-      (is (nil? (plan [] two-pending))))
-    (testing "形状不对 → 400 interrupt_bad_resume"
-      (is (= 400 (first (:error (plan {:x 1} two-pending)))))
-      (is (= "interrupt_bad_resume" (second (:error (plan [{:status "resolved"}] two-pending)))))
-      (is (= "interrupt_bad_resume" (second (:error (plan [{:interruptId "tcA" :status "weird"}] two-pending)))))
-      (is (= "interrupt_bad_resume" (second (:error (plan ["tcA"] two-pending))))))
-    (testing "没有暂停 → no_pending_interrupt；全对不上 → interrupt_mismatch"
-      (is (= "no_pending_interrupt" (second (:error (plan [ok] nil)))))
-      (is (= "interrupt_mismatch" (second (:error (plan [(assoc ok :interruptId "old")] two-pending))))))
-    (testing "夹着不认识的 → interrupt_unknown；只答一半 → interrupt_incomplete"
-      (let [[st code extra] (:error (plan [ok (assoc ok :interruptId "zzz")] two-pending))]
-        (is (= [409 "interrupt_unknown" ["zzz"]] [st code (:unknown extra)])))
-      (let [[st code extra] (:error (plan [ok] two-pending))]
-        (is (= [409 "interrupt_incomplete" ["tcB"]] [st code (:missing extra)]))))
-    (testing "答全 → 逐条决策（editedArgs → :args、reason → :message）"
-      (is (= {:decisions {"tcA" {:decision :approved :args {:order-id "A2"}}
-                          "tcB" {:decision :rejected :message "不退"}}}
-             (plan [{:interruptId "tcA" :status "resolved" :payload {:approved true :editedArgs {:order-id "A2"}}}
-                    {:interruptId "tcB" :status "resolved" :payload {:approved false :reason "不退"}}]
-                   two-pending))))
-    (testing "前端工具那条 → :reply（载荷即结果）"
-      (let [p (assoc-in two-pending [:pending-tools 1 :name] "pickColor")]
-        (is (= {:decision :reply :message "红"}
-               (get-in (plan [ok {:interruptId "tcB" :status "resolved" :payload {:result "红"}}] p)
-                       [:decisions "tcB"])))))
-    (testing "单条暂停 → {:single entry}（G-01 那条路不变）"
-      (is (= {:single ok} (plan [ok] (dissoc two-pending :pending-tools)))))))
 
 (defn- multi-approval-server
   "两条 refund 一起被叫停的真 server。返回 `{:h :port-fn …}` 由 f 使用。"

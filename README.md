@@ -183,9 +183,9 @@ bb release core       # 或只装某一个
 
 ```clojure
 ;; deps.edn
-{:deps {im.ttalk/clj-agent-client {:mvn/version "0.4.xxx"}     ;; agent 运行时（引 core）
-        im.ttalk/clj-agent-provider {:mvn/version "0.4.xxx"}     ;; 厂商适配器
-        im.ttalk/clj-agent-tools {:mvn/version "0.4.xxx"}}}      ;; 编码工具集
+{:deps {im.ttalk/clj-agent-client {:mvn/version "0.5.xxx"}     ;; agent 运行时（引 core）
+        im.ttalk/clj-agent-provider {:mvn/version "0.5.xxx"}     ;; 厂商适配器
+        im.ttalk/clj-agent-tools {:mvn/version "0.5.xxx"}}}      ;; 编码工具集
 ```
 
 > **建议**：本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。
@@ -961,7 +961,7 @@ clojure -M -e '(load-file "examples/toolsearch_live_test.clj")'
 - cheshire/cheshire 5.12.0（provider，JSON）
 - com.taoensso/timbre 6.3.0（client / provider，日志）
 
-> core 模块零外部依赖；HTTP 客户端走 JDK 内置 java.net.http，无额外依赖。
+> core 模块零外部依赖；HTTP 传输在零依赖的 `clj-http` 模块（JDK 内置 java.net.http），无额外依赖。
 
 持久化 ChatMemory（client 模块，SQLite 后端，按需引入 `im.ttalk.agent.memory.sqlite`）：
 
