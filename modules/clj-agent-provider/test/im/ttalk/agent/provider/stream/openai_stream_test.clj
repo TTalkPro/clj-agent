@@ -117,3 +117,25 @@
       (is (= 10 (:input-tokens (response/response-usage r))))
       (is (= 5 (:output-tokens (response/response-usage r))))
       (is (= :stop (response/response-finish-reason r))))))
+
+(deftest qwen-empty-string-fields-test
+  ;; 百炼兼容模式（LiteGate 真机抓包，2026-11-10）：每块都同时带 content 与 reasoning_content，
+  ;; 空的那格是 ""。回归：旧判据把 "" 当真，答案块被判成推理块，content 整段丢失。
+  (let [chunk (fn [d & [fr]] {:choices [{:index 0 :delta d :finish_reason fr}]})
+        [state toks] (run-chunks [(chunk {:role "assistant" :content "" :reasoning_content ""})
+                                  (chunk {:content "" :reasoning_content "先算"})
+                                  (chunk {:content "" :reasoning_content " 17-5+3"})
+                                  (chunk {:content "15" :reasoning_content ""})
+                                  (chunk {:content "" :reasoning_content ""} "stop")])
+        m (get-in (stream/build-response state) [:choices 0 :message])]
+    (testing "答案不丢"
+      (is (= "15" (:content m))))
+    (testing "推理照常累积、单独发 :reasoning-token"
+      (is (= "先算 17-5+3" (:reasoning_content m)))
+      (is (= ["先算" " 17-5+3"] (keep :reasoning-token toks))))
+    (testing "空串块不发 token"
+      (is (= [{:token "15" :index 1}] (filterv :token toks))))
+    (testing "同块两格都非空：推理进最终响应，实时发答案 token"
+      (let [[st ts] (run-chunks [(chunk {:content "A" :reasoning_content "r"})])]
+        (is (= [{:token "A" :index 1}] ts))
+        (is (= "r" (get-in (stream/build-response st) [:choices 0 :message :reasoning_content])))))))

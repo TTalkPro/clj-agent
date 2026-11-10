@@ -35,6 +35,8 @@
 (def style-presets
   "provider 名 → OpenAI 兼容线的缺省思考写法（Keelson ChatProviders.cs：DeepSeek=nested、GLM=plain）。"
   {:deepseek :nested
+   ;; :dashscope 是**原生** API（dashscope.clj 不走本线）：它在 thinking-params 里固定按
+   ;; qwen 风格调本函数，这格只是兜底——比如宿主把 openai-compat provider 起名 :dashscope。
    :dashscope :qwen
    :qwen :qwen
    :zhipu :plain
@@ -46,12 +48,16 @@
       :plain))
 
 (defn openai-fields
-  "OpenAI 兼容请求体里要并进去的思考字段（map；可能为空）。`stream?` 只影响 qwen 风格。
+  "OpenAI 兼容请求体里要并进去的思考字段（map；可能为空）。
+
+   `stream?` 目前没有风格在用（保留参数位以免破坏调用方）：qwen 曾按 Keelson / 旧版百炼文档
+   「非流式必须 false」只在流式时写 true；2026-11-10 LiteGate 真机 qwen3.8-flash / max 非流式
+   `enable_thinking:true` 正常返回思考内容、不 400，于是放开——开就是 true，不看流式。
 
    - 档位 e：plain → 顶层 `reasoning_effort`；nested → `thinking{type:enabled, reasoning_effort:e}`；
      top-level → `thinking{type:enabled}` + 顶层 `reasoning_effort`
    - 只开 / 关：各风格一律 `thinking{type:enabled|disabled}`
-   - qwen：`enable_thinking`（开且流式才 true；档位不上线）；none：不写"
+   - qwen：`enable_thinking`（开 true / 关 false，流式与否一样；档位不上线）；none：不写"
   [config stream?]
   (let [call (resolve-call config)
         style (style-of config)
@@ -67,7 +73,7 @@
         (if (= :qwen style)
           (if (some? (:enable-thinking config))
             {}
-            {:enable_thinking (boolean (and (or (:effort call) (:enabled call)) stream?))})
+            {:enable_thinking (boolean (or (:effort call) (:enabled call)))})
           (if-let [e (:effort call)]
             (case style
               :nested    {:thinking {:type "enabled" :reasoning_effort e}}

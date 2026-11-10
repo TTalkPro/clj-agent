@@ -1,4 +1,4 @@
-# provider:缺两样 Keelson.Agent 有的通用件 —— ① 请求体最后一改的钩子;② 同一请求两档缓存 TTL(前缀 1h + 尾部 5m)
+# provider:缺两样 Keelson.Agent 有的通用件 —— ① 请求体最后一改的钩子;② 同一请求两档缓存 TTL(前缀 1h + 尾部 5m);外加 ③ 单次请求的选项递不到 provider
 
 > 报方:锦书(jinshu)§K-19 后端改写 JVM,K-25 Llm 层。C# 版靠 Keelson.Agent 的这两样,JVM 版接 clj-agent-provider 0.5.435 时没有对应物。
 > 两样都**不是锦书特有**:任何「接一家 OpenAI 兼容但私有字段不同的服务商」「在 Anthropic 兼容端点上省缓存钱」的宿主都会撞。
@@ -90,8 +90,12 @@ new AnthropicChatClient(new AnthropicOptions {
    * 返回非 map ⇒ 抛 `ex-info`（`:type :invalid-request-hook`），不发半截请求体；钩子自己抛的异常原样上抛。
    * 判据：qwen + 档位 high ⇒ 线上无 `thinking` / `reasoning_effort`、有 `enable_thinking`（非流式 false、流式 true，
      钩子按 `:stream` 判）；kimi 删 `temperature` ✅。
-   * 备注：库里已有 `:thinking-style :qwen`（`dashscope` / `qwen` provider 缺省就是它）直接生成 `enable_thinking`，
+   * 备注：OpenAI 兼容线上接百炼，直接 `:thinking-style :qwen` 就生成 `enable_thinking`（开 true / 关 false；2026-11-10 起非流式也放开，
+     依据是 LiteGate 上 qwen3.8 非流式开思考不 400），
      不需要钩子；钩子留给 Max/Plus 的 `preserve_thinking` 这类库不认识的私有规则。
+     （本节初稿写过「`dashscope` provider 缺省就是 `:qwen`」——**不对**：`:dashscope` 走原生 API，当时根本不读思考键，
+     `:thinking-effort` 被静默丢掉。已一并修好：原生请求写 `parameters.enable_thinking`，流式 `reasoning_content`
+     单独发 `:reasoning-token`；`thinking_budget` 等走新增的 `:extra-parameters`。）
 
 2. **`:cache-ttl` 按断点给档**（`common.cache`）
    * 标量照旧 = 所有断点同档；map 键 `:tools` / `:system` / `:conversation` / `:tool-results`，缺键或 nil = 5m（不带 ttl 字段）。
@@ -102,3 +106,33 @@ new AnthropicChatClient(new AnthropicOptions {
 3. **自动 beta**：策略**实际打到的**断点里有 `"1h"` ⇒ `anthropic-beta` 并入 `extended-cache-ttl-2025-04-11`
    （与 `:beta` 合并去重）；全 5m、或 1h 只写在策略不打的断点上 ⇒ 不加。
 
+
+## ③ 追加(同日):`DefaultChatModel` 只把请求选项里的三格递给 provider,其余**静默丢掉**
+
+### 症状
+
+```clojure
+(cm/call (cm/create-chat-model prov {:model "m"})
+         (req/chat-request msgs {:thinking-effort "max" :temperature 0.7 :max-tokens 1}))
+;; 线上请求体:没有 thinking / reasoning_effort / temperature / max_tokens —— 一个字不报
+;; 同样的键放进 create-chat-model 的 config ⇒ 全都在
+```
+
+### 位置
+
+| 文件 | 现状 |
+|---|---|
+| `clj-agent-core/src/im/ttalk/agent/chat_model.clj:52` `build-call-config` | 从 opts 里只取 `:tools` / `:tool-choice` / `:system-prompt`,其余丢掉 |
+| 同上 `:270` / `:283` | `call` 与 `stream-call` 都经它 |
+| `…/model/request.clj:100` `wire-options` | 文档写的是「**只做去 nil,不筛白名单** —— provider 私有参数必须能原样穿过去」(引 `docs/provider-variant-design.md` §1.2「递不到底」),而下一步就被 `build-call-config` 筛掉了 |
+
+### 影响面
+
+🔴 **不报错,值按调用变的那一类旋钮全部失效**:每轮的思考开 / 关 / 档位(锦书主对话按用户的开关逐轮变)、
+一次性小任务的 `:max-tokens`、选区改写的 `:temperature`。宿主只能每次调用现造一个 ChatModel 把它们塞进 config
+(锦书眼下就这么绕:`jinshu.llm.client/create-client` 的 `:options`),那等于每轮丢掉 ChatModel 上挂的一切(准入池的键、filter 状态)。
+
+### 建议
+
+`build-call-config` 改成「config ⊕ wire-options(去掉 ChatModel 自己的装配键 :admission / :retry 等)」,三格的特殊处理保留在合并之后;
+`:retry` 若允许单次覆盖,`retry/resolve-opts` 已经有三级合并,照现在的口径走。

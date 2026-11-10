@@ -34,12 +34,16 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   `(fn [payload] payload')` 在思考字段 / `:extra-body` / `:stream true` 之后、发出之前最后改一次请求体
   （`common.request-hook`；OpenAI 兼容 / Responses / Anthropic，同步 / 流式 / deferred 同一处）；
   `:cache-ttl` 可给 map `{:system "1h" :conversation nil}`，校验「长 TTL 在前」与未知键，违者抛 `:invalid-cache-ttl`。
+- DashScope 原生 provider 新增 `:extra-parameters`（map，并入 `parameters`；`thinking_budget` 等私有字段的逃生通道）。
 
 ### ⚠️ 缺省行为变化
 
 - `examples/copilotkit` 的路由改走 `clj-agent-server` 后，线协议以它为准（上游 / C# 口径）：输入形状错误统一 `bad_input`
   （原 `missing_thread_id` / `missing_run_id`，非对象体原 `bad_json`）；线程改动类请求（PATCH / archive / DELETE）体里要带
   `agentId`，缺了 400；`GET /threads/:id` 与「POST 同义 PATCH」不再提供（405）；CORS 名单外带 Origin 的请求 403（原回 `*`）。
+- qwen 思考写法（`:thinking-style :qwen`，及原生 `:dashscope`）：开思考时**非流式也写 `enable_thinking: true`**
+  （原为非流式强制 false，照 Keelson / 旧版百炼文档）。依据：2026-11-10 LiteGate 真机 qwen3.8-flash / max 非流式开思考
+  正常返回 `reasoning_content`、不 400。老模型若仍有该限制，用 `:configure-request` 按 `:stream` 改回。
 - Anthropic：缓存策略实际打到 `"1h"` 断点时，请求头自动带 `anthropic-beta: extended-cache-ttl-2025-04-11`
   （与 `:beta` 合并去重）。官方端点已 GA、多发无害；全 5m 时不变。
 - MCP Streamable HTTP 传输改用共享的 `im.ttalk.http/default-client`：固定 HTTP/1.1（原先 JDK 缺省先试
@@ -48,6 +52,14 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 
 ### 🐛 修复
 
+- **OpenAI 兼容流式答案整段丢失**（qwen / 百炼兼容模式，2026-11-10 LiteGate 真机发现）：百炼每块同时带 `content` 与
+  `reasoning_content`，空的那格是 `""`；`stream.openai/process-chunk` 用 `(:reasoning_content delta)` 判断，空串为真，
+  答案块 `{"content":"15","reasoning_content":""}` 被当成推理块，`content` 恒为空。改为判非空（`not-empty`），
+  同块两格都非空时推理累积进最终响应、实时发答案 token；空串块不再发空 token。原生 `stream.dashscope` 同口径。
+- DashScope 原生 provider 不读思考键：`:thinking-effort` / `:thinking-enabled` 被静默丢掉（`style-presets` 里的
+  `:dashscope :qwen` 从未生效——原生路径不走 OpenAI 兼容线）。现写 `parameters.enable_thinking`（开 true / 关 false，
+  显式 `:enable-thinking` 优先、`:thinking-style :none` 不写）；原生流式解析器补上 `reasoning_content`
+  （单独发 `:reasoning-token`，最终响应带 `reasoning_content`），原先思考内容整段丢失。
 - Retry-After 的解析：取头统一走 `im.ttalk.http/header`，另认 RFC 850 / asctime 日期、小数秒与 `retry-after-ms` 头。
 - MCP 的 SSE 响应只取第一行 `data:`：一条 JSON 拆成多行 data 时解析失败。现按 WHATWG 分帧拼接。
 - IO 失败时 JDK 异常常没有 message，`provider.http.client` 回 `{:status 0 :error nil}`，`response->error`

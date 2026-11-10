@@ -263,18 +263,36 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
  :extra-body {:enable_thinking false}}  ;; 各家私有字段逃生通道，直接 merge 进请求体
 ```
 
-`:extra-body` 只能**加 / 覆盖**。要**删**库生成的键（qwen 不收 `thinking` / `reasoning_effort`、
-kimi-k2 不收 `temperature`），用 `:configure-request`——发出前对**最终请求体**的最后一改
+`:extra-body` 只能**加 / 覆盖**。要**删**库生成的键（kimi-k2 不收 `temperature`、k2.7-code 不收 `thinking`），
+用 `:configure-request`——发出前对**最终请求体**的最后一改
 （思考字段、`:extra-body`、流式的 `:stream true` 都已在场；同步 / 流式 / deferred 同一处调用；
 OpenAI 兼容、Responses、Anthropic 三条线同一语义；返回非 map 当场抛）：
 
 ```clojure
-{:model "qwen3-max" :thinking-effort :high :thinking-style :top-level
- :configure-request (fn [payload]
-                      (-> payload
-                          (dissoc :thinking :reasoning_effort)
-                          (assoc :enable_thinking (true? (:stream payload)))))}
+{:model "kimi-k2.7-code" :temperature 0.6 :thinking-enabled true
+ :configure-request (fn [payload] (dissoc payload :temperature :thinking))}
 ```
+
+### 思考档位（`:thinking-effort` / `:thinking-enabled` / `:thinking-style`）
+
+上层只写档位或开关，`common.thinking` 按各家写法生成字段；显式 `:thinking` / `:reasoning-effort` 优先。
+OpenAI 兼容线的写法由 `:thinking-style` 选，缺省按 provider 预设（`:deepseek` → `:nested`，`:zhipu` / `:openai` → `:plain`，
+其余 `:plain`）：
+
+| style | `:thinking-effort :high` 时的请求体 |
+|---|---|
+| `:plain` | `reasoning_effort: "high"` |
+| `:nested` | `thinking: {type: "enabled", reasoning_effort: "high"}` |
+| `:top-level` | `thinking: {type: "enabled"}` + `reasoning_effort: "high"` |
+| `:qwen` | `enable_thinking`（开 true / 关 false，流式非流式一样；档位不上线）——百炼**兼容模式**用这个 |
+| `:none` | 不写 |
+
+- **只按 provider 选、不看模型**：同一家不同模型写法不同时（Kimi K2.x 用 `thinking{type}`、K3 只认 `reasoning_effort "max"`），
+  显式给 `:thinking-style` 或用 `:configure-request`。
+- qwen3.8 **不写思考键也会思考**；要关请显式 `:thinking-enabled false`。
+- `:dashscope` 是**原生** API，固定写 `parameters.enable_thinking`（开 true / 关 false），`:thinking-style` 只认 `:none`；
+  显式 `:enable-thinking` 压过档位；`thinking_budget` 等原生私有字段走 `:extra-parameters`（并入 `parameters`）。
+  流式的 `reasoning_content` 增量照 OpenAI 流的口径单独发 `:reasoning-token`。
 
 ### 多模态输入（图片 / PDF / 音频）
 

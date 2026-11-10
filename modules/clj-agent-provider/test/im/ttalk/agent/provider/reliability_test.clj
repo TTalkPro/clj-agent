@@ -113,8 +113,9 @@
     (is (= {:thinking {:type "enabled"} :reasoning_effort "low"}
            (thinking/openai-fields {:thinking-effort :low :thinking-style :top-level} false)))
     (is (= {:enable_thinking true} (thinking/openai-fields {:thinking-enabled true :thinking-style :qwen} true)))
-    (is (= {:enable_thinking false} (thinking/openai-fields {:thinking-effort "high" :thinking-style :qwen} false))
-        "qwen 非流式必须关")
+    (is (= {:enable_thinking true} (thinking/openai-fields {:thinking-effort "high" :thinking-style :qwen} false))
+        "qwen 非流式也开（2026-11-10 放开：qwen3.8 真机非流式开思考不 400）")
+    (is (= {:enable_thinking false} (thinking/openai-fields {:thinking-enabled false :thinking-style :qwen} false)))
     (is (= {} (thinking/openai-fields {:thinking-effort "high" :thinking-style :none} false))))
   (testing "只开 / 关；effort 压过 enabled；都没给 → 空"
     (is (= {:thinking {:type "disabled"}} (thinking/openai-fields {:thinking-enabled false} false)))

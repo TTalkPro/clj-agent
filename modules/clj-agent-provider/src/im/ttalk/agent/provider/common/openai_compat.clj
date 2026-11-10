@@ -138,8 +138,8 @@
    `:configure-request`（见 common.request-hook）。
 
    四条调用路径（同步 / 流式 / 两条 deferred）都只经这里取请求体，钩子因此
-   只有一处、且看得见思考字段、`:extra-body` 与 `:stream`（qwen 按 `stream`
-   决定 `enable_thinking`）。"
+   只有一处、且看得见思考字段、`:extra-body` 与 `:stream`（宿主可按 `stream`
+   做各家私有规则）。"
   [config messages tool-schemas stream?]
   (hook/apply-hook config
                    (cond-> (build-params config messages tool-schemas stream?)

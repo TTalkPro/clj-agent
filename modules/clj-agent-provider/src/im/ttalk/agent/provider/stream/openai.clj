@@ -128,28 +128,31 @@
                          (:tool-calls-acc state)
                          tool-calls))
                 state)]
-    (cond
-      ;; 推理增量（deepseek-reasoner 等：reasoning_content 在 content 之前流式返回）
-      ;; 单独 emit :reasoning-token，不混入 :token，保持答案流干净
-      (:reasoning_content delta)
-      (let [rtext (:reasoning_content delta)]
-        (.append ^StringBuilder (:reasoning-accumulated state) ^String rtext)
+    ;; 判「非空」必须用 seq：qwen（百炼兼容模式）每块都同时带两格，空的那格是 ""——
+    ;; 空串在 Clojure 里为真，旧写法 `(:reasoning_content delta)` 会把答案块
+    ;; {"content":"15","reasoning_content":""} 判成推理块，答案整段丢失（2026-11-10 LiteGate 真机）。
+    (let [rtext (not-empty (:reasoning_content delta))
+          text  (not-empty (:content delta))]
+      (when rtext (.append ^StringBuilder (:reasoning-accumulated state) ^String rtext))
+      (cond
+        ;; 文本增量（同块若也有推理：推理已累积进最终响应，实时只发答案 token）
+        text
+        (let [new-index (inc (:index state))]
+          (.append ^StringBuilder (:accumulated state) ^String text)
+          [(assoc state :index new-index)
+           {:token text
+            :index new-index}])
+
+        ;; 推理增量（deepseek-reasoner / qwen 等：reasoning_content 先于 content 流式返回）
+        ;; 单独 emit :reasoning-token，不混入 :token，保持答案流干净
+        rtext
         [state
          {:reasoning-token rtext
-          :reasoning? true}])
+          :reasoning? true}]
 
-      ;; 文本增量
-      (:content delta)
-      (let [text (:content delta)
-            new-index (inc (:index state))]
-        (.append ^StringBuilder (:accumulated state) ^String text)
-        [(assoc state :index new-index)
-         {:token text
-          :index new-index}])
-
-      ;; 仅工具调用 / 仅角色 / 其他：状态已在上面更新，无 token 下发
-      :else
-      [state nil])))
+        ;; 仅工具调用 / 仅角色 / 空串 / 其他：状态已在上面更新，无 token 下发
+        :else
+        [state nil]))))
 
 ;;; ============================================================
 ;;; 响应构建

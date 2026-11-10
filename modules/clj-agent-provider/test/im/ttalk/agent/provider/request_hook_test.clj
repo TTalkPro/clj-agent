@@ -41,7 +41,7 @@
      @seen#))
 
 ;; qwen（百炼）的钩子：库生成的 thinking / reasoning_effort 删掉，改写为 enable_thinking；
-;; 非流式必须 false（百炼规则）——钩子要看得见 :stream 才判得了。
+;; 「非流式必须 false」是老模型 / 锦书 C# 版的规则（库缺省已放开）——这里借它演示钩子看得见 :stream。
 (defn- qwen-hook [payload]
   (let [want? (boolean (:thinking payload))]
     (-> payload

@@ -30,6 +30,7 @@
             [im.ttalk.agent.provider.stream.dashscope :as dstream]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.common.response-parser :as parser]
+            [im.ttalk.agent.provider.common.thinking :as thinking]
             [im.ttalk.agent.provider.common.openai-compat :as compat]))
 
 (set! *warn-on-reflection* true)
@@ -86,16 +87,33 @@
         (:messages (wire/neutral->wire messages))
         (map msg/normalize messages)))
 
+(defn- thinking-params
+  "思考开关 → 原生 `parameters.enable_thinking`。
+
+   原生 API 只有一种写法，所以 `:thinking-style` 只认 `:none`（不写），其余一律按 qwen 风格：
+   `:thinking-effort` / `:thinking-enabled` 开 ⇒ true、关 ⇒ false，流式与否一样（旧规则「非流式必须 false」
+   已放开，见 common.thinking/openai-fields）；档位本身不上线（百炼只有按 token 的 `thinking_budget`，走 `:extra-parameters`）。
+   显式 `:enable-thinking` 在场 ⇒ 原样发送，压过上面两格。"
+  [llm-config]
+  (if (some? (:enable-thinking llm-config))
+    {:enable_thinking (boolean (:enable-thinking llm-config))}
+    (thinking/openai-fields (cond-> llm-config
+                              (not= :none (some-> (:thinking-style llm-config) keyword))
+                              (assoc :thinking-style :qwen))
+                            false)))
+
 (defn- build-request
   "构建 DashScope API 请求体
 
    参数:
-   - llm-config: {:model :max-tokens :temperature ...}
+   - llm-config: {:model :max-tokens :temperature ...}；思考见 thinking-params；
+     `:extra-parameters`（map）原样 merge 进 `parameters`（原生 API 的私有字段逃生通道）
    - messages: [{:role :content} ...]
    - tools: 工具定义列表"
   [llm-config messages tools]
   (let [model (or (:model llm-config) default-model)
-        params (cond-> {:result_format "message"}
+        params (cond-> (merge {:result_format "message"}
+                              (thinking-params llm-config))
                  (:max-tokens llm-config)
                  (assoc :max_tokens (:max-tokens llm-config))
 
@@ -108,7 +126,10 @@
                  ;; 复用 schema.openai：同时识别 :parameters 与 deftool 的 :input_schema
                  ;; （旧手写转换只认 :parameters，deftool 工具在 DashScope 下参数被静默丢成空对象）
                  (seq tools)
-                 (assoc :tools (schema/tools->schemas tools)))]
+                 (assoc :tools (schema/tools->schemas tools))
+
+                 (map? (:extra-parameters llm-config))
+                 (merge (:extra-parameters llm-config)))]
     {:model model
      :input {:messages messages}
      :parameters params}))

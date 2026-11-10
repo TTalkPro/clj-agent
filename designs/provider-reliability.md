@@ -430,7 +430,7 @@ provider `provider.common.thinking`：
   `:thinking-style`（`:plain`/`:nested`/`:top-level`/`:qwen`/`:none`；缺省按 `:provider-name` 预设：deepseek→nested，
   dashscope/qwen→qwen，其余 plain）、Anthropic 专属 `:thinking-budget-tokens`、`:thinking-always-on?`。
 - **不破坏透传**：config 里显式给了 `:thinking`（或 openai 的 `:reasoning-effort`）→ 新键对应字段不生成，显式值原样发。
-- 规则照 keel：effort 压过 enabled；openai 只开/关一律 `thinking{type}`；qwen 开且流式才 true；anthropic 关→`disabled`
+- 规则照 keel：effort 压过 enabled；openai 只开/关一律 `thinking{type}`；qwen 开且流式才 true（**2026-11-10 放开**：开即 true、不看流式，qwen3.8 真机非流式开思考不 400）；anthropic 关→`disabled`
   （always-on 时省略），预算压过档位，档位→`adaptive + display summarized` + `output_config.effort`，只开→裸 `adaptive`。
 - Responses API：effort → `:reasoning {:effort e}`（显式 `:reasoning` 优先）。
 
@@ -440,7 +440,7 @@ provider `provider.common.thinking`：
 
 ### 7.6 测试
 
-各风格的 wire 快照、显式 `:thinking` 优先、effort 压过 enabled、qwen 非流式 false、anthropic 三分支 + always-on + budget。
+各风格的 wire 快照、显式 `:thinking` 优先、effort 压过 enabled、qwen 非流式也 true（2026-11-10 起）、anthropic 三分支 + always-on + budget。
 
 ---
 

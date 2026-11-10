@@ -18,7 +18,7 @@
 ;; :accumulated 用 StringBuilder：逐 token `(str acc delta)` 是 O(n²)；
 ;; SSE 行由 Flow.Subscriber 串行投递，原地 append 安全，build-response 时物化。
 (defn make-initial-state []
-  {:accumulated (StringBuilder.) :tool-calls nil :id nil :model nil :finish-reason nil :usage nil})
+  {:accumulated (StringBuilder.) :reasoning-accumulated (StringBuilder.) :tool-calls nil :id nil :model nil :finish-reason nil :usage nil})
 
 (defn parse-sse-line
   "取 DashScope SSE 的 data 行（兼容 \"data:\" 有无空格），跳过 id:/event:/:HTTP_STATUS 等。"
@@ -36,11 +36,13 @@
 
 (defn process-event
   "处理一个 DashScope SSE 事件。返回 [new-state token-data|nil]。
+   reasoning_content 增量 → emit {:reasoning-token r :reasoning? true}；
    content 增量 → emit {:token delta}；tool_calls / usage / finish_reason 累积到 state。"
   [event state]
   (let [choice (first (get-in event [:output :choices]))
         msg    (:message choice)
         delta  (:content msg)
+        rdelta (:reasoning_content msg)
         tcs    (:tool_calls msg)
         fr     (:finish_reason choice)
         usage  (:usage event)
@@ -52,15 +54,25 @@
                  (seq tcs)                 (assoc :tool-calls tcs)
                  ;; finish_reason 生成中为 "null"/null，仅在真正结束时记录
                  (and fr (not= fr "null")) (assoc :finish-reason fr))]
-    (if (and delta (seq delta))
+    (when (seq rdelta) (.append ^StringBuilder (:reasoning-accumulated state) ^String rdelta))
+    ;; 与 stream.openai 同口径：判非空用 seq（空串为真）；同块两格都非空时推理已累积，实时只发答案 token
+    (cond
+      (seq delta)
       (do (.append ^StringBuilder (:accumulated state) ^String delta)
           [state {:token delta}])
-      [state nil])))
+
+      ;; 思考增量（enable_thinking 开时先于正文到达）：单独 emit :reasoning-token，不混入答案流
+      (seq rdelta)
+      [state {:reasoning-token rdelta :reasoning? true}]
+
+      :else [state nil])))
 
 (defn build-response
   "从最终状态构建与同步 parse-response 同形的 OpenAI 兼容响应。"
   [state]
   {:choices [{:message (cond-> {:role "assistant" :content (str (:accumulated state))}
+                         (seq (some-> (:reasoning-accumulated state) str))
+                         (assoc :reasoning_content (str (:reasoning-accumulated state)))
                          (:tool-calls state) (assoc :tool_calls (:tool-calls state)))
               :finish_reason (:finish-reason state)}]
    :usage (:usage state)
