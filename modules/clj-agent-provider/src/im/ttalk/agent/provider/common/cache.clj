@@ -29,7 +29,19 @@
                       标记 messages 中最后一个 type=tool_result 的内容块）
    :system-and-conversation  同时缓存 system 与对话历史（两个 breakpoint）
 
-   ttl: nil -> 默认 5 分钟；\"1h\" -> 1 小时。
+   ttl（:cache-ttl）两种形状：
+   - 标量：nil -> 默认 5 分钟；\"1h\" -> 1 小时；本策略的**所有**断点同一档（老用法）。
+   - 按断点给档的 map：键 :tools / :system / :conversation / :tool-results，
+     缺键或 nil = 5 分钟（cache_control 不带 ttl 字段）。典型：
+       {:cache-strategy :system-and-conversation
+        :cache-ttl {:system \"1h\" :conversation nil}}
+     ⇒ 前缀（tools+system）1h、对话尾巴 5m——尾巴每轮被取代，付 1h 的 2× 写入费纯亏
+     （feedbacks/2026-11-10-provider-request-hook-and-two-tier-cache-ttl.md）。
+
+   服务端规则：**长 TTL 的断点必须排在短 TTL 之前**（渲染顺序 tools → system → messages）。
+   apply-anthropic-cache 在注入前校验，违者抛 ex-info（:type :invalid-cache-ttl），
+   不等服务端 400。任一断点为 \"1h\" 时 anthropic provider 自动并入 beta
+   `extended-cache-ttl-2025-04-11`（兼容端点如 MiniMax /anthropic 少了它会静默退回 5m）。
 
    用法见 apply-anthropic-cache。"
   (:require [clojure.string :as str]))
@@ -175,6 +187,59 @@
       params)))
 
 ;; ============================================================
+;; TTL：按断点给档 + 次序闸
+;; ============================================================
+
+(def extended-ttl-beta
+  "1 小时缓存 TTL 的 beta 名。官方端点已 GA（多发无害）；兼容端点缺它会静默退回 5m。"
+  "extended-cache-ttl-2025-04-11")
+
+(def ^:private strategy-slots
+  "各策略打的断点，**按渲染顺序**（tools → system → messages）。"
+  {:system                  [:system]
+   :tools                   [:tools]
+   :system-and-tools        [:tools :system]
+   :conversation            [:conversation]
+   :tool-results            [:tool-results]
+   :system-and-conversation [:system :conversation]})
+
+(defn ttl-for
+  "断点 slot 的 TTL：ttl 是 map 就按 slot 取（缺键 = nil = 5m），否则标量即全部同档。"
+  [ttl slot]
+  (if (map? ttl) (get ttl slot) ttl))
+
+(defn- ttl-rank
+  "TTL 长短序：\"1h\" > nil / \"5m\"。"
+  [t]
+  (if (= "1h" t) 1 0))
+
+(defn validate-ttl!
+  "校验 ttl 对 strategy 合法，返回 ttl。
+
+   - map 只认 :tools / :system / :conversation / :tool-results 四键（拼错的键会
+     静默落成 5m，所以当场抛）；
+   - 按渲染顺序，长 TTL 的断点必须排在短 TTL 之前（服务端规则）。"
+  [strategy ttl]
+  (when (map? ttl)
+    (when-let [bad (seq (remove #{:tools :system :conversation :tool-results} (keys ttl)))]
+      (throw (ex-info (str ":cache-ttl 含未知断点键 " (vec bad)
+                           "（只认 :tools :system :conversation :tool-results）")
+                      {:type :invalid-cache-ttl :keys (vec bad) :cache-ttl ttl}))))
+  (let [slots (get strategy-slots strategy)]
+    (doseq [[a b] (partition 2 1 slots)
+            :let [ta (ttl-for ttl a) tb (ttl-for ttl b)]]
+      (when (< (ttl-rank ta) (ttl-rank tb))
+        (throw (ex-info (str ":cache-ttl 次序非法：" b " 的 TTL（" tb "）长于排在它之前的 "
+                             a "（" (or ta "5m") "）——长 TTL 必须排在短 TTL 之前")
+                        {:type :invalid-cache-ttl :strategy strategy :cache-ttl ttl})))))
+  ttl)
+
+(defn extended-ttl?
+  "该策略实际打的断点里是否有 \"1h\"（决定要不要并入 extended-ttl-beta）。"
+  [strategy ttl]
+  (boolean (some #(= "1h" (ttl-for ttl %)) (get strategy-slots strategy))))
+
+;; ============================================================
 ;; 入口
 ;; ============================================================
 
@@ -185,25 +250,30 @@
    - params:   已构建好的 Anthropic 请求参数（含 :system :tools :messages）
    - strategy: :none | :system | :tools | :system-and-tools | :conversation
                | :tool-results | :system-and-conversation
-   - ttl:      nil（5 分钟）| \"1h\"（1 小时）
+   - ttl:      nil（5 分钟）| \"1h\"（1 小时）——所有断点同档；
+               或按断点给档的 map {:tools .. :system .. :conversation .. :tool-results ..}
 
    返回: 注入 cache_control 后的 params
 
    说明:
    - :none 或未知策略 -> 原样返回。
+   - ttl 次序非法 / map 含未知键 -> 抛 ex-info（:type :invalid-cache-ttl），见 validate-ttl!。
    - 注入后若断点数超过 4 会记到 meta，但不抛错（交由服务端校验 / 上层处理）。"
   ([params strategy] (apply-anthropic-cache params strategy nil))
   ([params strategy ttl]
    (if (or (nil? strategy) (= :none strategy))
      params
-     (let [cc (ephemeral ttl)
+     (let [_ (validate-ttl! strategy ttl)
+           cc (fn [slot] (ephemeral (ttl-for ttl slot)))
            result (case strategy
-                    :system           (cache-system params cc)
-                    :tools            (cache-tools params cc)
-                    :system-and-tools (-> params (cache-tools cc) (cache-system cc))
-                    :conversation     (cache-conversation params cc)
-                    :tool-results     (cache-tool-results params cc)
-                    :system-and-conversation (-> params (cache-system cc) (cache-conversation cc))
+                    :system           (cache-system params (cc :system))
+                    :tools            (cache-tools params (cc :tools))
+                    :system-and-tools (-> params (cache-tools (cc :tools)) (cache-system (cc :system)))
+                    :conversation     (cache-conversation params (cc :conversation))
+                    :tool-results     (cache-tool-results params (cc :tool-results))
+                    :system-and-conversation (-> params
+                                                 (cache-system (cc :system))
+                                                 (cache-conversation (cc :conversation)))
                     ;; 未知策略：原样
                     params)
            n (count-breakpoints result)]

@@ -17,7 +17,10 @@
    - 推理：:thinking（如 {:type \"adaptive\"} / {:type \"enabled\" :budget_tokens 2048}）
    - :metadata、:service-tier（\"auto\" | \"standard_only\"，容量路由）
    - 工具：:tools（含 web_search 等 wire 工具）、:tool-choice
-   - 缓存：:cache-strategy + :cache-ttl（见下）
+   - 缓存：:cache-strategy + :cache-ttl（见下；可按断点给档 {:system \"1h\" :conversation nil}，
+     用到 \"1h\" 自动并入 beta extended-cache-ttl-2025-04-11）
+   - 宿主钩子：:configure-request（(fn [payload] payload')，发出前最后改一次请求体，
+     见 common.request-hook）
 
    prompt caching 策略（:cache-strategy）：
    - :none | :system | :tools | :system-and-tools | :conversation
@@ -74,6 +77,7 @@
             [im.ttalk.agent.model.response :as response]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.cache :as cache]
+            [im.ttalk.agent.provider.common.request-hook :as hook]
             [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
             [im.ttalk.agent.provider.common.thinking :as thinking]
             [im.ttalk.agent.provider.schema.anthropic :as schema]
@@ -104,11 +108,23 @@
    :auth-scheme :x-api-key            ;; :x-api-key | :bearer
    :anthropic-version "2023-06-01"})  ;; 设为 nil 则不发送该头
 
+(defn- with-extended-ttl-beta
+  "缓存策略实际用到 \"1h\" 断点时，把 `extended-cache-ttl-2025-04-11` 并入 :beta
+   （兼容端点如 MiniMax /anthropic 缺它会**静默**退回 5m；官方端点已 GA，多发无害）。
+   用户自己给的 :beta（字符串 / 集合）原样保留、去重。"
+  [beta {:keys [cache-strategy cache-ttl]}]
+  (if (cache/extended-ttl? cache-strategy cache-ttl)
+    (let [xs (cond (string? beta) [beta] (sequential? beta) (vec beta) :else [])]
+      (vec (distinct (conj xs cache/extended-ttl-beta))))
+    beta))
+
 (defn- resolve-endpoint
   "从 config 解析端点配置（缺省回退官方 Anthropic）"
   [config]
-  (merge default-endpoint
-         (select-keys config [:base-url :api-path :auth-scheme :anthropic-version :beta])))
+  (let [ep (merge default-endpoint
+                  (select-keys config [:base-url :api-path :auth-scheme :anthropic-version :beta]))
+        beta (with-extended-ttl-beta (:beta ep) config)]
+    (cond-> ep beta (assoc :beta beta))))
 
 (defn- build-url
   [{:keys [base-url api-path]}]
@@ -348,7 +364,7 @@
        :stop（=> stop_sequences）:metadata :thinking
      - 工具：:tool-choice :tools（预置 schema）
      - 系统提示：:system-prompt
-     - 缓存：:cache-strategy（见 cache 命名空间）:cache-ttl
+     - 缓存：:cache-strategy（见 cache 命名空间）:cache-ttl（标量或按断点给档的 map）
      - Skills（beta）：:container（如 {:skills [...]}，需配合 config :beta 头）
    - messages:     消息列表（Anthropic wire 形态）
    - tool-schemas: 工具 schema 列表
@@ -381,6 +397,14 @@
         params (thinking/merge-output-config params (thinking/anthropic-fields config))]
     (cache/apply-anthropic-cache params cache-strategy cache-ttl)))
 
+(defn- request-body
+  "发出前的**最终请求体**：build-params（含缓存断点）→ 流式补 `:stream true` →
+   宿主钩子 `:configure-request`（common.request-hook；与 OpenAI 兼容线对称）。"
+  [config messages tool-schemas stream?]
+  (hook/apply-hook config
+                   (cond-> (build-params config messages tool-schemas)
+                     stream? (assoc :stream true))))
+
 ;;; ============================================================
 ;;; 错误归一化
 ;;; ============================================================
@@ -411,7 +435,7 @@
      [])"
   [config messages tools]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (build-params config messages tool-schemas)
+        params (request-body config messages tool-schemas false)
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))
@@ -446,8 +470,7 @@
    最终完整响应"
   [config messages tools on-token]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (-> (build-params config messages tool-schemas)
-                   (assoc :stream true))
+        params (request-body config messages tool-schemas true)
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))
@@ -481,7 +504,7 @@
    （docs/async-chat-model-design.md §0 / §5）。"
   [config messages tools]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (build-params config messages tool-schemas)
+        params (request-body config messages tool-schemas false)
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))
@@ -502,8 +525,7 @@
    只是不阻塞。⚠️ on-token 在传输层 executor 上派发，不是调用线程。"
   [config messages tools on-token]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (-> (build-params config messages tool-schemas)
-                   (assoc :stream true))
+        params (request-body config messages tool-schemas true)
         endpoint (resolve-endpoint config)
         api-url (build-url endpoint)
         headers (build-headers endpoint (resolve-api-key config))

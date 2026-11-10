@@ -19,6 +19,7 @@
   (:require [im.ttalk.agent.provider.http.client :as http]
             [im.ttalk.agent.provider.http.stream-client :as stream-client]
             [im.ttalk.agent.provider.common.thinking :as thinking]
+            [im.ttalk.agent.provider.common.request-hook :as hook]
             [im.ttalk.agent.provider.schema.openai :as schema]
             [im.ttalk.agent.provider.stream.openai :as stream]
             [im.ttalk.agent.filter :as flt]
@@ -68,7 +69,8 @@
      - 多模态输出：:modalities（如 [text audio] 文本+语音）:audio（{:voice .. :format ..}）
      - 系统提示：:system-prompt
      - 结构化输出：:response-format（json_object 或 json_schema+strict 模式）
-     - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）
+     - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）；
+       要**删**库生成的键用 :configure-request（见 request-body / common.request-hook）
      - 统一思考档位：:thinking-effort / :thinking-enabled / :thinking-style（见 common.thinking；
        显式 :thinking / :reasoning-effort 优先，原样透传）
    - messages:     消息列表
@@ -131,6 +133,18 @@
       stream-options            (assoc :stream_options stream-options)
       (map? extra-body)         (merge extra-body)))))
 
+(defn request-body
+  "发出前的**最终请求体**：`build-params` → 流式补 `:stream true` → 宿主钩子
+   `:configure-request`（见 common.request-hook）。
+
+   四条调用路径（同步 / 流式 / 两条 deferred）都只经这里取请求体，钩子因此
+   只有一处、且看得见思考字段、`:extra-body` 与 `:stream`（qwen 按 `stream`
+   决定 `enable_thinking`）。"
+  [config messages tool-schemas stream?]
+  (hook/apply-hook config
+                   (cond-> (build-params config messages tool-schemas stream?)
+                     stream? (assoc :stream true))))
+
 ;;; ============================================================
 ;;; 消息构建
 ;;; ============================================================
@@ -183,7 +197,7 @@
              [])"
   [api-url api-key config messages tools & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (build-params config messages tool-schemas)
+        params (request-body config messages tool-schemas false)
         timeout (or (:timeout opts) 120000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
                        (:extra-headers config)
@@ -225,8 +239,7 @@
        (flush)))"
   [api-url api-key config messages tools on-token & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (-> (build-params config messages tool-schemas true)
-                   (assoc :stream true))
+        params (request-body config messages tool-schemas true)
         ;; 真流式：长生成给足超时（java.net.http 的 timeout 是 total）
         timeout (or (:timeout opts) 300000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
@@ -268,7 +281,7 @@
    **无重试**：重试在 ChatModel 层（`im.ttalk.agent.retry/run-async`）。"
   [api-url api-key config messages tools & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (build-params config messages tool-schemas)
+        params (request-body config messages tool-schemas false)
         timeout (or (:timeout opts) 120000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
                        (:extra-headers config)
@@ -289,8 +302,7 @@
    只是不阻塞调用线程。⚠️ on-token 在传输层 executor 上派发，不是调用线程。"
   [api-url api-key config messages tools on-token & [opts]]
   (let [tool-schemas (schema/tools->schemas tools)
-        params (-> (build-params config messages tool-schemas true)
-                   (assoc :stream true))
+        params (request-body config messages tool-schemas true)
         timeout (or (:timeout opts) 300000)
         headers (merge {"Authorization" (str "Bearer " api-key)}
                        (:extra-headers config)

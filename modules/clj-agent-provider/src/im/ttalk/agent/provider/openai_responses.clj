@@ -7,6 +7,7 @@
   (:require [im.ttalk.agent.filter :as flt]
             [im.ttalk.agent.model :as proto]
             [im.ttalk.agent.model.error :as errors]
+            [im.ttalk.agent.provider.common.request-hook :as hook]
             [im.ttalk.agent.provider.common.response-parser :as parser]
             [im.ttalk.agent.provider.common.thinking :as thinking]
             [im.ttalk.agent.provider.http.client :as http]
@@ -127,16 +128,20 @@
    "Accept" "application/json"})
 
 (defn- build-body
-  [cfg messages tools]
+  "最终请求体：build-params → 流式补 `:stream true` → 宿主钩子 `:configure-request`
+   （common.request-hook；与 OpenAI 兼容线同一语义）。"
+  [cfg messages tools stream?]
   (let [tool-schemas (schema/tools->schemas tools)
         input (wire/neutral->wire (:system-prompt cfg) messages)]
-    (build-params cfg input (wire/tools->wire tool-schemas))))
+    (hook/apply-hook cfg
+                     (cond-> (build-params cfg input (wire/tools->wire tool-schemas))
+                       stream? (assoc :stream true)))))
 
 (defn- call!
   [cfg messages tools]
   (let [resp (http/post (api-url cfg)
                         :headers (headers cfg)
-                        :body (build-body cfg messages tools)
+                        :body (build-body cfg messages tools false)
                         :timeout (or (:timeout cfg) 60000))]
     (if (:success? resp)
       (provider-response (http/success-body resp (:provider-name cfg) cfg) (:provider-name cfg))
@@ -144,7 +149,7 @@
 
 (defn- call-stream!
   [cfg messages tools on-token]
-  (let [body (assoc (build-body cfg messages tools) :stream true)
+  (let [body (build-body cfg messages tools true)
         processor (stream/make-stream-processor)]
     (stream-client/post-stream-sync
       (api-url cfg)
@@ -187,7 +192,7 @@
     (let [cfg (merge @config llm-config)]
       (flt/fmap (http/post-deferred (api-url cfg)
                                     :headers (headers cfg)
-                                    :body (build-body cfg messages tools)
+                                    :body (build-body cfg messages tools false)
                                     :timeout (or (:timeout cfg) 60000))
                 (fn [resp]
                   (if (:success? resp)
@@ -199,7 +204,7 @@
       (stream-client/post-stream-deferred
         (api-url cfg)
         {:headers (headers cfg)
-         :body (assoc (build-body cfg messages tools) :stream true)
+         :body (build-body cfg messages tools true)
          :timeout (or (:timeout cfg) 300000)
          :parse-fn (:parse-fn processor)
          :process-fn (:process-fn processor)

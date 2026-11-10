@@ -29,11 +29,19 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 - `examples/copilotkit/http_kit_routes.clj` 改为调用 `clj-agent-server`（1140 → 192 行）：只剩装配、换 http-kit 与两条 demo
   自己的应用端点（`/pending`、`/approve`）。`start!` / `start-registry!` / `stop!` 签名不变。
 
+- **provider：宿主请求体钩子 `:configure-request` + Anthropic 按断点给缓存 TTL**（2026-11-10，回
+  `feedbacks/2026-11-10-provider-request-hook-and-two-tier-cache-ttl.md`，锦书报）：
+  `(fn [payload] payload')` 在思考字段 / `:extra-body` / `:stream true` 之后、发出之前最后改一次请求体
+  （`common.request-hook`；OpenAI 兼容 / Responses / Anthropic，同步 / 流式 / deferred 同一处）；
+  `:cache-ttl` 可给 map `{:system "1h" :conversation nil}`，校验「长 TTL 在前」与未知键，违者抛 `:invalid-cache-ttl`。
+
 ### ⚠️ 缺省行为变化
 
 - `examples/copilotkit` 的路由改走 `clj-agent-server` 后，线协议以它为准（上游 / C# 口径）：输入形状错误统一 `bad_input`
   （原 `missing_thread_id` / `missing_run_id`，非对象体原 `bad_json`）；线程改动类请求（PATCH / archive / DELETE）体里要带
   `agentId`，缺了 400；`GET /threads/:id` 与「POST 同义 PATCH」不再提供（405）；CORS 名单外带 Origin 的请求 403（原回 `*`）。
+- Anthropic：缓存策略实际打到 `"1h"` 断点时，请求头自动带 `anthropic-beta: extended-cache-ttl-2025-04-11`
+  （与 `:beta` 合并去重）。官方端点已 GA、多发无害；全 5m 时不变。
 - MCP Streamable HTTP 传输改用共享的 `im.ttalk.http/default-client`：固定 HTTP/1.1（原先 JDK 缺省先试
   HTTP/2）、虚拟线程 executor、连接池共享、建连超时 30s（原 = `:timeout-ms`）。要原行为传 `:client`。
 - web_fetch 的缺省 client 换成虚拟线程 executor（其余设置不变：不跟随重定向、建连超时 = `:timeout-ms`）。

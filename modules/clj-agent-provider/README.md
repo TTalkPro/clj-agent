@@ -106,7 +106,8 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 | `im.ttalk.agent.provider.mock` | Mock Provider |
 | `im.ttalk.agent.provider.common.base` | Provider 基座 + defprovider 宏（辅助层）；`OpenAICompatProvider` 实现 `ILLMProvider` + `IAsyncLLMProvider` |
 | `im.ttalk.agent.provider.common.openai-compat` | OpenAI 兼容协议层（辅助层） |
-| `im.ttalk.agent.provider.common.cache` | Anthropic prompt caching 策略层（辅助层） |
+| `im.ttalk.agent.provider.common.cache` | Anthropic prompt caching 策略层；`:cache-ttl` 可按断点给档（辅助层） |
+| `im.ttalk.agent.provider.common.request-hook` | 宿主请求体钩子 `:configure-request`：发出前对最终请求体的最后一改（辅助层） |
 | `im.ttalk.agent.provider.common.response-parser` | 响应归一化（辅助层） |
 | `im.ttalk.agent.provider.common.memo` | 有界记忆化（schema 转换缓存，辅助层） |
 | `im.ttalk.agent.provider.common.embeddings` | Embedding HTTP 调用与响应归一（OpenAI 兼容 + DashScope 原生，辅助层） |
@@ -262,6 +263,19 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
  :extra-body {:enable_thinking false}}  ;; 各家私有字段逃生通道，直接 merge 进请求体
 ```
 
+`:extra-body` 只能**加 / 覆盖**。要**删**库生成的键（qwen 不收 `thinking` / `reasoning_effort`、
+kimi-k2 不收 `temperature`），用 `:configure-request`——发出前对**最终请求体**的最后一改
+（思考字段、`:extra-body`、流式的 `:stream true` 都已在场；同步 / 流式 / deferred 同一处调用；
+OpenAI 兼容、Responses、Anthropic 三条线同一语义；返回非 map 当场抛）：
+
+```clojure
+{:model "qwen3-max" :thinking-effort :high :thinking-style :top-level
+ :configure-request (fn [payload]
+                      (-> payload
+                          (dissoc :thinking :reasoning_effort)
+                          (assoc :enable_thinking (true? (:stream payload)))))}
+```
+
 ### 多模态输入（图片 / PDF / 音频）
 
 中立消息的 `:content` 除字符串外，还可以是**内容部件向量**（`im.ttalk.agent.model.content`），
@@ -372,6 +386,19 @@ Responses 端点也接受 Chat 风格 `:response-format`，provider 会转换成
  :cache-strategy :system-and-tools
  :cache-ttl "1h"}                   ;; nil=5min，"1h"=1小时
 ```
+
+`:cache-ttl` 也可**按断点给档**（键 `:tools` / `:system` / `:conversation` / `:tool-results`，缺键或 nil = 5min）。
+典型是前缀长缓存、对话尾巴短缓存（尾巴每轮被取代，付 1h 的 2× 写入费纯亏）：
+
+```clojure
+{:cache-strategy :system-and-conversation
+ :cache-ttl {:system "1h" :conversation nil}}   ;; system 1h + 尾巴 5m，恰好 2 个断点
+```
+
+- 服务端规则：**长 TTL 必须排在短 TTL 之前**（渲染顺序 tools→system→messages）；违者与拼错的键一样，
+  组请求时当场抛 `ex-info`（`:type :invalid-cache-ttl`），不等服务端 400。
+- 任一实际断点为 `"1h"` 时自动并入 beta `extended-cache-ttl-2025-04-11`（与 `:beta` 合并去重）——
+  兼容端点（MiniMax `/anthropic`）少了它会静默退回 5m。
 
 可用策略（`:cache-strategy`）：
 
