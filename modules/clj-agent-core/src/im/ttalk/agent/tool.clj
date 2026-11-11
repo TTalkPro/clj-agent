@@ -11,6 +11,11 @@
                  :min-length n :max-length n :items {:type \"string\"} :min-items n :max-items n
                  :properties {…} :required [..] :additional-properties false]
                  （进 input_schema，模型看得到；调用前按 schema 完整校验，见 tool-args）
+   对象参数的属性表可写成 [[名称 schema] …] 键值对 vector——**保序**，字段多于 8 个时用这个写法
+   （map 字面量多于 8 键会被 Clojure reader 变成 hash map，键序不再跟源码文本一致）。
+
+   **schema 在命名空间加载期构造**（不是常量）：AOT 编译会把常量 map 重建（>8 键即
+   PersistentHashMap），参数声明顺序会丢；加载期构造则 eval 与 AOT 完全一致。
    支持敏感标记: {:sensitive true}
    支持只读 context: {:context true}
    支持串行标记: {:serial true}（副作用工具，批内并行时整批退化为按序执行）
@@ -136,6 +141,20 @@
                                (compare ia ib)))))
           entries)))
 
+(defn- ->ordered-properties
+  "对象参数的属性表支持两种写法：
+
+   - map：`{:chapter {…} :title {…}}`。≤8 键时 Clojure reader 给的是 array map，
+     键序跟源码文本一致；>8 键时 reader 就给 hash map 了（键序不再跟源码一致）。
+   - `[[:chapter {…}] [:title {…}]]` 键值对 vector：**保序**，字段多于 8 个时用这个写法。
+
+   非键值对 vector / 非 map 原样透传。"
+  [v]
+  (if (and (sequential? v)
+           (every? #(and (vector? %) (= 2 (count %))) v))
+    (ordered-map (mapv first v) v)
+    v))
+
 (defn- parse-param
   "解析单个参数声明向量
 
@@ -154,12 +173,12 @@
   (let [[pname ptype pdesc & opts] param-vec
         opts-map (apply hash-map opts)
         pairs (partition 2 opts)
-        constraints (ordered-map
-                      (mapv first pairs)
-                      (for [[k v] pairs
-                            :let [jk (constraint-keys k)]
-                            :when jk]
-                        [jk v]))]
+        ;; 只认 constraint-keys 里的选项；JSON Schema 关键字的顺序跟声明顺序一致
+        constraint-pairs (for [[k v] pairs
+                               :let [jk (constraint-keys k)]
+                               :when jk]
+                           [jk (if (= jk :properties) (->ordered-properties v) v)])
+        constraints (ordered-map (mapv first constraint-pairs) constraint-pairs)]
     (cond-> {:name        pname
              :type        ptype
              :description pdesc
@@ -175,8 +194,8 @@
   "将解析后的参数列表转换为 JSON Schema
 
    properties 按参数声明顺序写出（>8 个参数也保序，进 prompt cache 的稳定前缀）。
-   `:properties` / `:items` 里的嵌套 map 原样透传；>8 键的嵌套 map 字面量受 Clojure
-   reader 限制，键序不是源码文本序。
+   `:properties` / `:items` 里的嵌套 map 原样透传；嵌套属性表也可写成键值对 vector
+   （`[[:字段 {…}] …]`）以保序——map 字面量 >8 键受 Clojure reader 限制，键序不是源码文本序。
 
    返回:
    {:type       \"object\"
@@ -214,6 +233,27 @@
    :description  description
    :input_schema (params->json-schema parsed-params)})
 
+(defn tool-meta
+  "运行时构建 deftool 的元数据片段：{:tool/schema … :tool/params […]}
+
+   **为什么不能把 schema 当常量**：deftool 过去把 schema 作为常量塞进 var 元数据。
+   AOT 编译时 Clojure 会把常量 map 重建（>8 键即 PersistentHashMap），参数声明顺序
+   全丢——单测在 eval 下是绿的，发出去的包里模型看到的顺序却是乱的（见
+   feedbacks/2026-11-11-deftool-order-lost-under-aot.md）。
+
+   改为**命名空间加载期**构造：eval 与 AOT 走同一条路径，顺序由 `ordered-map` 钉住。
+
+   参数:
+   - fn-name:     工具名（keyword）
+   - description: 工具描述
+   - params:      参数声明向量（用户写法；参数名是符号）
+
+   返回: {:tool/schema … :tool/params […]}"
+  [fn-name description params]
+  (let [parsed (mapv parse-param params)]
+    {:tool/schema (build-tool-schema fn-name description parsed)
+     :tool/params parsed}))
+
 ;;; ============================================================
 ;;; deftool 宏
 ;;; ============================================================
@@ -243,7 +283,7 @@
      {:result \"...\" :writes {:key val}})
 
    生成的 var 元数据:
-   - :tool/schema    Anthropic 格式 tool schema
+   - :tool/schema    Anthropic 格式 tool schema（**加载期**构造，eval / AOT 一致）
    - :tool/params    参数定义列表
    - :tool/sensitive 是否为敏感工具
    - :tool/serial    是否串行工具（批内并行时整批退化）
@@ -267,8 +307,9 @@
                       [{} body])
         ;; 解析参数定义
         parsed-params (mapv parse-param params)
-        ;; 生成 tool schema
-        schema (build-tool-schema (keyword fn-name) description parsed-params)
+        ;; schema 在加载期由**参数声明本身**重建（AOT 下常量 map 会被重排，见 tool-meta）。
+        ;; 参数声明按**数据**传过去（引号包住）：约束值是 JSON Schema 片段，不是代码——
+        ;; 免得用户写的表达式在编译期被求值一次。
         ;; 提取参数名作为解构键
         param-names (mapv (comp symbol clojure.core/name :name) parsed-params)
         ;; 构建 :or 默认值 map：声明了 :default 的参数（:required false）在 LLM 省略时
@@ -284,71 +325,73 @@
         ;; 解析 tags
         tags-set (when-let [tags (:tags opts)]
                    (set tags))]
-    (if needs-context?
-      ;; 需要 context 的 tool：生成 2-arity 函数 [args-map context]
-      (if (seq param-names)
-        `(defn ~fn-name
-           ~description
-           {:tool/schema    '~schema
-            :tool/params    '~parsed-params
-            :tool/sensitive ~(boolean (:sensitive opts))
-            :tool/serial    ~(boolean (:serial opts))
-            :tool/return-direct ~(boolean (:return-direct opts))
-            :tool/retry     ~(:retry opts)
-            :tool/timeout   ~(:timeout opts)
-            :tool/category  ~(:category opts :general)
-            :tool/context   true
-            :tool/tags      ~tags-set
-            :tool/function  true}
-           [{:keys [~@param-names] :or ~or-map :as ~arg-sym} ~ctx-sym]
-           ~@body)
-        `(defn ~fn-name
-           ~description
-           {:tool/schema    '~schema
-            :tool/params    '~parsed-params
-            :tool/sensitive ~(boolean (:sensitive opts))
-            :tool/serial    ~(boolean (:serial opts))
-            :tool/return-direct ~(boolean (:return-direct opts))
-            :tool/retry     ~(:retry opts)
-            :tool/timeout   ~(:timeout opts)
-            :tool/category  ~(:category opts :general)
-            :tool/context   true
-            :tool/tags      ~tags-set
-            :tool/function  true}
-           [~arg-sym ~ctx-sym]
-           ~@body))
-      ;; 普通 tool（保持兼容）：1-arity 函数 [args-map]
-      (if (seq param-names)
-        `(defn ~fn-name
-           ~description
-           {:tool/schema    '~schema
-            :tool/params    '~parsed-params
-            :tool/sensitive ~(boolean (:sensitive opts))
-            :tool/serial    ~(boolean (:serial opts))
-            :tool/return-direct ~(boolean (:return-direct opts))
-            :tool/retry     ~(:retry opts)
-            :tool/timeout   ~(:timeout opts)
-            :tool/category  ~(:category opts :general)
-            :tool/context   false
-            :tool/tags      ~tags-set
-            :tool/function  true}
-           [{:keys [~@param-names] :or ~or-map :as ~arg-sym}]
-           ~@body)
-        `(defn ~fn-name
-           ~description
-           {:tool/schema    '~schema
-            :tool/params    '~parsed-params
-            :tool/sensitive ~(boolean (:sensitive opts))
-            :tool/serial    ~(boolean (:serial opts))
-            :tool/return-direct ~(boolean (:return-direct opts))
-            :tool/retry     ~(:retry opts)
-            :tool/timeout   ~(:timeout opts)
-            :tool/category  ~(:category opts :general)
-            :tool/context   false
-            :tool/tags      ~tags-set
-            :tool/function  true}
-           [~arg-sym]
-           ~@body)))))
+    (let [defn-form
+          (if needs-context?
+            ;; 需要 context 的 tool：生成 2-arity 函数 [args-map context]
+            (if (seq param-names)
+              `(defn ~fn-name
+                 ~description
+                 {:tool/sensitive ~(boolean (:sensitive opts))
+                  :tool/serial    ~(boolean (:serial opts))
+                  :tool/return-direct ~(boolean (:return-direct opts))
+                  :tool/retry     ~(:retry opts)
+                  :tool/timeout   ~(:timeout opts)
+                  :tool/category  ~(:category opts :general)
+                  :tool/context   true
+                  :tool/tags      ~tags-set
+                  :tool/function  true}
+                 [{:keys [~@param-names] :or ~or-map :as ~arg-sym} ~ctx-sym]
+                 ~@body)
+              `(defn ~fn-name
+                 ~description
+                 {:tool/sensitive ~(boolean (:sensitive opts))
+                  :tool/serial    ~(boolean (:serial opts))
+                  :tool/return-direct ~(boolean (:return-direct opts))
+                  :tool/retry     ~(:retry opts)
+                  :tool/timeout   ~(:timeout opts)
+                  :tool/category  ~(:category opts :general)
+                  :tool/context   true
+                  :tool/tags      ~tags-set
+                  :tool/function  true}
+                 [~arg-sym ~ctx-sym]
+                 ~@body))
+            ;; 普通 tool（保持兼容）：1-arity 函数 [args-map]
+            (if (seq param-names)
+              `(defn ~fn-name
+                 ~description
+                 {:tool/sensitive ~(boolean (:sensitive opts))
+                  :tool/serial    ~(boolean (:serial opts))
+                  :tool/return-direct ~(boolean (:return-direct opts))
+                  :tool/retry     ~(:retry opts)
+                  :tool/timeout   ~(:timeout opts)
+                  :tool/category  ~(:category opts :general)
+                  :tool/context   false
+                  :tool/tags      ~tags-set
+                  :tool/function  true}
+                 [{:keys [~@param-names] :or ~or-map :as ~arg-sym}]
+                 ~@body)
+              `(defn ~fn-name
+                 ~description
+                 {:tool/sensitive ~(boolean (:sensitive opts))
+                  :tool/serial    ~(boolean (:serial opts))
+                  :tool/return-direct ~(boolean (:return-direct opts))
+                  :tool/retry     ~(:retry opts)
+                  :tool/timeout   ~(:timeout opts)
+                  :tool/category  ~(:category opts :general)
+                  :tool/context   false
+                  :tool/tags      ~tags-set
+                  :tool/function  true}
+                 [~arg-sym]
+                 ~@body)))]
+      `(do
+         ~defn-form
+         ;; schema 在**加载期**重建，而不是当常量塞进元数据：
+         ;; AOT 下常量 map 会被重建（>8 键即 hash map），参数声明顺序会丢。
+         (alter-meta! (var ~fn-name)
+           merge
+           (im.ttalk.agent.tool/tool-meta ~(keyword fn-name)
+                                            ~description
+                                            '~params))))))
 
 ;;; ============================================================
 ;;; Tool Var 元数据查询

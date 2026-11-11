@@ -203,6 +203,7 @@ chat-client 只提供两个原语（均经 filter 洋葱链）；**工具调用�
 ;; 参数约束: :enum :pattern :minimum :maximum :min/max-length :items :min/max-items
 ;;           :properties :required :additional-properties（对象参数可声明嵌套 schema；
 ;;           input_schema.properties 按参数声明序，>8 个参数也保序。
+;;           嵌套属性表可写成 [[:字段 {…}] …] 键值对 vector——保序；
 ;;           嵌套 map 字面量 >8 个键时，键序受 Clojure reader 限制）
 ;; 可选项: :sensitive :context :tags :category :serial :retry :return-direct
 ;;         :timeout（毫秒；**开箱即生效**，无需挂 filter。缺省不超时；
@@ -210,6 +211,10 @@ chat-client 只提供两个原语（均经 filter 洋葱链）；**工具调用�
 ;; 生成的 metadata: :tool/schema :tool/params :tool/sensitive :tool/context
 ;;                  :tool/tags :tool/category :tool/serial :tool/retry
 ;;                  :tool/return-direct :tool/function
+;;
+;; schema 在**命名空间加载期**构造（不是常量）：AOT 编译会把常量 map 重建
+;; （>8 键即 PersistentHashMap），参数声明顺序会丢；加载期构造则 eval 与
+;; AOT（tools.build 的 compile-clj）完全一致。
 ```
 
 ### Filter API（洋葱式 around，对标 Spring AI 2.0 Advisor）

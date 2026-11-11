@@ -264,6 +264,10 @@ minItems/maxItems；null 处理；未知键不报错）。
 `(format-errors tool-name errors)` 生成「参数校验失败（N 处）：- path: 问题。期望 …。请按 schema 修正后重试」。
 - deftool 参数声明支持约束：`[n :int "数量" :minimum 1 :maximum 10]`、`:enum [..]`、`:pattern ".."`、`:min-length`/`:max-length`、
   `:items {:type "string"}`、`:min-items`/`:max-items`——原样进 `input_schema`（模型也看得到约束）。
+- 对象参数另认 `:properties` / `:required` / `:additional-properties`（→ `additionalProperties`），嵌套字段对模型可见、嵌套必填也校验。
+  属性表可写成 `[[:字段 {…}] …]` 键值对 vector 以保序（map 字面量 >8 键会被 reader 变成 hash map）。
+  `input_schema.properties` 按参数声明顺序写出；schema 在**命名空间加载期**构造而非常量——AOT 会把常量 map 重建（>8 键即
+  PersistentHashMap），顺序会丢（见 `feedbacks/2026-11-11-deftool-order-lost-under-aot.md`）。
 - `tool/validate-args` 改用完整校验（返回形状不变 `{:valid :errors}`）。
 - **兼容性**：类型校验对 integer/number 接受数字字符串（模型常把数字带引号，原先函数体照样拿到字符串，不能因此变成报错）；
   可选参数给 `null` 视同未给；未知键不报错。今天的 deftool 只声明了类型，新增的失败面仅是「类型确实不符」（如对象给了字符串）。
