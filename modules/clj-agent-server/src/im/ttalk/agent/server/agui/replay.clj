@@ -47,6 +47,13 @@
               (swap! (:table r) dissoc (:thread-id victim))
               (recur))))))))
 
+(defn ensure!
+  "有这一轮的环就保留（⛔ 不覆盖在跑的那轮）；没有就开一条。外部事件源写帧用它。"
+  [r tid now]
+  (when (enabled? r)
+    (locking (:lock r)
+      (swap! (:table r) #(cond-> % (nil? (get % tid)) (assoc tid (new-entry tid now)))))))
+
 (defn append!
   "攒。回 true；超限 ⇒ 标 truncated、清空、回 false。没有这条线程 / 已 truncated / 环没开 ⇒ false。"
   [r tid frames]

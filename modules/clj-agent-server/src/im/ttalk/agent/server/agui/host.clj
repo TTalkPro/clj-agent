@@ -25,6 +25,7 @@
      :info                其余交给 clj-agent-agui `codec/run-info` 的能力位（:multimodal :parallel-tools? :state? …）
      :input-transform     入站插件的缺省值（条目里给了就以条目为准；见 im.ttalk.agent.server.agui 的注册表条目键）
      :mcp-proxy           MCP Apps 前端代理的缺省值（同上）
+     :agents              按 agent 注入外部驱动的缺省值（routes 也能再并一份；键同下面的注册表条目键）
 
    同线程上一轮还在飞时再来 `/run`（C# AguiRegistryOptions.ConcurrentRun）由那台 agent 的 runtime 决定：
    `rt/runtime` 的 `:on-concurrent :reject`（缺省，⇒ 409 thread_running）或 `:supersede`（旧的以 :superseded 取消）。"
@@ -58,7 +59,8 @@
    :replay-max-threads 256
    :replay? true
    :orphan-cancel-ms 0
-   :max-body-bytes (* 16 1024 1024)})
+   :max-body-bytes (* 16 1024 1024)
+   :agents {}})
 
 (defn host
   "建运行期。`reg` = clj-agent-agui 的 `registry/registry`（条目：:id :runtime，可选 :description :suggest? :agent-spec
@@ -88,6 +90,13 @@
 (defn now-ms ^long [h] (long ((:now h))))
 
 (defn replay-of "帧环（宿主要读状态时）。" [h] (:replay h))
+
+(defn publish-frame!
+  "把一帧编好的 SSE 字节交给帧环（外部驱动写入口）。开跑的内置泵先建了环就接着攒；没有就开一条。"
+  [h tid frames]
+  (let [rp (replay-of h)]
+    (replay/ensure! rp tid (now-ms h))
+    (replay/append! rp tid frames)))
 
 ;; ── 帧 ───────────────────────────────────────────────
 
@@ -186,6 +195,15 @@
           [old _] (swap-vals! (:unsub d) (fn [v] (if (= v ::finished) v unsub)))]
       (when (= old ::finished) (unsub)))
     d))
+
+(defn external-frame!
+  "外部源交付一条 AG-UI 事件 / 已编帧：进帧环，回编好的 SSE 字节。终端事件也由这里判——交付方不再另发收场信号。"
+  [h tid frame]
+  (let [f (if (bytes? frame) frame (frame-of frame))]
+    (publish-frame! h tid [f])
+    (when (and (map? frame) (codec/terminal? frame))
+      (replay/finish! (replay-of h) tid (now-ms h))
+      ::end)))
 
 (defn poll-direct
   "直连队列取一帧：字节 / `::end`（收场）/ nil（`ms` 内没有）。"

@@ -74,6 +74,22 @@ GET/PATCH/POST/DELETE {prefix}/threads…  线程存储那七条（给了 :threa
 CORS 缺省**拒**（带 Origin 的请求 403；`:origin-allowed` 用 `ahttp/origin-allow` 列白名单）。host 选项、线程存储的六槽契约、
 与 C# 版的差别见各 ns 文档。
 
+### 自带 run 驱动的 agent
+
+不需要为它塞占位 runtime。注册表里只报名录，`routes` 的 host 选项按 agent 注入处理器；`/run` 与 `/stop` 可以是任意
+Ring 处理器（Origin / CORS / 访问守卫仍在外层），单路由退路也走同一份注入。`/connect` 可交给外部源：它收到
+`(thread-id after-seq deliver)`，`deliver` 接 AG-UI 事件 map 或已编好的 SSE 字节；事件先进帧环再送本连接，终态自动收流。
+
+```clojure
+(def reg (registry/registry [{:id "jinshu" :external? true :description "自带 ChatEngine"}]))
+(def h (host/host reg {:agents {"jinshu"
+                                {:run my-run-handler
+                                 :stop my-stop-handler
+                                 :connect-source (fn [thread-id after-seq deliver] ...my unsubscribe...)}}}))
+```
+
+外部条目缺省 `/info` 不继承内置 runtime 的能力位；它真实支持的能力由条目 `:capabilities` 显式宣告。
+
 ## MCP 端点
 
 `(mcp-http/handler server opts)` / `(mcp-http/routes path server opts)`：`POST` 一条 JSON-RPC → JSON 响应（通知 202、校验类

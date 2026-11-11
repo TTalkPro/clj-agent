@@ -34,6 +34,11 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   `(fn [payload] payload')` 在思考字段 / `:extra-body` / `:stream true` 之后、发出之前最后改一次请求体
   （`common.request-hook`；OpenAI 兼容 / Responses / Anthropic，同步 / 流式 / deferred 同一处）；
   `:cache-ttl` 可给 map `{:system "1h" :conversation nil}`，校验「长 TTL 在前」与未知键，违者抛 `:invalid-cache-ttl`。
+- **AG-UI：自带 run 驱动的 agent**（2026-11-11，回 `feedbacks/2026-11-11-agui-server-external-run-driver.md`，锦书报）：
+  注册表条目允许 `{:id … :external? true :description … :capabilities …}`，不再要求占位 runtime；`routes` 的 host 选项
+  `:agents` 可按 agent 注入 `:run` / `:stop` Ring 处理器（字面量路由与单路由退路同源），`/connect` 可交给
+  `(thread-id after-seq deliver)` 的外部事件源。`deliver` 写帧环 + 当前 SSE，终态自动收流；外部条目缺省不继承内置
+  runtime 的能力位，避免 `/info` 谎报。
 - DashScope 原生 provider 新增 `:extra-parameters`（map，并入 `parameters`；`thinking_budget` 等私有字段的逃生通道）。
 
 ### ⚠️ 缺省行为变化

@@ -105,7 +105,7 @@
         rec-of (fn [tid] (ts/ts-get store tid))
         owned (fn [tid agent-id] (let [r (rec-of tid)] (when (and r (= agent-id (:agent-id r))) r)))
         events-of (fn [tid] (let [{:keys [runtime]} (entry-of-thread reg (rec-of tid))]
-                              (or (rt/buffered-events runtime tid) [])))]
+                              (or (when runtime (rt/buffered-events runtime tid)) [])))]
     (cond-> {:events (fn [tid] (when (rec-of tid) (codec/events->agui (events-of tid))))
              :state (fn [tid] (when (rec-of tid) {:state (fold-state (get @bases tid) (events-of tid))}))
              :record (fn [agent-id input agui]
@@ -142,7 +142,7 @@
       (assoc :delete (fn [tid agent-id]
                        (if-let [r (owned tid agent-id)]
                          (let [{:keys [runtime memory]} (entry-of-thread reg r)]
-                           (rt/purge! runtime tid)
+                           (when runtime (rt/purge! runtime tid))
                            (when memory (memory/mem-clear memory tid))
                            (swap! bases dissoc tid)
                            (ts/ts-delete! store tid))

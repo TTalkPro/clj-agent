@@ -44,6 +44,11 @@
                           RUN_FINISHED{result}（上游 CopilotKit 的做法；如 clj-agent-agui 的 `mcp/proxy-request`）
    这两格也可以放在 host 选项里当缺省值，条目里给了就以条目为准。
 
+   自带 run 驱动的 agent：注册表条目只要 `{:id \"x\" :external? true :description …}`（⛔ 不塞占位 runtime）；`routes` 的
+   host 选项收 `:agents {\"x\" {:run ring-handler :stop ring-handler :connect-source source}}`。run / stop 是普通 Ring 处理器
+   （Origin / CORS 已在外层处理，单路由退路也认它们）；source 照 `(thread-id after-seq deliver)` 调，deliver 吃 AG-UI 事件 map
+   或已编帧字节，先写帧环再送本连接，交付终端事件后流自动收口。source 可回一个清理函数。
+
    **与 C# 的差别**（详见 tasks/J-03.md）：被按停的 run 在流里以 `RUN_FINISHED result.status=cancelled`（带 reason）收口
    ——clj-agent-agui 的契约是「恰好一个终态」，C# 是什么都不再发；`/connect` 的 lastSeq 续读（IAguiThreadEventStore /
    序号记录器）不做；对端断开要靠心跳的那一次写才发现（Ring 的流式正文 / Jetty 的阻塞输出不报告空闲时的断连）。"
@@ -153,6 +158,31 @@
 
 ;; ── /agent/:id/run ───────────────────────────────────
 
+(def ^:private external-agent-keys [:run :stop :connect-source])
+
+(defn- check-external-agents!
+  "routes 装配期检查外部驱动：必须是 map、id 非空、处理器是函数、不收认不出的键。"
+  [agents]
+  (when (some? agents)
+    (when-not (map? agents)
+      (throw (ex-info "外部驱动 :agents 必须是 map" {:agents agents})))
+    (doseq [[id spec] agents]
+      (when-not (and (string? id) (seq id))
+        (throw (ex-info "外部驱动 :agents 的 key 必须是非空 agent id" {:id id})))
+      (when-not (map? spec)
+        (throw (ex-info (str "外部驱动 " id " 必须是 {:run … :stop … :connect-source …} 的 map") {:id id})))
+      (when-let [unknown (seq (remove (set external-agent-keys) (keys spec)))]
+        (throw (ex-info (str "外部驱动 " id " 有认不出的键: " (pr-str unknown))
+                        {:id id :unknown (vec unknown)})))
+      (doseq [k external-agent-keys
+              :let [f (get spec k)]
+              :when (some? f)]
+        (when-not (fn? f)
+          (throw (ex-info (str "外部驱动 " id " 的 " k " 必须是函数") {:id id :key k})))))))
+
+(defn- external-agent [h id]
+  (get-in h [:options :agents id]))
+
 (defn- proxied-mcp-response
   "MCP Apps 前端代理调用：⛔ 不起 run，回一对 RUN_STARTED / RUN_FINISHED{result}。"
   [h req in mcp-proxy proxied]
@@ -164,30 +194,32 @@
                                                                 :result result})])))))
 
 (defn- run* [h req id body]
-  (let-ok [entry (find-post h req id)
-           in (read-input h req body)]
-    (let [tid (:threadId in)
-          ;; 入站插件 / MCP 代理：条目里给了以条目为准，否则取 host 选项里的缺省
-          entry (merge (select-keys (:options h) [:input-transform :mcp-proxy]) entry)
-          proxied (get-in in [:forwardedProps :__proxiedMCPRequest])]
-      (if (and proxied (:mcp-proxy entry))
-        (proxied-mcp-response h req in (:mcp-proxy entry) proxied)
-      (let [result (resume/start! entry in)]
-      (case (:status result)
-        :started
-        (let [d (host/start-drive! h {:entry entry :thread-id tid :run-id (:run-id result)
-                                      :client-run-id (:runId in) :since (:since result) :input in})]
-          (host/subscribe! d)
-          (sse-response h req (fn [s]
-                                (try (pump-queue! s #(host/poll-direct d 200))
-                                     ;; ⚠️ 断连 = 退订，run 照跑（按停走 /stop）
-                                     (finally (host/unsubscribe! h d true))))))
-
-        :busy (error 409 "thread_running" (msg :agui-server/thread-running tid))
-        :resume-error (let [[status code extra] (:error result)]
-                        (ahttp/json-response status (assoc extra :error code)))
-        :not-paused (error 409 "no_pending_interrupt" (msg :agui-server/no-pending-interrupt tid))
-        (error 409 "thread_awaiting_resume" (msg :agui-server/thread-awaiting-resume tid))))))))
+  (let-ok [entry (find-post h req id)]
+    (if-let [f (:run (external-agent h id))]
+      (let [[tag text] (read-text h req)]
+        (f (assoc req ::request-body (when (= :ok tag) text))))
+      (let-ok [in (read-input h req body)]
+        (let [tid (:threadId in)
+              ;; 入站插件 / MCP 代理：条目里给了以条目为准，否则取 host 选项里的缺省
+              entry (merge (select-keys (:options h) [:input-transform :mcp-proxy]) entry)
+              proxied (get-in in [:forwardedProps :__proxiedMCPRequest])]
+          (if (and proxied (:mcp-proxy entry))
+            (proxied-mcp-response h req in (:mcp-proxy entry) proxied)
+            (let [result (resume/start! entry in)]
+              (case (:status result)
+                :started
+                (let [d (host/start-drive! h {:entry entry :thread-id tid :run-id (:run-id result)
+                                              :client-run-id (:runId in) :since (:since result) :input in})]
+                  (host/subscribe! d)
+                  (sse-response h req (fn [s]
+                                        (try (pump-queue! s #(host/poll-direct d 200))
+                                             ;; ⚠️ 断连 = 退订，run 照跑（按停走 /stop）
+                                             (finally (host/unsubscribe! h d true))))))
+                :busy (error 409 "thread_running" (msg :agui-server/thread-running tid))
+                :resume-error (let [[status code extra] (:error result)]
+                                (ahttp/json-response status (assoc extra :error code)))
+                :not-paused (error 409 "no_pending_interrupt" (msg :agui-server/no-pending-interrupt tid))
+                (error 409 "thread_awaiting_resume" (msg :agui-server/thread-awaiting-resume tid))))))))))
 
 ;; ── /agent/:id/connect ───────────────────────────────
 
@@ -197,29 +229,58 @@
   (try (.get change 200 TimeUnit/MILLISECONDS)
        (catch TimeoutException _ nil)))
 
+(defn- external-connect
+  "外部源接管 /connect：`source` 照 `(thread-id after-seq deliver)` 调。deliver 进帧环 + 本连接队列；终端事件自动收流。"
+  [h req in source]
+  (let [tid (:threadId in)
+        q (LinkedBlockingQueue.)
+        deliver (fn [frame]
+                  (let [end (host/external-frame! h tid frame)]
+                    (.offer q (if (bytes? frame) frame (host/frame-of frame)))
+                    (when end (.offer q end))))]
+    (sse-response
+     h req
+     (fn [s]
+       (let [cleanup (try (source tid (:lastSeq in) deliver)
+                          (catch Throwable t
+                            (.offer q host/end)
+                            (throw t)))]
+         (try
+           (loop []
+             (when-not (sse/gone? s)
+               (let [f (.poll q 200 TimeUnit/MILLISECONDS)]
+                 (cond
+                   (= host/end f) nil
+                   (nil? f) (recur)
+                   :else (when (sse/write-frame! s f) (recur))))))
+           (finally
+             (when (fn? cleanup) (cleanup)))))))))
+
 (defn- connect* [h req id body]
   (let-ok [_ (find-post h req id)
            in (read-input h req body)]
-    (let [tid (:threadId in)
-          rp (:replay h)
-          cursor (replay/open-cursor rp tid (host/now-ms h))
-          d (when cursor (host/drive-of h tid))]
-      (when d (host/subscribe! d))
-      (sse-response
-       h req
-       (fn [s]
-         ;; 没有可重放的 ⇒ 200 空流立即结束（⛔ 不是 404，上游行为）
-         (when cursor
-           (try
-             (loop []
-               (when-not (sse/gone? s)
-                 (let [change (if d (host/next-change d) (CompletableFuture/completedFuture true))
-                       frames (replay/take! rp cursor)]
-                   (when (or (empty? frames) (sse/write-frames! s frames))
-                     (when-not (or (replay/done? rp cursor) (nil? d))
-                       (await-change change)
-                       (recur))))))
-             (finally (when d (host/unsubscribe! h d false))))))))))
+    (if-let [source (:connect-source (external-agent h id))]
+      (external-connect h req in source)
+      (let [tid (:threadId in)
+            rp (:replay h)
+            cursor (replay/open-cursor rp tid (host/now-ms h))
+            d (when cursor (host/drive-of h tid))]
+        (when d (host/subscribe! d))
+        (sse-response
+         h req
+         (fn [s]
+           ;; 没有可重放的 ⇒ 200 空流立即结束（⛔ 不是 404，上游行为）
+           (when cursor
+             (try
+               (loop []
+                 (when-not (sse/gone? s)
+                   (let [change (if d (host/next-change d) (CompletableFuture/completedFuture true))
+                         frames (replay/take! rp cursor)]
+                     (when (or (empty? frames) (sse/write-frames! s frames))
+                       (when-not (or (replay/done? rp cursor) (nil? d))
+                         (await-change change)
+                         (recur))))))
+               (finally (when d (host/unsubscribe! h d false)))))))))))
 
 ;; ── /agent/:id/suggest：无状态 —— 不进注册表、不进帧环 ──
 
@@ -266,17 +327,20 @@
 
 (defn- stop* [h req id tid]
   (let-ok [entry (find-post h req id)]
-    ;; 先问 agent（条目的 :stop；缺省 = rt/stop!，原因 :stop）；响应体形状不变
-    (let [running? (= :running (:state (rt/run-status (:runtime entry) tid)))
-          r (try {:ok (registry/stop! (:registry h) id tid)} (catch Throwable e {:error e}))]
-      (cond
-        (:error r) (error 500 "stop_failed" (msg :agui-server/stop-failed id (ex-message (:error r))))
-        (not (:ok r)) (ahttp/json-response 200 {:stopped false
-                                                :message (:text (if running?
-                                                                  (msg :agui-server/stop-declined id tid)
-                                                                  (msg :agui-server/no-running-run tid)))})
-        :else (ahttp/json-response 200 {:stopped true
-                                        :interrupt {:type "RUN_ERROR" :message "Run stopped by user" :code "STOPPED"}})))))
+    (if-let [f (:stop (external-agent h id))]
+      (f req)
+      ;; 先问 agent（条目的 :stop；缺省 = rt/stop!，原因 :stop）；响应体形状不变
+      (let [running? (and (:runtime entry)
+                          (= :running (:state (rt/run-status (:runtime entry) tid))))
+            r (try {:ok (registry/stop! (:registry h) id tid)} (catch Throwable e {:error e}))]
+        (cond
+          (:error r) (error 500 "stop_failed" (msg :agui-server/stop-failed id (ex-message (:error r))))
+          (not (:ok r)) (ahttp/json-response 200 {:stopped false
+                                                  :message (:text (if running?
+                                                                    (msg :agui-server/stop-declined id tid)
+                                                                    (msg :agui-server/no-running-run tid)))})
+          :else (ahttp/json-response 200 {:stopped true
+                                          :interrupt {:type "RUN_ERROR" :message "Run stopped by user" :code "STOPPED"}}))))))
 
 ;; ── 线程存储那七条 ───────────────────────────────────
 
@@ -401,10 +465,15 @@
               body (if (contains? env :body) (json/generate-string (:body env)) "")]
           (case method
             "info" (ahttp/json-response 200 (info h))
-            "agent/run" (run* h req agent-id body)
+            ;; 单路由退路把解析后的信封体 / threadId 挂进 req；字面量路由把原始体读成 ::request-body。
+            "agent/run" (if-let [f (:run (external-agent h agent-id))]
+                          (f (assoc req ::request-body body))
+                          (run* h req agent-id body))
             "agent/connect" (connect* h req agent-id body)
             "agent/suggest" (suggest* h req agent-id body)
-            "agent/stop" (stop* h req agent-id (or (when (map? p) (:threadId p)) ""))
+            "agent/stop" (if-let [f (:stop (external-agent h agent-id))]
+                           (f (assoc req ::external-thread-id (or (when (map? p) (:threadId p)) "")))
+                           (stop* h req agent-id (or (when (map? p) (:threadId p)) "")))
             (error 404 "unknown_method" (msg :agui-server/unknown-method (or method (:text (msg :agui-server/absent)))))))))))
 
 ;; ── 挂路 ─────────────────────────────────────────────
@@ -416,7 +485,9 @@
    第二个参数是 host（im.ttalk.agent.server.agui.host/host 的返回值），或注册表 + 第三个参数的 host 选项。"
   ([prefix host-or-registry] (routes prefix host-or-registry nil))
   ([prefix host-or-registry opts]
-   (let [h (if (host/host? host-or-registry) host-or-registry (host/host host-or-registry opts))
+   (let [h (cond-> (if (host/host? host-or-registry) host-or-registry (host/host host-or-registry opts))
+             (map? opts) (update-in [:options :agents] merge (:agents opts)))
+         _ (check-external-agents! (get-in h [:options :agents]))
          g (fn [f] (fn [req] (ahttp/guard req h f)))
          id #(nh/param % :id)
          rs (cond-> [[:any "/info" (g (fn [_] (ahttp/json-response 200 (info h))))]

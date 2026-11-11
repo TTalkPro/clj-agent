@@ -20,6 +20,8 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"重名"
                             (registry/registry [{:id "a" :runtime r} {:id "a" :runtime r}])))
       (is (thrown? clojure.lang.ExceptionInfo (registry/registry [{:id "a" :runtime r :stop "x"}])))
+      (is (thrown? clojure.lang.ExceptionInfo (registry/registry [{:id "a" :external? true :runtime {}}])))
+      (is (map? (registry/registry [{:id "a" :external? true :description "自带驱动"}])))
       (rt/shutdown! r))))
 
 (deftest lookup-test
@@ -44,6 +46,15 @@
     (testing "shutdown! 按 runtime 去重"
       (let [shared (registry/registry [{:id "a" :runtime r1} {:id "b" :runtime r1}])]
         (is (= 1 (count (registry/runtimes shared))))))
+    (testing "external 只报名录给的能力位；没给就不谎报内置 runtime 的缺省"
+      (let [ext (registry/registry [{:id "ext" :external? true}
+                                    {:id "advertised" :external? true
+                                     :capabilities {:tools {:supported true}}}])]
+        (is (empty? (registry/runtimes ext)))
+        (is (= {} (get-in (registry/info ext) [:agents "ext" :capabilities])))
+        (is (= {:tools {:supported true}}
+               (get-in (registry/info ext) [:agents "advertised" :capabilities])))
+        (registry/shutdown! ext)))
     (registry/shutdown! reg)))
 
 (deftest stop-test

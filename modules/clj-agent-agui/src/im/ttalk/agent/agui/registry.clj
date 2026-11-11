@@ -21,7 +21,10 @@
    `/suggest` 要的 agent 配置、入站插件…）照样放在条目里，本 ns 不解释。
 
    - `:id`          **必填**，非空字符串，全表唯一
-   - `:runtime`     **必填**，`agui.runtime/runtime` 的返回值（多台可共享一个）
+   - `:runtime`     内置驱动时**必填**，`agui.runtime/runtime` 的返回值（多台可共享一个）。
+                    自带 run 驱动的 agent 不必塞占位 runtime：`:external? true` 即可（run / stop / connect 由
+                    clj-agent-server 的路由选项或宿主自己的处理器接管）。
+   - `:external?`   true = 这台没有 runtime，只有名录与元数据；缺省 false
    - `:description` 进 `/info`
    - `:suggest?`    这台支持无状态 `/suggest`（`/info.suggestions` = 任一台支持）
    - `:stop`        可选 `(fn [{:keys [runtime thread-id agent]}] bool)`——这台自己
@@ -32,14 +35,19 @@
 
 (set! *warn-on-reflection* true)
 
-(defn- check-entry! [{:keys [id runtime] :as entry}]
+(defn- check-entry! [{:keys [id runtime external?] :as entry}]
   (when-not (map? entry)
     (throw (ex-info "registry 条目必须是 map" {:entry entry})))
   (when-not (and (string? id) (not (str/blank? id)))
     (throw (ex-info "registry 条目需要非空字符串 :id" {:entry (dissoc entry :runtime)})))
-  (when-not (and (map? runtime) (contains? runtime :conversations))
-    (throw (ex-info (str "registry 条目 " id " 需要 :runtime（agui.runtime/runtime 的返回值）")
-                    {:id id})))
+  (if (true? external?)
+    (when (contains? entry :runtime)
+      (throw (ex-info (str "registry 条目 " id " 标了 :external? true，就不要再给 :runtime")
+                      {:id id})))
+    (when-not (and (map? runtime) (contains? runtime :conversations))
+      (throw (ex-info (str "registry 条目 " id " 需要 :runtime（agui.runtime/runtime 的返回值），"
+                           "自带驱动则给 :external? true")
+                      {:id id}))))
   (when-let [f (:stop entry)]
     (when-not (fn? f)
       (throw (ex-info (str "registry 条目 " id " 的 :stop 必须是函数") {:id id}))))
@@ -99,7 +107,7 @@
     (boolean
      (if-let [f (:stop entry)]
        (f {:runtime (:runtime entry) :thread-id thread-id :agent entry})
-       (and thread-id (rt/stop! (:runtime entry) thread-id nil :stop))))
+       (and thread-id (some-> entry :runtime (rt/stop! thread-id nil :stop)))))
     false))
 
 (defn info
@@ -109,18 +117,27 @@
    `opts` 其余键原样交给 `codec/run-info`（插件能力位、线程面…）。"
   ([reg] (info reg nil))
   ([reg opts]
-   (codec/run-info (agent-ids reg)
-                   (assoc opts
-                          :descriptions (merge (into {} (keep (fn [{:keys [id description]}]
-                                                                (when description [id description])))
-                                                     (:agents reg))
-                                               (:descriptions opts))
-                          :suggestions? (boolean (some supports-suggest? (:agents reg)))))))
+   (let [body (codec/run-info (agent-ids reg)
+                              (assoc opts
+                                     :descriptions (merge (into {} (keep (fn [{:keys [id description]}]
+                                                                           (when description [id description])))
+                                                          (:agents reg))
+                                                          (:descriptions opts))
+                                     :suggestions? (boolean (some supports-suggest? (:agents reg)))))]
+     ;; 内置 runtime 的缺省能力位由 codec 判；外部驱动本层不知道它能不能审批 / 收前端工具，
+     ;; 不覆盖就是谎报。条目显式给了 :capabilities 才按装配方宣告。
+     (update body :agents (fn [m]
+                            (reduce (fn [m {:keys [id external? capabilities]}]
+                                      (if external?
+                                        (assoc-in m [id :capabilities] (or capabilities {}))
+                                        m))
+                                    m
+                                    (:agents reg)))))))
 
 (defn runtimes
   "去重后的 runtime（多台共享一个时只出现一次）。"
   [reg]
-  (into [] (distinct) (map :runtime (:agents reg))))
+  (into [] (comp (map :runtime) (remove nil?) (distinct)) (:agents reg)))
 
 (defn shutdown!
   "每个**不同**的 runtime 关一次。"
