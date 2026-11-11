@@ -208,8 +208,13 @@
   opts)
 
 (defn install
-  "装到本地 ~/.m2/repository。core 先行——client/provider 的 pom 依赖它。"
+  "装到本地 ~/.m2/repository。core 先行——client/provider 的 pom 依赖它。
+
+   先 jar 再 install：曾有人 clean 后直接 `bb install`，install 拿不到
+   modules/<m>/target/*.jar，Windows 上只丢一个裸 NoSuchFileException。
+   jar 内部会按需补装 override 掉的内部依赖（ensure-deps-installed!）。"
   [opts]
+  (jar opts)
   (run-modules! opts "install" install*)
   opts)
 
@@ -238,6 +243,7 @@
     (let [one {:module (:key m)}]
       (clean one)
       (jar one)
-      (install one)))
+      ;; 不走公开 install——那会再 jar 一遍，release 已是逐模块 clean→jar→install。
+      (run-modules! one "install" install*)))
   (println (format "✓ %s 已构建并安装到本地 Maven" version))
   opts)

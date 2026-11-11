@@ -49,7 +49,7 @@
   jar         {:doc "打包全部模块（bb jar core 只打一个）"
                :task (build-task "jar")}
 
-  install     {:doc "装到本地 ~/.m2（http → core → client → provider → mcp → agui → tools）"
+  install     {:doc "打包并装到本地 ~/.m2（http → core → client → provider → mcp → agui → tools）"
                :task (build-task "install")}
 
   release     {:doc "发布前完整流程：逐模块 clean → jar → install"
