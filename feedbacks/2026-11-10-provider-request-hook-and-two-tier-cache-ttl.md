@@ -136,3 +136,29 @@ new AnthropicChatClient(new AnthropicOptions {
 
 `build-call-config` 改成「config ⊕ wire-options(去掉 ChatModel 自己的装配键 :admission / :retry 等)」,三格的特殊处理保留在合并之后;
 `:retry` 若允许单次覆盖,`retry/resolve-opts` 已经有三级合并,照现在的口径走。
+
+## ④ 追加(2026-11-11):Anthropic 对话尾部断点**只能打在最后一条消息**上,没有「往前挪 n 条」的旋钮
+
+### 症状
+
+`cache.clj` 的 `cache-conversation` 恒标「最后一条消息的最后一个内容块」。锦书的幽灵续写(作者每停顿一次问一次)把消息排成
+`[user 前文, assistant 应答, user 正在写的这一段]`:前两条在作者接着打字时逐字不变,最后一条每次都变。断点打在最后一条 ⇒
+下一次请求那个位置已经不是块边界,**缓存 0 命中**;C# 侧(Keelson `AnthropicChatClient.CacheTailSkipKey = 1`)把断点挪到倒数第二条,
+MiniMax 真机实测第二次起读到 1731 / 1750 token。
+
+### 位置
+
+| 文件 | 现状 |
+|---|---|
+| `clj-agent-provider/src/im/ttalk/agent/provider/common/cache.clj:138` `cache-conversation` | `idx (dec (count msgs))` 写死 |
+| 同上 `:246` `apply-anthropic-cache` | 策略 / TTL 两样可配,断点位置不可配 |
+
+### 影响面
+
+🟡 不报错,只有账单会说话:同一前缀反复问的小任务(续写这一类)每次全价。锦书的判据标了 `^:pending-upstream`
+(`jinshu.rpc.modules.ghost-rewrite-test/cache-tail-breakpoint-on-the-reply`)。
+
+### 建议
+
+config 里加一格(比如 `:cache-tail-skip n`,缺省 0):对话断点打在倒数第 n+1 条;n 超出 ⇒ 不打(别回落到最后一条,那正是要避开的)。
+它属于「每次调用变」的一类(只有三条消息时才挪),所以也依赖 ③ 能递到底。
