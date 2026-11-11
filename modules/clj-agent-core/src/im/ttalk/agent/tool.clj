@@ -8,7 +8,8 @@
    参数声明使用向量格式: [名称 类型 描述]
    支持可选参数: [名称 类型 描述 :default 默认值]
    支持参数约束: [名称 类型 描述 :enum [..] :pattern \"..\" :minimum 1 :maximum 9
-                 :min-length n :max-length n :items {:type \"string\"} :min-items n :max-items n]
+                 :min-length n :max-length n :items {:type \"string\"} :min-items n :max-items n
+                 :properties {…} :required [..] :additional-properties false]
                  （进 input_schema，模型看得到；调用前按 schema 完整校验，见 tool-args）
    支持敏感标记: {:sensitive true}
    支持只读 context: {:context true}
@@ -117,7 +118,23 @@
    :max-length :maxLength
    :items :items
    :min-items :minItems
-   :max-items :maxItems})
+   :max-items :maxItems
+   :properties :properties
+   :required :required
+   :additional-properties :additionalProperties})
+
+(defn- ordered-map
+  "按 keys 的声明顺序构造 Clojure map。array-map 超过 8 个键会退化成
+   hash map（HashMap 的迭代序不保声明序），这里用排序 map 显式钉住顺序。"
+  [keys entries]
+  (let [ranks (into {} (map-indexed (fn [i k] [k i])) keys)]
+    (into (sorted-map-by (fn [a b]
+                           (let [ia (get ranks a Long/MAX_VALUE)
+                                 ib (get ranks b Long/MAX_VALUE)]
+                             (if (= ia ib)
+                               (compare (str a) (str b))
+                               (compare ia ib)))))
+          entries)))
 
 (defn- parse-param
   "解析单个参数声明向量
@@ -131,12 +148,18 @@
     :description 描述字符串
     :required    是否必需（无 :default 为 true）
     :default     默认值（如有）
-    :constraints {JSON Schema 关键字 值}（如有）}"
+    :constraints {JSON Schema 关键字 值}（如有；对象参数支持嵌套
+                  :properties / :required / :additional-properties）}"
   [param-vec]
   (let [[pname ptype pdesc & opts] param-vec
         opts-map (apply hash-map opts)
-        constraints (into {} (keep (fn [[k jk]] (when (contains? opts-map k) [jk (get opts-map k)])))
-                          constraint-keys)]
+        pairs (partition 2 opts)
+        constraints (ordered-map
+                      (mapv first pairs)
+                      (for [[k v] pairs
+                            :let [jk (constraint-keys k)]
+                            :when jk]
+                        [jk v]))]
     (cond-> {:name        pname
              :type        ptype
              :description pdesc
@@ -151,19 +174,22 @@
 (defn params->json-schema
   "将解析后的参数列表转换为 JSON Schema
 
+   properties 按参数声明顺序写出（>8 个参数也保序，进 prompt cache 的稳定前缀）。
+   `:properties` / `:items` 里的嵌套 map 原样透传；>8 键的嵌套 map 字面量受 Clojure
+   reader 限制，键序不是源码文本序。
+
    返回:
    {:type       \"object\"
     :properties {:param1 {:type \"string\" :description \"...\"} ...}
     :required   [\"param1\" ...]}"
   [parsed-params]
-  (let [properties (reduce
-                     (fn [acc {:keys [name type description constraints]}]
-                       (assoc acc (keyword name)
-                              (merge {:type        (clj-type->json-type type)
-                                      :description description}
-                                     constraints)))
-                     {}
-                     parsed-params)
+  (let [properties (ordered-map
+                     (mapv (comp keyword :name) parsed-params)
+                     (for [{:keys [name type description constraints]} parsed-params]
+                       [(keyword name)
+                        (merge {:type        (clj-type->json-type type)
+                                :description description}
+                               constraints)]))
         required (->> parsed-params
                       (filter :required)
                       (mapv (comp clojure.core/name :name)))]
@@ -263,7 +289,7 @@
       (if (seq param-names)
         `(defn ~fn-name
            ~description
-           {:tool/schema    ~schema
+           {:tool/schema    '~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
@@ -278,7 +304,7 @@
            ~@body)
         `(defn ~fn-name
            ~description
-           {:tool/schema    ~schema
+           {:tool/schema    '~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
@@ -295,7 +321,7 @@
       (if (seq param-names)
         `(defn ~fn-name
            ~description
-           {:tool/schema    ~schema
+           {:tool/schema    '~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))
@@ -310,7 +336,7 @@
            ~@body)
         `(defn ~fn-name
            ~description
-           {:tool/schema    ~schema
+           {:tool/schema    '~schema
             :tool/params    '~parsed-params
             :tool/sensitive ~(boolean (:sensitive opts))
             :tool/serial    ~(boolean (:serial opts))

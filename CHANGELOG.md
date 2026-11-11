@@ -71,6 +71,9 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 - Retry-After 的解析：取头统一走 `im.ttalk.http/header`，另认 RFC 850 / asctime 日期、小数秒与 `retry-after-ms` 头。
 - AG-UI 外部 `/run` 处理器不再在请求体超限时收到 `nil`：字面量路由与单路由退路都由库先答 413 `body_too_large`，
   不调驱动（回 `feedbacks/2026-11-11-agui-server-external-run-driver.md` 的复测小缺口）。
+- `deftool` 对象参数支持嵌套 schema：`:properties` / `:required` / `:additional-properties`
+  （→ `additionalProperties`）原样进 `input_schema`，嵌套 required 也参与调用前校验。
+  `input_schema.properties` 按参数声明顺序写出，超过 8 个参数不再因 hash map 退化丢序。
 - MCP 的 SSE 响应只取第一行 `data:`：一条 JSON 拆成多行 data 时解析失败。现按 WHATWG 分帧拼接。
 - IO 失败时 JDK 异常常没有 message，`provider.http.client` 回 `{:status 0 :error nil}`，`response->error`
   认不出连接失败、误当 HTTP 0；现 `:error` 用异常类名兜底。流式网络错另带细分 `:code`

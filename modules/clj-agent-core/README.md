@@ -200,6 +200,10 @@ chat-client 只提供两个原语（均经 filter 洋葱链）；**工具调用�
   (str city ": 25°" unit))
 
 ;; 支持的参数类型: :string :int :float :boolean :array :object
+;; 参数约束: :enum :pattern :minimum :maximum :min/max-length :items :min/max-items
+;;           :properties :required :additional-properties（对象参数可声明嵌套 schema；
+;;           input_schema.properties 按参数声明序，>8 个参数也保序。
+;;           嵌套 map 字面量 >8 个键时，键序受 Clojure reader 限制）
 ;; 可选项: :sensitive :context :tags :category :serial :retry :return-direct
 ;;         :timeout（毫秒；**开箱即生效**，无需挂 filter。缺省不超时；
 ;;                   优先级：工具声明 > 引擎 {:timeout ms} > 不超时）

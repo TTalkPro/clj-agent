@@ -1,6 +1,7 @@
 (ns im.ttalk.agent.tool-test
   "deftool 宏：参数默认值与 schema 单测"
   (:require [clojure.test :refer [deftest testing is]]
+            [im.ttalk.agent.tool-args :as ta]
             [im.ttalk.agent.tool :as tool :refer [deftool]]))
 
 (deftool round-num
@@ -33,6 +34,45 @@
           required (get-in schema [:input_schema :required])]
       (is (= ["x"] required))
       (is (contains? (get-in schema [:input_schema :properties]) :precision)))))
+
+(deftool record-codex-event
+  "对象参数带嵌套 schema"
+  [[event :object "事件本身"
+    :properties {:chapter {:type "integer" :description "章节"}
+                 :title {:type "string" :description "标题"}}
+    :required ["chapter" "title"]
+    :additional-properties false]
+   [lands :array "落点" :items {:type "string"}]]
+  {:event event :lands lands})
+
+(deftest object-param-preserves-nested-schema
+  (testing "对象参数的 :properties / :required / :additional-properties 进 schema"
+    (let [schema (tool/get-schema #'record-codex-event)]
+      (is (= {:type "object"
+              :description "事件本身"
+              :properties {:chapter {:type "integer" :description "章节"}
+                           :title {:type "string" :description "标题"}}
+              :required ["chapter" "title"]
+              :additionalProperties false}
+             (get-in schema [:input_schema :properties :event])))
+      (testing "嵌套 required 也参与调用前校验"
+        (is (= #{"event.chapter" "event.title"}
+               (set (map :path (ta/validate
+                                (:input_schema schema)
+                                {:event {} :lands ["a"]})))))))))
+
+(deftool wide-tool
+  "十个参数的声明顺序必须保留"
+  [[p01 :string "01"] [p02 :string "02"] [p03 :string "03"] [p04 :string "04"] [p05 :string "05"]
+   [p06 :string "06"] [p07 :string "07"] [p08 :string "08"] [p09 :string "09"] [p10 :string "10"]]
+  (str p01 p02 p03 p04 p05 p06 p07 p08 p09 p10))
+
+(deftest property-order-follows-declaration
+  (testing "properties 超过 8 个键时仍按声明顺序写出"
+    (let [properties (get-in (tool/get-schema #'wide-tool)
+                             [:input_schema :properties])]
+      (is (= [:p01 :p02 :p03 :p04 :p05 :p06 :p07 :p08 :p09 :p10]
+             (keys properties))))))
 
 (deftool needs-city
   "查天气（city 必填）"
