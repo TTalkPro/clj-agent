@@ -13,6 +13,7 @@
                  （进 input_schema，模型看得到；调用前按 schema 完整校验，见 tool-args）
    对象参数的属性表可写成 [[名称 schema] …] 键值对 vector——**保序**，字段多于 8 个时用这个写法
    （map 字面量多于 8 键会被 Clojure reader 变成 hash map，键序不再跟源码文本一致）。
+   数组条目的对象（`:items {:type \"object\" :properties …}`）与更深的嵌套对象都吃同一套写法。
 
    **schema 在命名空间加载期构造**（不是常量）：AOT 编译会把常量 map 重建（>8 键即
    PersistentHashMap），参数声明顺序会丢；加载期构造则 eval 与 AOT 完全一致。
@@ -155,6 +156,21 @@
     (ordered-map (mapv first v) v)
     v))
 
+(defn- ->schema-fragment
+  "递归归一化 schema 片段：属性表的键值对 vector 写法转成保序 map，并继续深入
+   `:items` 与嵌套 `:properties`（数组条目的对象、对象里的对象，都吃同一套写法）。
+   非 map 原样透传（`:required` / `:enum` 等）。"
+  [v]
+  (cond
+    (map? v)
+    (into (empty v)
+          (for [[k val] v]
+            [k
+             (if (= k :properties)
+               (->schema-fragment (->ordered-properties val))
+               (->schema-fragment val))]))
+    :else v))
+
 (defn- parse-param
   "解析单个参数声明向量
 
@@ -177,7 +193,9 @@
         constraint-pairs (for [[k v] pairs
                                :let [jk (constraint-keys k)]
                                :when jk]
-                           [jk (if (= jk :properties) (->ordered-properties v) v)])
+                           [jk (if (= jk :properties)
+                                 (->schema-fragment (->ordered-properties v))
+                                 (->schema-fragment v))])
         constraints (ordered-map (mapv first constraint-pairs) constraint-pairs)]
     (cond-> {:name        pname
              :type        ptype
@@ -194,8 +212,9 @@
   "将解析后的参数列表转换为 JSON Schema
 
    properties 按参数声明顺序写出（>8 个参数也保序，进 prompt cache 的稳定前缀）。
-   `:properties` / `:items` 里的嵌套 map 原样透传；嵌套属性表也可写成键值对 vector
-   （`[[:字段 {…}] …]`）以保序——map 字面量 >8 键受 Clojure reader 限制，键序不是源码文本序。
+   `:properties` / `:items` 里的嵌套 map 原样透传；嵌套属性表（含 `:items` 里数组条目的对象、
+   更深的嵌套对象）也可写成键值对 vector（`[[:字段 {…}] …]`）以保序——map 字面量 >8 键受
+   Clojure reader 限制，键序不是源码文本序。
 
    返回:
    {:type       \"object\"

@@ -64,3 +64,20 @@
 
 顺带修了一处 0.5.442 的次序 bug:参数约束 map 的排序比较器拿「声明用的键」去查「JSON Schema 键」的位次,
 凡是被改名的键(`:min-length` → `:minLength` 等)都排到了末尾;现按 JSON Schema 键的声明序对齐。
+
+## 报方复测(锦书,0.5.445,2026-11-11)✅
+
+- 顶层保序:锦书 uber jar(AOT)里 `edit` 的 10 个参数按声明序出来;eval 同。锦书按 `:tool/params` 重排那段绕法**已删**。
+- 全套:单测 1089 / 11355 全绿、e2e 106/106(对 jpackage 产物)。
+- 🟢 小缺口(不挡事,锦书继续自己转):键值对 vector 只在**对象参数那一层**的 `:properties` 被转换;
+  写在 **`:items`** 里的(数组条目的属性表 —— `[[items :array "…" :items {:type "object" :properties [[:action {…}] …]}]]`)
+  原样留成 vector 进元数据。锦书过 8 键的三张表正好都是数组条目(`manage_codex` / `manage_story_node` / `manage_relation`),
+  所以 toolset 里那段「:properties 是键值对 vector ⇒ 转有序 map」还留着。建议:转换递归到 `:items`(以及更深的嵌套 `:properties`)。
+
+## 库侧回复（2026-11-11）✅
+
+已修（只编码未提交）：属性表键值对 vector 的归一化改成**递归**——`:items` 里的对象、对象里再嵌的
+`:properties` 都吃同一套写法。数组条目可直接写
+`[[items :array "…" :items {:type "object" :properties [[:action {…}] …]}]]`，不必再在 toolset 里转。
+判据钉在 `tool_test`：eval 下检查 `:items` 与更深嵌套的键序、嵌套 required 校验；AOT 判据也扩展到数组条目
+属性表（编译成 class 后加载再比顺序）。请复测后删除锦书自己的「`:properties` 是键值对 vector ⇒ 转有序 map」绕法。

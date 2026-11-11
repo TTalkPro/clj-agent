@@ -101,6 +101,37 @@
                             (:input_schema (tool/get-schema #'nested-object))
                             {:payload {} :note "n"})))))))
 
+(deftool array-item-objects
+  "数组条目里的对象属性表（键值对 vector 要递归到 :items 里）"
+  [[ops :array "操作"
+    :items {:type "object" :description "单个操作"
+            :properties [[:action {:type "string" :description "动作"}]
+                         [:target {:type "string" :description "目标"}]
+                         [:patch {:type "object" :description "补丁"
+                                  :properties [[:start {:type "integer"}]
+                                               [:text {:type "string"}]]
+                                  :required ["start"]}]
+            ]
+            :required ["action"]}]
+   [why :string "原因"]]
+  {:ops ops :why why})
+
+(deftest pairs-vector-reaches-items
+  (testing ":items 里数组条目的属性表（键值对 vector）也转成保序 map"
+    (let [schema (tool/get-schema #'array-item-objects)
+          items (get-in schema [:input_schema :properties :ops :items])]
+      (is (= [:action :target :patch]
+             (keys (:properties items))))
+      (is (= ["action"] (:required items)))
+      (testing "更深的嵌套对象同样吃键值对 vector"
+        (is (= [:start :text]
+               (keys (get-in items [:properties :patch :properties]))))
+        (is (= "integer" (get-in items [:properties :patch :properties :start :type]))))))
+  (testing ":items 里的嵌套必填照样参与校验"
+    (let [errors (ta/validate (:input_schema (tool/get-schema #'array-item-objects))
+                              {:ops [{:patch {}}] :why "w"})]
+      (is (contains? (set (map :path errors)) "ops[0].action")))))
+
 ;;; ============================================================
 ;;; AOT 判据：参数声明顺序在**编译后**仍须一致
 ;;; ============================================================
@@ -114,6 +145,8 @@
        "   [p5 :string \"5\"] [p6 :string \"6\"] [p7 :string \"7\"] [p8 :string \"8\"] [p9 :string \"9\"]\n"
        "   [payload :object \"载荷\"\n"
        "    :properties [[:chapter {:type \"integer\"}] [:title {:type \"string\"}]]]\n"
+       "   [ops :array \"操作\"\n"
+       "    :items {:type \"object\" :properties [[:action {:type \"string\"}] [:target {:type \"string\"}]]}]\n"
        "   ]\n"
        "  p0)\n"))
 
@@ -125,7 +158,7 @@
     (catch Exception _ nil)))
 
 (defn- run-aot-probe
-  "把探针**编译成 class** 再加载，返回 {:top-keys […] :nested-keys […]}。
+  "把探针**编译成 class** 再加载，返回 {:top-keys […] :nested-keys […] :item-keys […]}。
 
    走子进程：编译产物必须与源码分开加载（同一 JVM 里 require 会直接吃源码），
    才能复现 AOT 下「常量 map 被重建」的路径。"
@@ -142,9 +175,11 @@
                          "(require 'aotprobe1.probe)\n"
                          "(let [v (ns-resolve (find-ns 'aotprobe1.probe) 'wide)\n"
                          "      props (get-in (:tool/schema (meta v)) [:input_schema :properties])\n"
-                         "      nested (get-in props [:payload :properties])]\n"
+                         "      nested (get-in props [:payload :properties])\n"
+                         "      item-props (get-in props [:ops :items :properties])]\n"
                          "  (println \"PROBE_TOP\" (pr-str (keys props)))\n"
-                         "  (println \"PROBE_NESTED\" (pr-str (keys nested))))\n")
+                         "  (println \"PROBE_NESTED\" (pr-str (keys nested)))\n"
+                         "  (println \"PROBE_ITEM\" (pr-str (keys item-props))))\n")
             java-bin (str (System/getProperty "java.home") java.io.File/separator "bin"
                           java.io.File/separator "java")
             cp (str dir java.io.File/pathSeparator (System/getProperty "java.class.path"))
@@ -157,15 +192,18 @@
         (when-not (zero? exit)
           (throw (ex-info (str "AOT 探针子进程退出码 " exit "\n" err) {:exit exit :err err})))
         {:top-keys    (vec (pick "PROBE_TOP"))
-         :nested-keys (vec (pick "PROBE_NESTED"))})
+         :nested-keys (vec (pick "PROBE_NESTED"))
+         :item-keys   (vec (pick "PROBE_ITEM"))})
       (finally
         (delete-tree! dir)))))
 
 (deftest schema-order-survives-aot
   (testing "AOT 编译后参数声明顺序仍与源码一致（回归：schema 曾是常量，>8 键即 hash map）"
-    (let [{:keys [top-keys nested-keys]} (run-aot-probe)]
-      (is (= [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :p8 :p9 :payload] top-keys))
-      (is (= [:chapter :title] nested-keys)))))
+    (let [{:keys [top-keys nested-keys item-keys]} (run-aot-probe)]
+      (is (= [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :p8 :p9 :payload :ops] top-keys))
+      (is (= [:chapter :title] nested-keys))
+      (testing ":items 里数组条目的属性表在 AOT 下也保序"
+        (is (= [:action :target] item-keys))))))
 
 (deftool needs-city
   "查天气（city 必填）"

@@ -78,7 +78,8 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   AOT 编译会把常量 map 重建（>8 键即 `PersistentHashMap`），发出去的包里参数顺序全乱、单测却是绿的。
   现改为**命名空间加载期**构造（`tool/tool-meta` + `alter-meta!`），eval 与 AOT 走同一条路径；
   嵌套属性表另给保序写法 `[[:字段 {…}] …]`（键值对 vector），`(array-map …)` / `#ordered/map`
-  的坑写进 docstring 与 README。判据钉在 `tool_test`：子进程编译成 class 后加载再比顺序。
+  的坑写进 docstring 与 README；该写法递归进 `:items` 与更深嵌套对象（回锦书 0.5.445 复测小缺口）。
+  判据钉在 `tool_test`：子进程编译成 class 后加载再比顺序，数组条目属性表也在判据内。
 - MCP 的 SSE 响应只取第一行 `data:`：一条 JSON 拆成多行 data 时解析失败。现按 WHATWG 分帧拼接。
 - IO 失败时 JDK 异常常没有 message，`provider.http.client` 回 `{:status 0 :error nil}`，`response->error`
   认不出连接失败、误当 HTTP 0；现 `:error` 用异常类名兜底。流式网络错另带细分 `:code`
