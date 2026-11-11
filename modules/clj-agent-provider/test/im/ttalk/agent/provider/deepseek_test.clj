@@ -133,8 +133,8 @@
         (is (= 1 (get-in n [:usage :input-tokens])))))))
 
 (deftest stream-options-param-test
-  (testing ":stream-options 透传为 stream_options"
+  (testing "流式 :stream-options 透传为 stream_options；非流式不发"
     (let [p (compat/build-params
               {:model "deepseek-chat" :stream-options {:include_usage true}}
-              [{:role "user" :content "hi"}] [])]
+              [{:role "user" :content "hi"}] [] true)]
       (is (= {:include_usage true} (:stream_options p))))))

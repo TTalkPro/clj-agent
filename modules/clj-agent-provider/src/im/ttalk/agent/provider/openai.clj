@@ -16,7 +16,8 @@
        （可用 core 的 converter.json-schema/to-openai-response-format 从 schema 生成）
    - 采样：:temperature :top-p :max-tokens :stop :seed :n
             :frequency-penalty :presence-penalty :logprobs :top-logprobs
-   - 流式 usage：:stream-options {:include_usage true}
+   - 流式 usage：流式缺省 `:stream-options {:include_usage true}`；
+     显式 `false` / `{}` 关闭；非流式恒不发 `stream_options`
    - 私有字段逃生通道：:extra-body（直接 merge 进请求体）
    - prompt caching：OpenAI 自动生效，命中 token 归一化到响应 usage 的
                      :cache-read-tokens（源自 prompt_tokens_details.cached_tokens）

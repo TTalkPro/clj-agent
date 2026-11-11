@@ -46,7 +46,7 @@
 
    自带 run 驱动的 agent：注册表条目只要 `{:id \"x\" :external? true :description …}`（⛔ 不塞占位 runtime）；`routes` 的
    host 选项收 `:agents {\"x\" {:run ring-handler :stop ring-handler :connect-source source}}`。run / stop 是普通 Ring 处理器
-   （Origin / CORS 已在外层处理，单路由退路也认它们）；source 照 `(thread-id after-seq deliver)` 调，deliver 吃 AG-UI 事件 map
+   （Origin / CORS 已在外层处理，单路由退路也认它们；体超限由库先答 413，不交驱动）；source 照 `(thread-id after-seq deliver)` 调，deliver 吃 AG-UI 事件 map
    或已编帧字节，先写帧环再送本连接，交付终端事件后流自动收口。source 可回一个清理函数。
 
    **与 C# 的差别**（详见 tasks/J-03.md）：被按停的 run 在流里以 `RUN_FINISHED result.status=cancelled`（带 reason）收口
@@ -197,7 +197,9 @@
   (let-ok [entry (find-post h req id)]
     (if-let [f (:run (external-agent h id))]
       (let [[tag text] (read-text h req)]
-        (f (assoc req ::request-body (when (= :ok tag) text))))
+        (if (= :too-large tag)
+          (error 413 "body_too_large" (ex-message text))
+          (f (assoc req ::request-body text))))
       (let-ok [in (read-input h req body)]
         (let [tid (:threadId in)
               ;; 入站插件 / MCP 代理：条目里给了以条目为准，否则取 host 选项里的缺省
@@ -456,25 +458,27 @@
     (error 404 "not_found" (endpoints-line h))
     (let [[tag text] (read-text h req)
           env (when (= :ok tag) (input/parse-json text))]
-      (if-not (map? env)
-        (error 404 "not_found" (endpoints-line h))
-        (let [method (:method env)
-              p (:params env)
-              agent-id (or (when (map? p) (:agentId p)) "")
-              ;; 信封里的 body 已经是解析过的 JSON，而输入解析吃原文 ⇒ 再编回去（输入解析只有一份）
-              body (if (contains? env :body) (json/generate-string (:body env)) "")]
-          (case method
-            "info" (ahttp/json-response 200 (info h))
-            ;; 单路由退路把解析后的信封体 / threadId 挂进 req；字面量路由把原始体读成 ::request-body。
-            "agent/run" (if-let [f (:run (external-agent h agent-id))]
-                          (f (assoc req ::request-body body))
-                          (run* h req agent-id body))
-            "agent/connect" (connect* h req agent-id body)
-            "agent/suggest" (suggest* h req agent-id body)
-            "agent/stop" (if-let [f (:stop (external-agent h agent-id))]
-                           (f (assoc req ::external-thread-id (or (when (map? p) (:threadId p)) "")))
-                           (stop* h req agent-id (or (when (map? p) (:threadId p)) "")))
-            (error 404 "unknown_method" (msg :agui-server/unknown-method (or method (:text (msg :agui-server/absent)))))))))))
+      (if (= :too-large tag)
+        (error 413 "body_too_large" (ex-message text))
+        (if-not (map? env)
+          (error 404 "not_found" (endpoints-line h))
+          (let [method (:method env)
+                p (:params env)
+                agent-id (or (when (map? p) (:agentId p)) "")
+                ;; 信封里的 body 已经是解析过的 JSON，而输入解析吃原文 ⇒ 再编回去（输入解析只有一份）
+                body (if (contains? env :body) (json/generate-string (:body env)) "")]
+            (case method
+              "info" (ahttp/json-response 200 (info h))
+              ;; 单路由退路把解析后的信封体 / threadId 挂进 req；字面量路由把原始体读成 ::request-body。
+              "agent/run" (if-let [f (:run (external-agent h agent-id))]
+                            (f (assoc req ::request-body body))
+                            (run* h req agent-id body))
+              "agent/connect" (connect* h req agent-id body)
+              "agent/suggest" (suggest* h req agent-id body)
+              "agent/stop" (if-let [f (:stop (external-agent h agent-id))]
+                             (f (assoc req ::external-thread-id (or (when (map? p) (:threadId p)) "")))
+                             (stop* h req agent-id (or (when (map? p) (:threadId p)) "")))
+              (error 404 "unknown_method" (msg :agui-server/unknown-method (or method (:text (msg :agui-server/absent))))))))))))
 
 ;; ── 挂路 ─────────────────────────────────────────────
 

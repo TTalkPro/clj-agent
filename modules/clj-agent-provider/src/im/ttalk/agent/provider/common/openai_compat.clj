@@ -55,6 +55,17 @@
     (into [{:role "system" :content system-prompt}] messages)
     (vec messages)))
 
+(defn- wire-stream-options
+  "决定要不要发 `stream_options`：流式时缺省开 `include_usage`；显式 `false` 或 `{}`
+   表示不要；其余显式值只在流式时透传。非流式一律不发（OpenAI 规范只许流式带）。"
+  [stream-options stream?]
+  (when stream?
+    (cond
+      (nil? stream-options) {:include_usage true}
+      (or (false? stream-options)
+          (and (map? stream-options) (empty? stream-options))) nil
+      :else stream-options)))
+
 (defn build-params
   "构建 API 请求参数
 
@@ -69,6 +80,8 @@
      - 多模态输出：:modalities（如 [text audio] 文本+语音）:audio（{:voice .. :format ..}）
      - 系统提示：:system-prompt
      - 结构化输出：:response-format（json_object 或 json_schema+strict 模式）
+     - 流式用量：:stream-options（OpenAI 标准 `stream_options`；流式缺省
+       `{:include_usage true}`，显式 `false` / `{}` 关闭；非流式恒不发）
      - 专有参数逃生通道：:extra-body（map，直接 merge 进请求体，覆盖各家私有字段）；
        要**删**库生成的键用 :configure-request（见 request-body / common.request-hook）
      - 统一思考档位：:thinking-effort / :thinking-enabled / :thinking-style（见 common.thinking；
@@ -91,7 +104,8 @@
             do-sample tool-stream request-id user-id stream-options extra-body]
      :as config}
     messages tool-schemas stream?]
-  (let [msgs (build-messages system-prompt messages)]
+  (let [msgs (build-messages system-prompt messages)
+        stream-options (wire-stream-options stream-options stream?)]
     (cond-> (merge {:model model
                     :messages msgs}
                    ;; 统一思考档位（显式 :thinking / :reasoning-effort 在场时不生成对应字段）
@@ -129,8 +143,8 @@
       (some? tool-stream)       (assoc :tool_stream tool-stream)
       request-id                (assoc :request_id request-id)
       user-id                   (assoc :user_id user-id)
-      ;; 流式 usage 开关（OpenAI 标准 {:include_usage true}；DeepSeek 末块原生带 usage）
-      stream-options            (assoc :stream_options stream-options)
+      ;; 流式 usage：缺省 {:include_usage true}，显式 false / {} 关闭；非流式不发
+      (some? stream-options)    (assoc :stream_options stream-options)
       (map? extra-body)         (merge extra-body)))))
 
 (defn request-body

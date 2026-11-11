@@ -64,6 +64,25 @@
              (mapv #(select-keys % [:path :body :thread]) @hits)))
       (is (empty? (host/runs (:host c))) "外部驱动不进内置 drive 表"))))
 
+(deftest external-run-body-too-large-does-not-call-driver
+  (let [hits (atom [])
+        opts {:max-body-bytes 64
+              :agents {"jinshu" {:run (run-handler hits)
+                                 :stop (stop-handler hits)}}}]
+    (with-agui [c (s/start (external-registry) opts {:prefix "/agui"})]
+      (let [big (apply str (repeat 100 "长"))
+            literal (s/post! c "agent/jinshu/run"
+                             (str "{\"threadId\":\"t\",\"runId\":\"r\",\"messages\":["
+                                  "{\"id\":\"u\",\"role\":\"user\",\"content\":\"" big "\"}]}"))
+            single (s/post! c ""
+                            (str "{\"method\":\"agent/run\",\"params\":{\"agentId\":\"jinshu\"},"
+                                 "\"body\":{\"threadId\":\"t\",\"runId\":\"r\",\"messages\":["
+                                 "{\"id\":\"u\",\"role\":\"user\",\"content\":\"" big "\"}]}}"))]
+        (is (= [413 413] (mapv :status [literal single])))
+        (is (= ["body_too_large" "body_too_large"]
+               (mapv #(get-in % [:json :error]) [literal single])))
+        (is (empty? @hits) "超限不把 nil 请求体交给外部处理器")))))
+
 (deftest connect-source-writes-replay-ring-and-stream
   (let [calls (atom [])
         source (fn [tid after-seq deliver]

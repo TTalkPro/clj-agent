@@ -79,6 +79,7 @@ CORS 缺省**拒**（带 Origin 的请求 403；`:origin-allowed` 用 `ahttp/ori
 不需要为它塞占位 runtime。注册表里只报名录，`routes` 的 host 选项按 agent 注入处理器；`/run` 与 `/stop` 可以是任意
 Ring 处理器（Origin / CORS / 访问守卫仍在外层），单路由退路也走同一份注入。`/connect` 可交给外部源：它收到
 `(thread-id after-seq deliver)`，`deliver` 接 AG-UI 事件 map 或已编好的 SSE 字节；事件先进帧环再送本连接，终态自动收流。
+请求体超过 `:max-body-bytes` 时由库先答 413，不会带着 `nil` 请求体调外部 `/run` 处理器。
 
 ```clojure
 (def reg (registry/registry [{:id "jinshu" :external? true :description "自带 ChatEngine"}]))

@@ -19,3 +19,23 @@
 
 外部驱动没法把自己的事件喂进库的帧环,于是锦书的 `/agent/jinshu/connect` 只能回 200 空流(锦书前端接续走 `action=attach`,不受影响)。
 **建议**:公开帧环的写入口(或让 `/connect` 接受一个 `(fn [thread-id after-seq deliver])` 的外部源)。
+
+## 复测(锦书,2026-11-11,clj-agent 0.5.440)✅
+
+锦书 `jinshu.server.agui.endpoints` 去掉了全部绕法:占位 runtime、字面量路由覆盖、自写的单路由退路都删了。
+- ① 注册表条目改成 `{:id "jinshu" :external? true :description … :capabilities …}`;`/info` 的能力位照旧(判据 `endpoints-info-cors-threads-messages` 原样过)。
+- ② `host/host` 的 `:agents {"jinshu" {:run … :stop …}}` 注入;字面量路由与单路由退路的 `agent/run` / `agent/stop` 都到了锦书的处理器
+  (`::agui/request-body`、`::agui/external-thread-id` 取值;新判据 `external-driver-connect-replays-the-last-run-and-single-route-runs-jinshu`)。
+- ③ 没用 `:connect-source`:锦书的驱动每帧直接写帧环(`replay/begin!` 起跑、`append!` 每帧、`finish!` 收场),`/connect` 走库的缺省
+  ⇒ 重放这条线程最近一轮,与 C# 一致(之前是 200 空流)。新一轮整个换掉帧环、没跑过的线程 200 空流,都钉了判据。
+- 门禁:锦书 `bb test` 1084 tests / 11119 assertions 全绿;e2e 106 / 106(Playwright 驱动 jpackage 产物)。
+
+**小缺口(🟢,锦书已按约定处理)**:外部 `:run` 处理器拿到的 `::agui/request-body` 在请求体超限时是 `nil`,原因没带过来。
+锦书约定「键在、值 nil ⇒ 413 body_too_large」,能用,但靠的是「读失败只有超限这一种」这个隐含前提。
+**建议**:超限时直接回库自己的 413(不调外部处理器),或把原因(`[:too-large ex]`)一并挂进 req。
+
+## 库侧回复（2026-11-11，小缺口）✅
+
+已修（只编码未提交）：采纳第一案——字面量路由读到 `[:too-large ex]` 直接回库的
+`413 body_too_large`，不再调外部 `:run`；单路由退路同口径（原先会被误判成 404）。
+判据钉在 `external_driver_test` 的 `external-run-body-too-large-does-not-call-driver`。

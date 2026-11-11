@@ -51,6 +51,9 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   正常返回 `reasoning_content`、不 400。老模型若仍有该限制，用 `:configure-request` 按 `:stream` 改回。
 - Anthropic：缓存策略实际打到 `"1h"` 断点时，请求头自动带 `anthropic-beta: extended-cache-ttl-2025-04-11`
   （与 `:beta` 合并去重）。官方端点已 GA、多发无害；全 5m 时不变。
+- OpenAI 兼容线：流式请求缺省带 `stream_options: {include_usage: true}`（与 Keelson.Agent 对齐），末块不原生带
+  usage 的端点也能拿到账；`:stream-options` 仍可覆盖，显式 `false` / `{}` 关闭。所有 OpenAI 兼容请求**非流式一律不发**
+  `stream_options`，严格端点不再被探针 / 一次性调用打 400。
 - MCP Streamable HTTP 传输改用共享的 `im.ttalk.http/default-client`：固定 HTTP/1.1（原先 JDK 缺省先试
   HTTP/2）、虚拟线程 executor、连接池共享、建连超时 30s（原 = `:timeout-ms`）。要原行为传 `:client`。
 - web_fetch 的缺省 client 换成虚拟线程 executor（其余设置不变：不跟随重定向、建连超时 = `:timeout-ms`）。
@@ -66,6 +69,8 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   显式 `:enable-thinking` 优先、`:thinking-style :none` 不写）；原生流式解析器补上 `reasoning_content`
   （单独发 `:reasoning-token`，最终响应带 `reasoning_content`），原先思考内容整段丢失。
 - Retry-After 的解析：取头统一走 `im.ttalk.http/header`，另认 RFC 850 / asctime 日期、小数秒与 `retry-after-ms` 头。
+- AG-UI 外部 `/run` 处理器不再在请求体超限时收到 `nil`：字面量路由与单路由退路都由库先答 413 `body_too_large`，
+  不调驱动（回 `feedbacks/2026-11-11-agui-server-external-run-driver.md` 的复测小缺口）。
 - MCP 的 SSE 响应只取第一行 `data:`：一条 JSON 拆成多行 data 时解析失败。现按 WHATWG 分帧拼接。
 - IO 失败时 JDK 异常常没有 message，`provider.http.client` 回 `{:status 0 :error nil}`，`response->error`
   认不出连接失败、误当 HTTP 0；现 `:error` 用异常类名兜底。流式网络错另带细分 `:code`

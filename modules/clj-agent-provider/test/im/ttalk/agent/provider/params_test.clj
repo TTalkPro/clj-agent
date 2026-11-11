@@ -152,6 +152,34 @@
                                  [{:role "user" :content "hi"}] [])]
       (is (= {:role "system" :content "sys"} (first (:messages p)))))))
 
+(deftest openai-compat-stream-usage-default-test
+  (testing "流式缺省开 include_usage；非流式不发 stream_options"
+    (let [msgs [{:role "user" :content "hi"}]]
+      (is (true? (get-in (compat/request-body {:model "gpt-4"} msgs [] true)
+                         [:stream_options :include_usage])))
+      (is (contains? (compat/request-body {:model "gpt-4"} msgs [] true) :stream))
+      (is (not (contains? (compat/request-body {:model "gpt-4"} msgs [] false)
+                          :stream_options)))))
+  (testing "显式值透传；false / {} 是关闭口子，且非流式一律不发"
+    (let [msgs [{:role "user" :content "hi"}]]
+      (is (= {:include_usage false}
+             (:stream_options (compat/request-body
+                               {:model "gpt-4" :stream-options {:include_usage false}}
+                               msgs [] true))))
+      (doseq [disabled [false {}]]
+        (is (not (contains? (compat/request-body
+                             {:model "gpt-4" :stream-options disabled}
+                             msgs [] true)
+                            :stream_options)))
+        (is (not (contains? (compat/request-body
+                             {:model "gpt-4" :stream-options disabled}
+                             msgs [] false)
+                            :stream_options))))
+      (is (not (contains? (compat/request-body
+                           {:model "gpt-4" :stream-options {:include_usage true}}
+                           msgs [] false)
+                          :stream_options))))))
+
 (deftest openai-compat-tool-and-reasoning-test
   (testing "parallel-tool-calls 布尔值精确透传（含 false）"
     (let [p (compat/build-params
