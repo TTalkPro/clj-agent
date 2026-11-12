@@ -29,7 +29,8 @@
             [im.ttalk.agent.streaming :as streaming]
             [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
             [im.ttalk.agent.provider.http.retry :as retry]
-            [im.ttalk.agent.provider.http.client :as http-client])
+            [im.ttalk.agent.provider.http.client :as http-client]
+            [im.ttalk.agent.retry :as core-retry])
   (:import [java.util.concurrent CancellationException CompletableFuture]
            [java.util.concurrent.atomic AtomicBoolean]
            [java.util.function BiFunction]))
@@ -198,7 +199,7 @@
                 (let [e @err]
                   (if (and retry-cfg
                            (< n (:max-retries retry-cfg))
-                           (:retryable? e)
+                           (core-retry/retry-error? e retry-cfg)
                            (not @tokens-out?))
                     (flt/fbind (async/delayed (retry/compute-backoff n retry-cfg))
                                (fn [_] (attempt-fn (inc n))))
@@ -248,7 +249,8 @@
      成功响应按响应头挂 :rate-limit，designs/provider-reliability.md §4 / §6）
    - :retry              建链阶段重试（opt-in，同 http.retry/maybe-with-retry 约定：
                          true → 默认配置；map → 合并 default-retry-opts）。
-                         仅当失败可重试（canonical error :retryable?）**且尚未向
+                         仅当失败可重试（`im.ttalk.agent.retry/retry-error?`：canonical error
+                         的 :retryable?，配置可用 :skip-types / :retryable? 改判据）**且尚未向
                          on-token 流出任何 token** 时退避重试——token 已出说明调用方
                          已观察到部分输出，重试会重复内容，此时按原样抛错。
                          流式错误体不带响应头，故不支持 Retry-After，只走指数退避。
@@ -294,7 +296,7 @@
           (let [e @err]
             (if (and retry-cfg
                      (< attempt (:max-retries retry-cfg))
-                     (:retryable? e)
+                     (core-retry/retry-error? e retry-cfg)
                      (not @tokens-out?))
               (do (Thread/sleep (long (retry/compute-backoff attempt retry-cfg)))
                   (recur (inc attempt)))

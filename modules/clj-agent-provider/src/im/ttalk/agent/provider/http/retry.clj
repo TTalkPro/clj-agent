@@ -36,6 +36,7 @@
    ;; 关闭重试（max-retries 0）即等价于直接调用
    "
   (:require [im.ttalk.http.date :as date]
+            [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.retry :as core-retry]))
 
 (set! *warn-on-reflection* true)
@@ -148,6 +149,22 @@
 ;; 重试执行
 ;; ============================================================
 
+(defn- response-retry-on
+  "配置里给了 `:skip-types` / `:retryable?`（`im.ttalk.agent.retry/retry-error?` 的判据）⇒
+   把响应翻成 canonical error（`:retryable?` 取 `transient-response?` 的结论，缺省行为不变）再问判据；
+   都没给 ⇒ 就是 `transient-response?`。"
+  [{:keys [skip-types retryable?] :as opts}]
+  (if (or (seq skip-types) retryable?)
+    (fn [resp]
+      (and (not (:success? resp))
+           (core-retry/retry-error?
+             (assoc (if (:status resp)
+                      (errors/http-response->error resp nil)
+                      {:type :connection-error})
+                    :retryable? (transient-response? resp))
+             opts)))
+    transient-response?))
+
 (defn- sleep! [ms]
   (when (pos? ms)
     (Thread/sleep (long ms))))
@@ -165,6 +182,8 @@
      - :respect-retry-after? 是否优先用 Retry-After 头
      - :retry-on             判定是否需要重试的谓词 (fn [resp] bool)，
                              缺省 transient-response?
+     - :skip-types / :retryable? 同 ChatModel 的 `:retry` 判据（`im.ttalk.agent.retry/retry-error?`），
+                             按响应翻成的 canonical error 判；给了 :retry-on 则以它为准
      - :rand-fn              随机数函数（测试用）
      - :on-retry             每次重试前回调 (fn [{:keys [attempt delay-ms response]}])
 
@@ -174,9 +193,10 @@
    - 仅对同步、整体可重试的请求使用（如非流式 LLM 调用、或流式建链阶段）。
    - max-retries 为 0 时等价于直接调用 request-fn。"
   [request-fn opts]
-  (let [{:keys [max-retries respect-retry-after? retry-on rand-fn on-retry max-delay]
-         :or {retry-on transient-response? rand-fn rand}
-         :as merged} (merge default-retry-opts opts)]
+  (let [{:keys [max-retries respect-retry-after? rand-fn on-retry max-delay]
+         :or {rand-fn rand}
+         :as merged} (merge default-retry-opts opts)
+        retry-on (or (:retry-on merged) (response-retry-on merged))]
     (loop [attempt 0]
       (let [resp (request-fn)]
         (if (or (>= attempt max-retries)

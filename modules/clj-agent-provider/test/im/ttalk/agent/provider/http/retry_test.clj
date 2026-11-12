@@ -105,6 +105,28 @@
                                              :on-retry #(swap! events conj (:attempt %))}))
         (is (= [1 2] @events))))))
 
+(deftest with-retry-honours-skip-types-test
+  (let [no-sleep {:base-delay 0 :rand-fn (constantly 0.0)}]
+    (testing ":skip-types #{:rate-limit-error} ⇒ 429 只打一次，503 照旧重试"
+      (let [[calls f] (counting-fn {:status 429 :success? false})]
+        (retry/with-retry f (merge no-sleep {:max-retries 3 :skip-types #{:rate-limit-error}}))
+        (is (= 1 @calls)))
+      (let [[calls f] (counting-fn {:status 503 :success? false})]
+        (retry/with-retry f (merge no-sleep {:max-retries 3 :skip-types #{:rate-limit-error}}))
+        (is (= 4 @calls))))
+    (testing "网络层错误（无 :status）照旧可重试"
+      (let [[calls f] (counting-fn {:error (java.io.IOException. "reset") :success? false})]
+        (retry/with-retry f (merge no-sleep {:max-retries 2 :skip-types #{:rate-limit-error}}))
+        (is (= 3 @calls))))
+    (testing ":retryable? 覆盖判据"
+      (let [[calls f] (counting-fn {:status 503 :success? false})]
+        (retry/with-retry f (merge no-sleep {:max-retries 3 :retryable? (constantly false)}))
+        (is (= 1 @calls))))
+    (testing "经 maybe-with-retry 的 config :retry 也认"
+      (let [[calls f] (counting-fn {:status 429 :success? false})]
+        (retry/maybe-with-retry {:retry (merge no-sleep {:max-retries 3 :skip-types #{:rate-limit-error}})} f)
+        (is (= 1 @calls))))))
+
 (deftest maybe-with-retry-test
   (testing "config 无 :retry 时不重试，直接调用一次"
     (let [[calls f] (counting-fn {:status 503 :success? false})]

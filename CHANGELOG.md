@@ -40,6 +40,9 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   `(thread-id after-seq deliver)` 的外部事件源。`deliver` 写帧环 + 当前 SSE，终态自动收流；外部条目缺省不继承内置
   runtime 的能力位，避免 `/info` 谎报。
 - DashScope 原生 provider 新增 `:extra-parameters`（map，并入 `parameters`；`thinking_budget` 等私有字段的逃生通道）。
+- `:retry` 配置新增判据 `:skip-types`（如 `#{:rate-limit-error}` ⇒ 429 不重试）与 `:retryable?`（`(fn [error-map] bool)`
+  覆盖缺省判据），公开函数 `im.ttalk.agent.retry/retry-error?`；ChatModel 同步 / 异步、流式建链、embeddings 的重试共用
+  （`designs/provider-reliability.md` §2.7，观澜反馈）。不给即旧行为。
 
 ### ⚠️ 缺省行为变化
 

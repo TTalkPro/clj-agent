@@ -191,6 +191,23 @@ MiniMax 1039@200、文案不造限流）、Retry-After 的 List 值、`try again
 2. 流式在首个 token 前的可重试失败缺省重试 2 次（过去 0 次）。
 3. 用户在 config 里配的 `:retry` 不再让 `stream-client` 传输层重试（改由 ChatModel 统一做，语义相同）。
 
+### 2.7 判据可配：`:skip-types` / `:retryable?`（2026-11-12，观澜反馈 `feedbacks/2026-11-11-chartroom-retry-type-filter.md`）
+
+国内几家把「限流」与「欠费 / 额度用尽」都回 429，宿主要「429 不重试」（Keelson C# 缺省即如此）。此前只能在 provider 外面包一层
+改写 `:retryable?`，包了还丢掉 `IAsyncLLMProvider`（异步路径退回虚拟线程兜底）。
+
+`:retry` 配置（三级合并同上）新增两格，**不给即旧行为**：
+
+| 键 | 作用 |
+|---|---|
+| `:skip-types` | canonical error 的 `:type` 集合，命中一律不重试，如 `#{:rate-limit-error}` |
+| `:retryable?` | `(fn [error-map] bool)`，覆盖缺省判据（错误自带的 `:retryable?`）；`:skip-types` 先生效 |
+
+判据收成一个公开函数 `retry/retry-error?`（canonical error × 配置）。三处重试共用它：ChatModel 的 `:max-retries` 与
+`:stream-retries` 两格（`run` / `run-async`）、provider `stream-client` 的建链重试、`http.retry/with-retry`（embeddings 的
+opt-in 重试：响应按 `http-response->error` 翻成 canonical error，`:retryable?` 取 `transient-response?` 的结论，给了
+`:retry-on` 则以它为准）。空补全仍只归 `:empty-retries`，不受这两格影响。
+
 ### 2.7 测试
 
 retry 单测：空补全独立预算 / 超预算错误类型 / 不进 HTTP 预算 / gate / attempts 记录 / run-async 等价。

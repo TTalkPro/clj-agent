@@ -54,7 +54,12 @@
                      / `:throw`（抛 :empty-completion-error，交给主备切换 / 上层处理）
    - :stream-retries 流式「首个 token 之前」失败的独立预算（token 出门后一律不重试）
 
-   三格预算各自记账、互不挪用（designs/provider-reliability.md §2）。"
+   三格预算各自记账、互不挪用（designs/provider-reliability.md §2）。
+
+   判据（缺省不给 ⇒ 只看 canonical error 的 `:retryable?`，见 `retry-error?`）：
+   - :skip-types   canonical error 的 `:type` 集合，命中一律不重试（如 `#{:rate-limit-error}`：
+                   国内几家把限流与欠费都回 429，重试等于替用户再花钱）
+   - :retryable?   (fn [error-map] bool)，**覆盖**缺省判据；`:skip-types` 仍先生效"
   {:max-retries 2
    :base-delay 1000
    :multiplier 2.0
@@ -95,6 +100,20 @@
   [^Throwable e]
   (boolean (:retryable? (ex-data e))))
 
+(defn retry-error?
+  "canonical error（map，可为 nil）按重试配置该不该重试：
+
+   1. 类型在 `:skip-types` 里 ⇒ 不重试；
+   2. 给了 `:retryable?`（fn [error-map] bool）⇒ 听它的；
+   3. 否则看错误自带的 `:retryable?`（同 `retryable-ex?`）。
+
+   配置里两格都不给 ⇒ 与 `retryable-ex?` 逐字同义。ChatModel 的三格重试、provider 流式建链重试、
+   embeddings 的 opt-in 重试共用这一个判据（宿主不必为了改一条判据去包 provider）。"
+  [err {:keys [skip-types retryable?]}]
+  (let [err (or err {})]
+    (and (not (contains? (set skip-types) (:type err)))
+         (boolean (if retryable? (retryable? err) (:retryable? err))))))
+
 (defn compute-backoff
   "第 attempt 次重试的退避毫秒（含满抖动）。attempt 从 0 开始。
 
@@ -131,10 +150,12 @@
 
 (defn- http-retryable?
   "按 `:max-retries` 那一格能不能再打。**空补全一律不进这一格**——它即便 :retryable? true，
-   也只归 `:empty-retries` 管；否则稳定吐空的模型会被放大成「max-retries × empty-retries」次。"
-  [^Throwable t]
-  (and (retryable-ex? t)
-       (not= :empty-completion-error (:type (ex-data t)))))
+   也只归 `:empty-retries` 管；否则稳定吐空的模型会被放大成「max-retries × empty-retries」次。
+   判据见 `retry-error?`（opts 的 `:skip-types` / `:retryable?`）。"
+  [^Throwable t opts]
+  (let [data (ex-data t)]
+    (and (not= :empty-completion-error (:type data))
+         (retry-error? data opts))))
 
 (defn- attempt-summary [^Throwable t]
   (-> (or (ex-data t) {:message (or (.getMessage t) (.getName (class t)))})
@@ -188,7 +209,7 @@
       (let [r (try {:ok (f)} (catch Throwable t {:err t}))]
         (if-let [^Throwable t (:err r)]
           (let [trail (conj trail (attempt-summary t))]
-            (if (and (< http maxr) (http-retryable? t) (gate?))
+            (if (and (< http maxr) (http-retryable? t opts) (gate?))
               (let [delay-ms (delay-for t http opts rand-fn)]
                 (when on-retry
                   (on-retry {:attempt   calls
@@ -236,7 +257,7 @@
         wait  (fn [ms] (if sleep-fn (do (sleep-fn ms) nil) (async/delayed ms)))]
     (letfn [(on-err [^Throwable t http empties calls trail]
               (let [trail (conj trail (attempt-summary t))]
-                (if (and (< http maxr) (http-retryable? t) (gate?))
+                (if (and (< http maxr) (http-retryable? t opts) (gate?))
                   (let [delay-ms (delay-for t http opts rand-fn)]
                     (when on-retry
                       (on-retry {:attempt   calls

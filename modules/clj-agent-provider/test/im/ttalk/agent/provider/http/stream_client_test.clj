@@ -202,6 +202,24 @@
           (is (= 1 @attempts) "不可重试错误不应重试"))
         (finally (.stop server 0))))))
 
+(deftest sync-retry-honours-skip-types-test
+  (testing ":retry 里 :skip-types #{:rate-limit-error} ⇒ 429 建链失败不重试，只打一次"
+    (let [{:keys [server port attempts]} (start-flaky-server 99 429 [])]
+      (try
+        (let [e (try (sc/post-stream-sync (str "http://127.0.0.1:" port "/x")
+                       {:headers {} :body {:a 1}
+                        :parse-fn parse-data :process-fn accumulate
+                        :make-initial-state (fn [] {})
+                        :build-response identity
+                        :on-token (fn [_])
+                        :retry {:max-retries 3 :base-delay 1 :skip-types #{:rate-limit-error}}
+                        :provider :test})
+                     nil
+                     (catch clojure.lang.ExceptionInfo ex (ex-data ex)))]
+          (is (= :rate-limit-error (:type e)))
+          (is (= 1 @attempts)))
+        (finally (.stop server 0))))))
+
 (deftest sync-no-retry-by-default-test
   (testing "未开 :retry 时 503 直接抛出，只打一次（默认行为不变）"
     (let [{:keys [server port attempts]} (start-flaky-server 99 503 [])]

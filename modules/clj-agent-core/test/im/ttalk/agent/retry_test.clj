@@ -127,6 +127,63 @@
       (is (= [1000] @slept)))))
 
 ;;; ============================================================
+;;; 判据：:skip-types / :retryable?（观澜反馈 2026-11-11：429 不重试）
+;;; ============================================================
+
+;; 走真实路径构造：429 经 http-response->error 归为 :rate-limit-error（缺省可重试）
+(def ^:private rate-limit-err
+  (errors/http-response->error {:status 429 :body "rate limited"} :flaky))
+
+(deftest retry-error-predicate
+  (testing "不给判据 ⇒ 与 retryable-ex? 同义"
+    (is (true? (retry/retry-error? rate-limit-err {})))
+    (is (false? (retry/retry-error? auth-err {})))
+    (is (false? (retry/retry-error? nil {}))))
+  (testing ":skip-types 命中 ⇒ 不重试，未命中照旧"
+    (is (false? (retry/retry-error? rate-limit-err {:skip-types #{:rate-limit-error}})))
+    (is (true? (retry/retry-error? transient-err {:skip-types #{:rate-limit-error}}))))
+  (testing ":retryable? 覆盖缺省判据（可以放宽，也可以收紧）"
+    (is (true? (retry/retry-error? auth-err {:retryable? (constantly true)})))
+    (is (false? (retry/retry-error? transient-err {:retryable? #(= 503 (:status %))}))))
+  (testing ":skip-types 先于 :retryable?"
+    (is (false? (retry/retry-error? rate-limit-err {:skip-types #{:rate-limit-error}
+                                                    :retryable? (constantly true)})))))
+
+(deftest run-honours-skip-types
+  (testing "同步：429 在 :skip-types 里 ⇒ 只打一次；别的可重试错误照旧重试"
+    (let [calls (atom 0)
+          f #(do (swap! calls inc) (errors/throw! rate-limit-err))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (retry/run f (merge {:max-retries 3 :skip-types #{:rate-limit-error}} no-sleep))))
+      (is (= 1 @calls)))
+    (let [calls (atom 0)
+          f #(let [n (swap! calls inc)] (if (< n 3) (errors/throw! transient-err) :done))]
+      (is (= :done (retry/run f (merge {:max-retries 3 :skip-types #{:rate-limit-error}} no-sleep))))
+      (is (= 3 @calls))))
+  (testing "异步：同一套判据"
+    (let [calls (atom 0)
+          f #(do (swap! calls inc) (errors/throw! rate-limit-err))
+          r (try @(retry/run-async f (merge {:max-retries 3 :skip-types #{:rate-limit-error}} no-sleep))
+                 (catch Throwable t t))]
+      (is (instance? Throwable r))
+      (is (= 1 @calls))))
+  (testing ":retryable? 覆盖：只放过 503"
+    (let [calls (atom 0)
+          f #(do (swap! calls inc) (errors/throw! transient-err))]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (retry/run f (merge {:max-retries 3 :retryable? #(= 503 (:status %))} no-sleep))))
+      (is (= 1 @calls)))))
+
+(deftest chat-model-honours-skip-types-from-config
+  (testing "provider config 的 :retry 里给 :skip-types ⇒ ChatModel 不再为 429 重试（宿主不必包 provider）"
+    (let [calls (atom 0)
+          model (cm/create-chat-model (flaky-provider calls 2 rate-limit-err)
+                                      {:model "m" :retry {:max-retries 3 :skip-types #{:rate-limit-error}}})]
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (cm/call model (req/chat-request [{:role :user :content "hi"}] no-sleep))))
+      (is (= 1 @calls)))))
+
+;;; ============================================================
 ;;; 三级取值
 ;;; ============================================================
 
