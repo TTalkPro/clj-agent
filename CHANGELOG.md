@@ -43,8 +43,18 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 - `:retry` 配置新增判据 `:skip-types`（如 `#{:rate-limit-error}` ⇒ 429 不重试）与 `:retryable?`（`(fn [error-map] bool)`
   覆盖缺省判据），公开函数 `im.ttalk.agent.retry/retry-error?`；ChatModel 同步 / 异步、流式建链、embeddings 的重试共用
   （`designs/provider-reliability.md` §2.7，观澜反馈）。不给即旧行为。
+- `tool-guard-filter` 分两本账（同 Keelson FailureDisableAdvisor）：`:classify` 可回 `:raised`（系统错误，计入门禁，
+  同旧 `:failure`）与 `:reported`（业务失败，只记「任意失败」、不进门禁），新增 `:report-threshold`（缺省 5：连续任意
+  失败到 n 次、碰上业务失败时换成「别原样重试」提醒，然后清零）与 `:report-note`。缺省 classify 不变（观澜反馈）。
 
 ### ⚠️ 缺省行为变化
+
+- **`DefaultChatModel` 的单次选项递到底**：请求 `:options` 里除 `:tools` / `:tool-choice` / `:system-prompt` 之外的键
+  （`:temperature` / `:max-tokens` / `:thinking-effort` / `:model` / provider 私有参数）现在盖在 ChatModel 的 config 上
+  下发；此前静默丢掉（锦书 2026-11-10 ③，观澜复述）。ChatModel 自己的键（`chat-model/non-wire-option-keys`：`:retry`、
+  重试钩子、`:admission`、`:cancel-token`、`:on-token`）不下发。
+- **`react/invoke` 不挂 memory filter 时带完整对话**：第二轮起请求 = 本轮发出的消息 + assistant(tool_calls) + 工具结果；
+  此前只带后两样，用户的问题丢了（观澜反馈）。挂 memory 的路径不变。
 
 - `examples/copilotkit` 的路由改走 `clj-agent-server` 后，线协议以它为准（上游 / C# 口径）：输入形状错误统一 `bad_input`
   （原 `missing_thread_id` / `missing_run_id`，非对象体原 `bad_json`）；线程改动类请求（PATCH / archive / DELETE）体里要带
@@ -63,6 +73,8 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 
 ### 🐛 修复
 
+- 内联工具 map 的 `:sensitive` 进 `func-def`（此前恒为 false，`:on-pause` 声明式暂停 / 审批策略的 `:sensitive?` 对内联
+  工具失效；观澜反馈）。
 - **OpenAI 兼容流式答案整段丢失**（qwen / 百炼兼容模式，2026-11-10 LiteGate 真机发现）：百炼每块同时带 `content` 与
   `reasoning_content`，空的那格是 `""`；`stream.openai/process-chunk` 用 `(:reasoning_content delta)` 判断，空串为真，
   答案块 `{"content":"15","reasoning_content":""}` 被当成推理块，`content` 恒为空。改为判非空（`not-empty`），
