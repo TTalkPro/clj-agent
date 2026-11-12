@@ -636,7 +636,8 @@
    工具结果 delta，历史自会拼成 assistant(tool_calls) → tool(results)。
    但 `:memory false` 是合法的编排形态——子 Agent / 一次性调用都不该被迫落库。
    这时循环自己必须把 assistant(tool_calls) 带上，否则下一轮只有孤立的
-   tool result，OpenAI / Anthropic / Responses 网关都会以 tool id 找不到拒绝。"
+   tool result，OpenAI / Anthropic / Responses 网关都会以 tool id 找不到拒绝；
+   而且要接在本轮发出去的全部消息后面（完整 transcript），否则历史丢失。"
   [response]
   (let [text (response/response-text response)
         calls (response/response-tool-calls response)
@@ -792,7 +793,7 @@
                        :tool-context tctx :tool-calls-made @records*}
                       (do (vswap! remaining* dec)
                           {:status :continue
-                           :messages (if memory? [] [(response->plain-assistant response)])
+                           :messages (if memory? [] (conj (vec delta) (response->plain-assistant response)))
                            :context tctx :calls [] :errors [] :pause-turn true}))
 
                     (empty? calls)
@@ -890,10 +891,14 @@
                              :return-direct true}
 
                             :else
+                            ;; 没有 memory filter ⇒ 循环自己累积完整对话：本轮发出去的消息（不含临时
+                            ;; 提醒）+ assistant(tool_calls) + 工具结果。曾经只带后两样，第二轮起历史
+                            ;; （用户的问题）就丢了（观澜反馈 2026-11-11 ②）
                             (let [next-delta (if memory?
                                                messages
-                                               (into [(response->assistant-message response)]
-                                                     messages))]
+                                               (-> (vec delta)
+                                                   (conj (response->assistant-message response))
+                                                   (into messages)))]
                               {:status :continue :messages next-delta :context context
                                :calls calls :errors errors})))))))))))))
         iteration-chain ((:iteration (flt/filter-hooks chat-client)) iteration-terminal)]
@@ -1005,7 +1010,9 @@
    参数:
    - chat-client:   ChatClient 实例（需配置 ChatModel）
    - store:    ChatMemory store（与 chat-client 上 memory-filter 同一实例；用于 heal/临时清理）
-   - messages: 本轮新消息（中立消息）
+   - messages: 本轮新消息（中立消息）。**没挂 memory filter** 时这就是全部上下文：循环自己把
+               每轮的 assistant(tool_calls) 与工具结果接在后面（完整 transcript）；暂停后的 resume
+               仍要靠 memory 拼历史（loop-state 里不存对话）
    - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags
                :on-env-error :pause|:proceed（缺省 :proceed——环境类工具失败照常交给模型；
                               :pause 时在屏障处暂停等人，resume :retry/:proceed 续跑）

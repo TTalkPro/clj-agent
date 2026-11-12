@@ -168,7 +168,8 @@
         (is (= 4 (count stored)))))))
 
 (deftest invoke-without-memory-carries-assistant-tool-calls-test
-  (testing ":memory false 时下一轮 delta 也要带 assistant(tool_calls)"
+  (testing ":memory false 时下一轮带完整 transcript：用户消息 + assistant(tool_calls) + 工具结果
+            （曾经只带后两样，用户的问题丢了——观澜反馈 2026-11-11 ②）"
     (let [received (atom [])
           cm {:chat-fn (fn [msgs _]
                          (swap! received conj msgs)
@@ -184,8 +185,9 @@
       (is (= 2 (count @received)))
       (let [[first-call second-call] @received]
         (is (= [:user] (mapv :role first-call)))
-        (is (= [:assistant :tool] (mapv :role second-call)))
-        (is (= "tc1" (:tool-call-id (second second-call))))))))
+        (is (= [:user :assistant :tool] (mapv :role second-call)))
+        (is (= "echo hi" (:content (first second-call))))
+        (is (= "tc1" (:tool-call-id (nth second-call 2))))))))
 
 (deftest invoke-system-prompts-test
   (let [received-opts (atom nil)
