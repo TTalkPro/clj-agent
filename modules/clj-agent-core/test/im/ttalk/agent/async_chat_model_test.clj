@@ -127,6 +127,34 @@
       (is (= {:format :mock :data [{:type "thinking" :sig "s1"}]} (:replay-blocks r))
           "可选协议的回放载荷在异步路径上照样抽取——这正是旧旁路丢掉的东西"))))
 
+(deftest per-call-options-reach-provider-test
+  ;; 锦书反馈 2026-11-10 ③（观澜 2026-11-11 复述）：单次 :options 里的旋钮曾被 build-call-config 静默丢掉
+  (let [opts {:tools [] :temperature 0.7 :max-tokens 1 :thinking-effort "max" :model "m2"
+              :retry {:max-retries 0} :on-retry (fn [_]) :sleep-fn (fn [_]) :cancel-token ::tok}
+        req* (req/chat-request [(msg/user "问题")] opts)]
+    (testing "同步 / 异步两条路径：单次选项盖在 config 上，ChatModel 自己的键不下发"
+      (doseq [[path call!] [[:sync #(cm/call % req*)]
+                            [:async #(async/join (cm/call-async* % req*) 3000)]]]
+        (let [log (atom [])
+              p (->AsyncProvider log (atom (repeat 2 (raw "x"))))
+              sp (->SyncOnlyProvider log (atom (repeat 2 (raw "x"))))
+              m (cm/create-chat-model (if (= :sync path) sp p) {:model "m" :max-tokens 99 :admission nil})
+              _ (call! m)
+              cfg (:config (first @log))]
+          (is (= 0.7 (:temperature cfg)) (str path))
+          (is (= 1 (:max-tokens cfg)) (str path " 单次覆盖 config"))
+          (is (= "max" (:thinking-effort cfg)) (str path))
+          (is (= "m2" (:model cfg)) (str path))
+          (is (not-any? #(contains? cfg %) [:on-retry :sleep-fn :cancel-token :admission]) (str path)))))
+    (testing "tool-choice :none 仍不下发 tools"
+      (let [log (atom [])
+            m (cm/create-chat-model (->SyncOnlyProvider log (atom [(raw "x")])) {:model "m"})]
+        (cm/call m (req/chat-request [(msg/user "q")] {:tools [{:name "t"}] :tool-choice :none :temperature 0.1}))
+        (let [cfg (:config (first @log))]
+          (is (nil? (:tools cfg)))
+          (is (nil? (:tool-choice cfg)))
+          (is (= 0.1 (:temperature cfg))))))))
+
 ;;; ============================================================
 ;;; 重试等价
 ;;; ============================================================

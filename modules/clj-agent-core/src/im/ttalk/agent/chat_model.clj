@@ -48,6 +48,11 @@
 ;;; 辅助函数
 ;;; ============================================================
 
+(def non-wire-option-keys
+  "单次选项里属于 ChatModel / 框架自己的键：重试配置与它的观测 / 测试钩子、准入、取消令牌、流式回调。
+   它们由 ChatModel 消费，不盖到 provider config 上。"
+  [:retry :on-retry :sleep-fn :rand-fn :admission :cancel-token :on-token])
+
 (defn- build-call-config
   "合并基础配置和调用时选项
 
@@ -58,10 +63,13 @@
      provider 倾向的 wire 转换。
    - 仅在**确实有 tools** 时才下发 tool-choice：无 tools 还带 tool_choice，严格 OpenAI 端点会 400。
    - system-prompt 直接传递
+   - **其余单次选项盖在 config 上**（`:temperature` / `:max-tokens` / `:thinking-effort` / `:model` / provider
+     私有参数……）：`wire-options` 的承诺是「递得到底」，曾经在这里只取三格、其余静默丢掉（锦书反馈
+     2026-11-10 ③，观澜 2026-11-11 复述）。ChatModel 自己的装配与钩子（`non-wire-option-keys`）不下发。
 
    参数：
    - config: 基础配置 {:model ... :max-tokens ...}
-   - opts:   调用时选项 {:tools [...] :tool-choice ... :system-prompt ...}
+   - opts:   调用时选项 {:tools [...] :tool-choice ... :system-prompt ... 及任意 provider 参数}
 
    返回：
    合并后的调用配置 map"
@@ -69,9 +77,10 @@
   (let [tool-choice (:tool-choice opts)
         tools (when (not= tool-choice :none)
                 (:tools opts))
-        system-prompt (:system-prompt opts)]
+        system-prompt (:system-prompt opts)
+        per-call (apply dissoc opts :tools :tool-choice :system-prompt non-wire-option-keys)]
     ;; :admission 是 ChatModel 自己的装配（票据池），不下发给 provider
-    (cond-> (dissoc config :admission)
+    (cond-> (merge (dissoc config :admission) per-call)
       (seq tools)
       (assoc :tools tools)
       ;; 只在有 tools 且非 :none 时透传中立 tool-choice（provider 侧翻译）
