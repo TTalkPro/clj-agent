@@ -92,10 +92,17 @@
    就成了**空字符串结果**，模型据此宣布「已成功执行」——拒绝往成功的方向被吃掉。
 
    三处一起改，客户端照哪一处判都对：`reason` 的措辞、`responseSchema` 的形状、
-   `metadata.kind` 的标签。"
+   `metadata.kind` 的标签。
+
+   **宿主的 metadata 合并进来**（观澜反馈 2026-11-12 ①）：gate / 审批策略在暂停里给的
+   `:metadata`（`{:pause {:metadata {...}}}`，落在 `pending-tool :approval :metadata`）与
+   暂停事件上的 `:metadata` 并进 `Interrupt.metadata`——宿主给了 `:kind` 就用宿主的
+   （如观澜提问卡的 `\"question\"`），没给才是上面两档；`pendingTool` 恒由库补。"
   [{:keys [pending-tool pending-frontend?] :as ev}]
   (let [tc-id (get-in pending-tool [:tool-call :id])
-        name* (str (:name pending-tool))]
+        name* (str (:name pending-tool))
+        host-meta (merge (when (map? (:metadata ev)) (:metadata ev))
+                         (let [m (get-in pending-tool [:approval :metadata])] (when (map? m) m)))]
     (cond-> {:id (interrupt-id ev)
              :reason (if pending-frontend?
                        ;; 它要的不是批准，是**客户端去执行**
@@ -107,9 +114,10 @@
                                    decision-response-schema))}
       (:message ev) (assoc :message (str (:message ev)))
       tc-id         (assoc :toolCallId (str tc-id))
-      pending-tool  (assoc :metadata {:kind (if pending-frontend? "frontend-tool" "approval")
-                                      :pendingTool {:name (:name pending-tool)
-                                                    :args (:args pending-tool)}}))))
+      pending-tool  (assoc :metadata (merge {:kind (if pending-frontend? "frontend-tool" "approval")}
+                                            host-meta
+                                            {:pendingTool {:name (:name pending-tool)
+                                                           :args (:args pending-tool)}})))))
 
 (defn interrupts-of
   "暂停事件 → `outcome.interrupts`：同一批里**每条**被叫停的调用一个 interrupt
@@ -124,7 +132,7 @@
     [(interrupt-of ev)]
     (mapv (fn [p]
             (interrupt-of (assoc ev
-                                 :pending-tool (dissoc p :frontend? :approval)
+                                 :pending-tool (dissoc p :frontend?)
                                  :pending-frontend? (boolean (:frontend? p))
                                  :reason (or (get-in p [:approval :reason])
                                              (str "需要审批: " (:name p))))))

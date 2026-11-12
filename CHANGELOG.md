@@ -48,6 +48,15 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
   失败到 n 次、碰上业务失败时换成「别原样重试」提醒，然后清零）与 `:report-note`。缺省 classify 不变（观澜反馈）。
 - Anthropic 缓存新增 `:cache-tail-skip n`（缺省 0）：对话断点打在倒数第 n+1 条消息上，条数不够则不打（不回落到最后一条）。
   给「前面几条不变、最后一条每次都变」的请求用（续写：n = 1），同 Keelson `CacheTailSkipKey`；可单次给（锦书反馈 ④）。
+- **有状态 AG-UI 接入的四处宿主口子**（2026-11-12，回 `feedbacks/2026-11-12-chartroom-stateful-agui-gaps.md`，观澜报）：
+  ① 暂停可带宿主 `:metadata`——审批策略决定里的 `:metadata`、`:on-tool-call` 回调的 `{:interrupt … :metadata …}` 进
+  `pending-tool :approval :metadata`，AG-UI codec 并进 `Interrupt.metadata`（宿主给了 `:kind` 就用宿主的，`pendingTool`
+  恒由库补）；② resume 的 `:reject-note` 钩子（`create-agent` / `react/resume` 选项）：人拒绝 / 取消时交给模型的那句由宿主写，
+  入参带 `:reason` / `:cancelled?` / `:expired?`，AG-UI `resume[].status = cancelled` 由 server 置 `:cancelled? true`；
+  ③ 暂停快照自带对话 `:loop-state :transcript`：`create-agent` / `react/invoke` 的 `:pause-transcript? true` 让挂 memory
+  的 agent 也带，resume 时 store 里这一会话为空（重启）就先回填——只持久化 PauseStore 也能跨重启续跑；
+  ④ `:chat-options`（map）原样并进工具循环**每一轮**的 chat 选项（`create-agent` 装配期 ⊕ chat / resume 单次），
+  `server.agui` 的 `:input-transform` 可回 `:chat-options`。都不配时行为不变。
 
 ### ⚠️ 缺省行为变化
 
@@ -75,6 +84,8 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 
 ### 🐛 修复
 
+- `react/invoke` 不挂 memory 时**暂停后 resume 丢历史**：续跑第一轮只送工具结果，模型看不到用户的问题（且 OpenAI 兼容端
+  会因孤立的 tool 消息拒绝）。现暂停快照恒带 `:transcript`，resume 接回去（观澜反馈 2026-11-12 ③）。
 - 内联工具 map 的 `:sensitive` 进 `func-def`（此前恒为 false，`:on-pause` 声明式暂停 / 审批策略的 `:sensitive?` 对内联
   工具失效；观澜反馈）。
 - **OpenAI 兼容流式答案整段丢失**（qwen / 百炼兼容模式，2026-11-10 LiteGate 真机发现）：百炼每块同时带 `content` 与

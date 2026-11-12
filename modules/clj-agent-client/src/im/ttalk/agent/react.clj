@@ -58,14 +58,20 @@
 
 (defn- build-chat-opts
   "从 invoke/resume 的 opts 构建传给 invoke-chat 的 chat 选项
-   （system-prompt 合并 + 工具 schema 过滤 + tool-choice）。"
+   （system-prompt 合并 + 工具 schema 过滤 + tool-choice）。
+
+   `:chat-options`（map）原样并进**每一轮**的 chat 选项——思考档、温度这类单次选项
+   （`DefaultChatModel` 认 config ⊕ 单次选项）。循环自己管的那几格（`:tools` /
+   `:tool-choice` / `:system-prompt` / `:on-token` / `:cancel-token` / `:context`）
+   以循环为准，`:chat-options` 里同名的不生效（观澜反馈 2026-11-12 ④）。"
   [chat-client opts]
   (let [system-prompts (or (:system-prompts opts) [])
         sp-str (when (seq system-prompts)
                  (->> system-prompts (map :content) (clojure.string/join "\n")))
         tool-schemas (filter-tools-by-tags chat-client opts)
         tool-choice (or (:tool-choice opts) :auto)]
-    (cond-> {:tools tool-schemas :tool-choice tool-choice}
+    (cond-> (merge (dissoc (:chat-options opts) :context)
+                   {:tools tool-schemas :tool-choice tool-choice})
       sp-str (assoc :system-prompt sp-str)
       (:on-token opts) (assoc :on-token (:on-token opts))
       (:cancel-token opts) (assoc :cancel-token (:cancel-token opts)))))
@@ -146,6 +152,14 @@
   [chat-client tc decision tool-context on-tool-result]
   (cond
     (= :reject decision)
+    {:tc tc :value "已拒绝执行" :rejected? true}
+
+    ;; 宿主给了整句文案（resume 的 `:reject-note` 钩子）：原样交给模型
+    (and (map? decision) (contains? decision :reject) (string? (:text decision)))
+    {:tc tc :value (:text decision) :rejected? true}
+
+    ;; 无理由的拒绝（只是为了带上 :cancelled? 之类的标记才写成 map）
+    (and (map? decision) (contains? decision :reject) (nil? (:reject decision)))
     {:tc tc :value "已拒绝执行" :rejected? true}
 
     ;; 拒绝带理由：模型直接拿到原因，省一轮干猜
@@ -539,7 +553,7 @@
 
    `:pending-tool` 取**子 agent 里那把敏感工具**（不是委派工具本身）——用户要审批的
    是「子 agent 想做什么」，`SUBAGENT_STARTED` 那张卡片下面显示的也是它。"
-  [suspended batch-messages records remaining tctx]
+  [suspended batch-messages records remaining tctx transcript]
   (let [by-call (into {} (map (fn [e] [(:id (:tc e)) (:spawn-id (:data e))])) suspended)
         first-e (first suspended)]
     {:status :paused
@@ -550,7 +564,8 @@
                   :suspended-calls (mapv :tc suspended)
                   :by-call        by-call
                   :remaining      remaining
-                  :records        records}
+                  :records        records
+                  :transcript     transcript}
      :pending-tool (or (:pending-tool (:data first-e))
                        {:name (:name first-e) :args (:args (:tc first-e)) :tool-call (:tc first-e)})
      :tool-calls-made records
@@ -565,7 +580,7 @@
    它不走 `pause/strip-unserializable`（那只剥 tool-context），record 会让
    `sqlite-pause-store` 的 `pause-load` 抛而 in-memory 毫发无伤，即「单进程测试
    全绿、重启后 resume 崩」。护栏见 `pause-test/loop-state-edn-roundtrip-test`。"
-  [env-errors batch-messages records remaining tctx]
+  [env-errors batch-messages records remaining tctx transcript]
   {:status :paused
    :pause-reason (str "环境类错误，需人工介入: "
                       (clojure.string/join "; "
@@ -574,7 +589,8 @@
                 :batch-messages batch-messages
                 :failed-calls   (mapv :tc env-errors)
                 :remaining      remaining
-                :records        records}
+                :records        records
+                :transcript     transcript}
    :pending-tool (let [e (first env-errors)]
                    {:name (:name e) :args (:args (:tc e)) :tool-call (:tc e)})
    :tool-calls-made records
@@ -628,6 +644,46 @@
    没挂 memory filter → nil（此时工具结果本就不落库，直接返回也无需补）。"
   [chat-client]
   (some #(when (= :memory (:name %)) (:store %)) (:filters chat-client)))
+
+(declare response->assistant-message)
+
+(defn- pause-transcript
+  "暂停快照里随身带的那段对话（`:loop-state :transcript`，观澜反馈 2026-11-12 ③）：
+   **到 assistant(tool_calls) 为止**的完整历史，resume 拿它接上工具结果就能续跑，
+   不依赖 ChatMemory 还在不在。
+
+   - 没挂 memory filter：**恒带**——本轮 delta 就是全部上下文，不带的话 resume 只剩孤立的
+     工具结果（曾经如此：resume 后模型看不到用户的问题）；
+   - 挂了 memory filter：`:pause-transcript? true` 才带（取 store 里这一会话的历史，此刻已含
+     assistant(tool_calls)）。缺省不带——同进程续跑 memory 本来就在，没必要把整段对话塞进快照。"
+  [chat-client policy delta response tctx]
+  (if-let [store (chat-client-memory-store chat-client)]
+    (when (:pause-transcript? policy)
+      (when-let [cid (ctx/conversation-id tctx)]
+        (vec (memory/mem-get store cid))))
+    (conj (vec delta) (response->assistant-message response))))
+
+(defn- resume-delta
+  "resume 时把快照里的 `:transcript` 接回去，返回续跑第一轮的 delta：
+   - 没挂 memory：transcript ++ 工具结果（循环自己带完整对话，同 invoke）；
+   - 挂了 memory：store 里这一会话**是空的**（重启后 in-memory 丢了 / 换了实例）才用 transcript
+     回填，随后照常只送工具结果；store 里有东西就不动它（同进程续跑，以 store 为准）。
+   快照里没有 transcript（旧快照 / memory 下没开）→ 原样返回。"
+  [chat-client loop-state tctx msgs]
+  (if-let [t (seq (:transcript loop-state))]
+    (if-let [store (chat-client-memory-store chat-client)]
+      (let [cid (ctx/conversation-id tctx)]
+        (when (and cid (empty? (memory/mem-get store cid)))
+          (memory/mem-add store cid (mapv msg/normalize t)))
+        msgs)
+      (into (mapv msg/normalize t) msgs))
+    msgs))
+
+(defn- loop-policy
+  "工具循环的策略位：`:on-env-error`（缺省值随入口不同）+ `:pause-transcript?`。"
+  [opts default-env]
+  {:on-env-error (or (:on-env-error opts) default-env)
+   :pause-transcript? (boolean (:pause-transcript? opts))})
 
 (defn- response->assistant-message
   "把带 tool-calls 的响应还原成中立 assistant 消息。
@@ -832,7 +888,8 @@
                            :loop-state {:tool-calls calls :remaining (dec @remaining*)
                                         :records @records*
                                         :pending-id (:id paused-call)   ;; resume payload 定位用
-                                        :pending-ids (mapv :id paused-calls)}
+                                        :pending-ids (mapv :id paused-calls)
+                                        :transcript (pause-transcript chat-client policy delta response tctx)}
                            :pending-tool (pending paused-call)
                            :pending-tools (mapv pending paused-calls)
                            :tool-calls-made @records*
@@ -868,11 +925,13 @@
                           (cond
                             ;; 屏障处第一支：委派出去的子 agent 在等人答复
                             (seq suspended)
-                            (subagent-pause suspended messages records @remaining* context)
+                            (subagent-pause suspended messages records @remaining* context
+                                            (pause-transcript chat-client policy delta response context))
 
                             ;; 屏障处策略钩子：环境类失败 → 带一致快照暂停等人
                             (seq env-errors)
-                            (env-pause env-errors messages records @remaining* context)
+                            (env-pause env-errors messages records @remaining* context
+                                       (pause-transcript chat-client policy delta response context))
 
                             ;; 工具侧请求停回合（tool-guard / 拒绝熔断，§0 挂点 2）
                             (:loop/stop context)
@@ -986,7 +1045,7 @@
                                      (:tool-gate opts)
                                      (build-chat-opts chat-client opts)
                                      callbacks
-                                     {:on-env-error (or (:on-env-error opts) :proceed)})
+                                     (loop-policy opts :proceed))
                             (flt/fmap #(persist-direct-messages! % chat-client conv-id))))
         turn-chain ((:turn (flt/filter-hooks chat-client)) turn-terminal)]
     (emit-event! callbacks :turn/started {:resumed? false})
@@ -1011,9 +1070,13 @@
    - chat-client:   ChatClient 实例（需配置 ChatModel）
    - store:    ChatMemory store（与 chat-client 上 memory-filter 同一实例；用于 heal/临时清理）
    - messages: 本轮新消息（中立消息）。**没挂 memory filter** 时这就是全部上下文：循环自己把
-               每轮的 assistant(tool_calls) 与工具结果接在后面（完整 transcript）；暂停后的 resume
-               仍要靠 memory 拼历史（loop-state 里不存对话）
+               每轮的 assistant(tool_calls) 与工具结果接在后面（完整 transcript）；暂停时这段对话随
+               `:loop-state :transcript` 走，resume 不靠 memory
    - opts:     {:context :system-prompts :max-iterations :tool-choice :tool-gate :tags/:exclude-tags
+               :chat-options 原样并进每一轮 chat 选项的 map（思考档 / 温度…；循环自管的键不让）
+               :pause-transcript? 挂了 memory 时也把对话历史放进暂停快照（缺省 false）——
+                              resume 时 store 里这一会话是空的（重启后）就用它回填
+               :reject-note  resume 时人拒绝 / 取消的结果文案钩子（见 `resume`）
                :on-env-error :pause|:proceed（缺省 :proceed——环境类工具失败照常交给模型；
                               :pause 时在屏障处暂停等人，resume :retry/:proceed 续跑）
                :callbacks  回调 map（:on-llm-call/:on-llm-result/:on-tool-result/:metadata 等）}
@@ -1065,12 +1128,12 @@
 
    续跑之后还可能再次挂起（子 agent 一轮里连着两个敏感工具），那时照样落回同一个
    `subagent-pause`，人再答一次。"
-  [chat-client {:keys [batch-messages suspended-calls by-call remaining records]}
+  [chat-client {:keys [batch-messages suspended-calls by-call remaining records transcript] :as loop-state}
    decision opts run loop-fn]
   (let [tctx (or (:context opts) (ctx/create))
         gate (:tool-gate opts)
         callbacks (or (:callbacks opts) {})
-        policy {:on-env-error (or (:on-env-error opts) :pause)}
+        policy (loop-policy opts :pause)
         chat-opts (build-chat-opts chat-client opts)
         ;; 决定 + 对照表钉进 ToolContext，委派工具在 handler 里认它
         tctx (assoc tctx :subagent/resume {:decision decision
@@ -1096,8 +1159,9 @@
                   :suspended (filterv #(= :subagent-suspended (:class %)) errors)})))
         (flt/fbind (fn [{:keys [merged records context suspended]}]
                      (if (seq suspended)
-                       (subagent-pause suspended merged records remaining context)
-                       (loop-fn chat-client merged remaining records context
+                       (subagent-pause suspended merged records remaining context transcript)
+                       (loop-fn chat-client (resume-delta chat-client loop-state context merged)
+                                remaining records context
                                 gate chat-opts callbacks policy)))))))
 
 (defn- resume-env
@@ -1108,11 +1172,12 @@
 
    `run` / `loop-fn` 见 `invoke*`：重跑那一批是**阻塞**的工具执行，异步模式下
    进虚拟线程；随后的循环由 `loop-fn` 决定同步还是 deferred。"
-  [chat-client {:keys [batch-messages failed-calls remaining records]} decision opts run loop-fn]
+  [chat-client {:keys [batch-messages failed-calls remaining records transcript] :as loop-state}
+   decision opts run loop-fn]
   (let [tctx (or (:context opts) (ctx/create))
         gate (:tool-gate opts)
         callbacks (or (:callbacks opts) {})
-        policy {:on-env-error (or (:on-env-error opts) :pause)}
+        policy (loop-policy opts :pause)
         chat-opts (build-chat-opts chat-client opts)]
     (if (= :retry decision)
       (-> (run (fn []
@@ -1133,10 +1198,12 @@
                                   (filterv #(= :environment (:class %)) errors))})))
           (flt/fbind (fn [{:keys [merged records context env-errors]}]
                        (if (seq env-errors)
-                         (env-pause env-errors merged records remaining context)
-                         (loop-fn chat-client merged remaining records context
+                         (env-pause env-errors merged records remaining context transcript)
+                         (loop-fn chat-client (resume-delta chat-client loop-state context merged)
+                                  remaining records context
                                   gate chat-opts callbacks policy)))))
-      (loop-fn chat-client batch-messages remaining records tctx
+      (loop-fn chat-client (resume-delta chat-client loop-state tctx batch-messages)
+               remaining records tctx
                gate chat-opts callbacks policy))))
 
 (declare ^:private resume-approval resume-approval-batch)
@@ -1169,7 +1236,7 @@
                                   (:tool-gate opts)
                                   (build-chat-opts chat-client opts)
                                   (or (:callbacks opts) {})
-                                  {:on-env-error (or (:on-env-error opts) :proceed)}))
+                                  (loop-policy opts :proceed)))
                        ;; 延续与重入都可能撞上 return-direct 收尾
                        (flt/fmap #(persist-direct-messages! % chat-client (ctx/conversation-id tctx)))))
         turn-chain ((:turn (flt/filter-hooks chat-client)) terminal)]
@@ -1192,7 +1259,14 @@
    opts :payload（审批 phase 可选，携带用户答复）：
    - :approved + {:args 新参数}   → pending 工具以替换后的参数执行（编辑后批准）
    - :rejected + {:message 理由}  → 结果「已拒绝执行：<理由>」（模型直接拿到原因）
+                 payload（或逐件决定）带 `:cancelled? true` = 用户是**取消**而非拒绝（交给钩子区分）
    - :reply    + {:message 答复}  → 答复即 pending 工具的结果（必填）
+
+   opts :reject-note `(fn [{:keys [tool args call-id reason cancelled? expired?]}] 文本|nil)`：
+   人拒绝 / 取消时交给模型的那句由宿主写，nil 回落缺省「已拒绝执行[：理由]」。
+
+   快照带 `:transcript`（无 memory 恒带；有 memory 时 `:pause-transcript? true` 才带）时，
+   resume 不依赖 ChatMemory：无 memory 直接接上；有 memory 而 store 里这一会话为空则先回填。
 
    参数:
    - chat-client:     ChatClient 实例
@@ -1236,11 +1310,12 @@
                      (if (:loop/stop context)
                        ;; 续跑那一批里有工具请求停回合（失败保护 / 拒绝熔断）
                        (stop-result context messages records)
-                       (loop-fn chat-client messages remaining records context
+                       (loop-fn chat-client (resume-delta chat-client loop-state context messages)
+                                remaining records context
                                 gate
                                 (build-chat-opts chat-client opts)
                                 callbacks
-                                {:on-env-error (or (:on-env-error opts) :proceed)})))))))
+                                (loop-policy opts :proceed))))))))
 
 (defn- decision-kw
   "决定词归一：接受 keyword 或字符串（JSON 过来的是字符串）。"
@@ -1285,6 +1360,28 @@
           (throw (ex-info (str "resume :decisions 漏答了待审批调用：" (vec missing))
                           {:type :interrupt-incomplete :missing (vec missing) :pending (vec pending)})))))
     nil))
+
+(defn- with-reject-note
+  "resume 的 `:reject-note` 钩子（观澜反馈 2026-11-12 ②）：人拒绝 / 取消时交给模型的
+   那句工具结果由宿主写。缺省（不配）仍是「已拒绝执行[：理由]」。
+
+   钩子入参 `{:tool 名 :args 参数 :call-id id :reason 理由或nil :cancelled? bool :expired? bool}`，
+   返回字符串即用它，返回 nil 回落缺省文案。`:cancelled?` 来自 payload（顶层或逐件），
+   AG-UI 的 `resume[].status = cancelled` 由 server 置上；`:expired?` 是审批超时转的拒绝。
+   **只管 resume 时人的决定**——策略 `:forbid` 的拒绝不经它（「用户拒绝」与「策略禁止」是两种处境）。"
+  [gate note per payload]
+  (fn [tc]
+    (let [d (gate tc)]
+      (if (or (= :reject d) (and (map? d) (contains? d :reject)))
+        (let [pd (get per (:id tc))
+              src (if (map? pd) pd payload)
+              reason (when (map? d) (:reject d))
+              text (note {:tool (str (:name tc)) :args (:args tc) :call-id (:id tc)
+                          :reason reason
+                          :cancelled? (boolean (:cancelled? src))
+                          :expired? (boolean (:expired? payload))})]
+          (if (string? text) {:reject reason :text text} d))
+        d))))
 
 (defn- resume-approval-batch
   "审批延续的**阻塞段**：校验 payload、组 resume-gate、执行工具批次。
@@ -1347,6 +1444,9 @@
                 :reply {:reply m}
                 (if m {:reject m} :reject))
               (base-gate tc))))
+        resume-gate (if-let [note (:reject-note opts)]
+                      (with-reject-note resume-gate note per payload)
+                      resume-gate)
         response (response/make-response :tool-calls tool-calls)
         batch-opts {:gate resume-gate
                     :tool-context tctx

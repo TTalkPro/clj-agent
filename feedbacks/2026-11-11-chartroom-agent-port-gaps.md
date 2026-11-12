@@ -61,3 +61,20 @@ Keelson 的 FailureDisableAdvisor 把**业务失败**（reported：连续 5 次�
   （`MESSAGES_SNAPSHOT`），不依赖 RUN_FINISHED 之前的快照。接的过程中如果发现 clj-agent 的有状态协议缺什么（字段、事件次序、错误码），按缺口单独报，在 clj-agent 里补。
 - 测试：core 加了单次选项递到底（同步 / 异步、`:tool-choice :none`）、内联 `:sensitive`、两本账三组；client 原
   「无 memory 只带 assistant + tool」那条改成完整 transcript 的断言。全量 9 个模块 0 失败，`bb check-docs` 通过。
+
+
+## 观澜侧跟进（2026-11-12）
+
+升 clj-agent 0.5.456，逐条采纳（chartroom `tasks/AK-01.md` AK-13 节）：
+
+- **②** 已用：`chartroom.agent.agui.chat-agent` 删掉每趟现造的 `in-memory-store` 与 memory filter，`react/invoke` 的 store 传 nil。
+- **③** 已用：观澜三处内联工具（`tools.core/tool`、索引工具、MCP 投影）把 `:sensitive` 写进内联 map；判停仍由观澜的四档审批策略
+  （`tool.approval`）定，⛔ 交给库的 `:on-pause`（那是 C# 行为，不是补丁）。
+- **④** 已用：`:classify` 回 `:raised` / `:reported`，`:report-threshold 5`，`:report-note` 照 Keelson `af-stock/retry-note`
+  （结果写成「原报错 + 空行 + 提醒」——Keelson 是下一次请求的临时 note，这里换进结果，模型两样都看得见）；新增判据
+  `resilience-test/业务失败五次提醒别原样重试`。
+- **另（单次选项）**：一问一答已能递到底；判据的假模型认 A-19 摘要调用改回 C# 的「0.2 温度 + 一条 user」。⚠ 工具循环里每一轮的请求仍拿不到
+  任意单次选项（`react/build-chat-opts` 只拼几格）⇒ 思考档仍写模型 config，已单报 `2026-11-12-chartroom-stateful-agui-gaps.md` ④。
+- **①（有状态 runtime）**：评估后**这一刀没迁**——interrupt 的 `metadata.kind` 被 codec 写死（观澜的提问卡靠 `"question"`），不改前端做不到；
+  另有拒绝文案、续跑依赖 durable memory（观澜会话库只存正文，要新增项目内存储 = 布局变化，待作者拍板）两处。缺口单报
+  `2026-11-12-chartroom-stateful-agui-gaps.md`，库侧补齐后观澜再迁，届时删 `chartroom.agent.agui.{chat-agent,run,convert,events}`。

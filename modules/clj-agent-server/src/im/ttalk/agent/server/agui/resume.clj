@@ -33,9 +33,14 @@
 
 (defn resume-decision
   "AG-UI `resume[]` 条目 → `[decision payload]`。`status=cancelled` ⇒ 拒；`approved:false` 先于一切判；
-   批准 + `editedArgs` 对象 ⇒ `{:args editedArgs}`（整体替换）。⛔ 不把客户端载荷原样透传。"
+   批准 + `editedArgs` 对象 ⇒ `{:args editedArgs}`（整体替换）。⛔ 不把客户端载荷原样透传。
+   取消带 `:cancelled? true`——交给模型的那句「拒绝」还是「取消」由宿主的 `:reject-note` 分（缺省同一句）。"
   [{:keys [status payload]}]
-  (let [reject (fn [] (if-let [r (reason-of payload)] ["rejected" {:message r}] ["rejected" nil]))
+  (let [cancelled? (= "cancelled" status)
+        reject (fn [] (let [r (reason-of payload)]
+                        ["rejected" (cond-> nil
+                                      r          (assoc :message r)
+                                      cancelled? (assoc :cancelled? true))]))
         approve (fn [] (let [e (when (map? payload) (:editedArgs payload))]
                          (if (map? e) ["approved" {:args e}] ["approved" nil])))]
     (cond
@@ -75,7 +80,8 @@
     (let [[d p] (resume-decision entry)]
       (cond-> {:decision (keyword d)}
         (:args p) (assoc :args (:args p))
-        (:message p) (assoc :message (:message p))))
+        (:message p) (assoc :message (:message p))
+        (:cancelled? p) (assoc :cancelled? true)))
     {:decision :reply :message (frontend-reply entry nil)}))
 
 (defn- sep [] (:text (msg :agui-stock/list-separator)))
@@ -131,11 +137,14 @@
   [{:keys [runtime] :as entry} body]
   (let [server-tool-names (or (:server-tool-names entry) #{})
         input-transform (:input-transform entry)
-        {:keys [conversation-id message agui-tools context parent-run-id state]}
+        {:keys [conversation-id message agui-tools context parent-run-id state chat-options]}
         (cond-> (codec/parse-run-input body) input-transform (input-transform body))
+        ;; `:chat-options` 只能由宿主的 `:input-transform` 给（如按 forwardedProps 切思考档），
+        ;; ⛔ 不从客户端载荷直取——新 run 与续跑都带，进每一轮 chat 选项
         ctx-opts (cond-> nil
                    (codec/context->prompt context) (assoc :extra-system-prompts [(codec/context->prompt context)])
-                   parent-run-id (assoc :parent-run-id parent-run-id))
+                   parent-run-id (assoc :parent-run-id parent-run-id)
+                   (map? chat-options) (assoc :chat-options chat-options))
         pending (rt/awaiting runtime conversation-id)
         pending-name (get-in pending [:pending-tool :name])
         plan (resume-plan conversation-id (:resume body) pending server-tool-names)

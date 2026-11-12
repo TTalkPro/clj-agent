@@ -44,3 +44,10 @@ clj-agent 的 `retry/run` 只看 canonical error 的 `:retryable?`,而 provider 
 
 观澜侧：升级后可以删掉 `chartroom.llm.client/no-retry-on-rate-limit` 这层包装，provider config 写
 `:retry {:skip-types #{:rate-limit-error}}`，原生异步路径也回来了。
+
+
+## 观澜侧跟进（2026-11-12）
+
+已采纳（clj-agent 0.5.456）：`chartroom.llm.client/no-retry-on-rate-limit` 那层 provider 包装删掉，重试 config 写
+`:skip-types #{:rate-limit-error}`。判据 `client-test/rate-limit-is-not-retried` 照旧绿，并补了流式那条（建链 429 也只打一次）。
+不挂审计装饰的路径（摘要、测试、一问一答）原生异步回来了；Agent 层的审计装饰仍包 provider（`wrap-provider`），那条照旧走虚拟线程兜底。

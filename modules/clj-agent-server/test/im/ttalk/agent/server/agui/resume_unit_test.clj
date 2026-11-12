@@ -12,9 +12,9 @@
 
 (deftest resume-decision-test
   (let [rd resume/resume-decision]
-    (testing "cancelled → 拒绝，载荷文本当理由"
-      (is (= ["rejected" nil] (rd {:status "cancelled"})))
-      (is (= ["rejected" {:message "不要"}] (rd {:status "cancelled" :payload {:reason "不要"}}))))
+    (testing "cancelled → 拒绝，载荷文本当理由；带 :cancelled? 交给宿主的 :reject-note 分「取消」与「拒绝」"
+      (is (= ["rejected" {:cancelled? true}] (rd {:status "cancelled"})))
+      (is (= ["rejected" {:message "不要" :cancelled? true}] (rd {:status "cancelled" :payload {:reason "不要"}}))))
     (testing "⚠️ {approved:false} 不带 decision → 拒绝（从前被判成批准）"
       (is (= ["rejected" nil] (rd {:status "resolved" :payload {:approved false}})))
       (is (= ["rejected" nil] (rd {:status "resolved" :payload {:approved "false"}})))

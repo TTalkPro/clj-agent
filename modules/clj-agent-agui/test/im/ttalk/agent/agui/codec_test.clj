@@ -537,3 +537,28 @@
     (is (nil? (get-in (codec/run-info ["a"]) [:agents "a" :capabilities :humanInTheLoop :approveWithEdits])))
     (is (true? (get-in (codec/run-info ["a"] {:approve-with-edits? true})
                        [:agents "a" :capabilities :humanInTheLoop :approveWithEdits])))))
+
+(deftest interrupt-host-metadata-test
+  (testing "宿主在暂停里给的 :metadata 并进 Interrupt.metadata，:kind 以宿主为准（观澜反馈 2026-11-12 ①）"
+    (let [p (codec/->agui (assoc base :type :run/paused :reason "提问"
+                                 :pending-tool {:name "ask_user_question" :args {:q "选哪个"}
+                                                :tool-call {:id "tq"}
+                                                :approval {:metadata {:kind "question" :card "x"}}}))
+          m (:metadata (first (get-in p [:outcome :interrupts])))]
+      (is (= "question" (:kind m)))
+      (is (= "x" (:card m)))
+      (is (= {:name "ask_user_question" :args {:q "选哪个"}} (:pendingTool m)) "pendingTool 照补")))
+  (testing "多条暂停：每条用自己的宿主 metadata，没给的仍是 approval"
+    (let [p (codec/->agui (assoc base :type :run/paused :reason "x"
+                                 :pending-tool {:name "a" :tool-call {:id "t1"}}
+                                 :pending-tools [{:name "a" :tool-call {:id "t1"}
+                                                  :approval {:metadata {:kind "question"}}}
+                                                 {:name "b" :tool-call {:id "t2"}}]))
+          [i1 i2] (get-in p [:outcome :interrupts])]
+      (is (= "question" (get-in i1 [:metadata :kind])))
+      (is (= "approval" (get-in i2 [:metadata :kind])))))
+  (testing "宿主没给：与从前逐字相同"
+    (let [p (codec/->agui (assoc base :type :run/paused :reason "r"
+                                 :pending-tool {:name "refund" :args {} :tool-call {:id "t"}}))]
+      (is (= {:kind "approval" :pendingTool {:name "refund" :args {}}}
+             (:metadata (first (get-in p [:outcome :interrupts]))))))))

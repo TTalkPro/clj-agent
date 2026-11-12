@@ -292,7 +292,8 @@
   "策略 → react 的 `:tool-gate`：
    - allow  → `:proceed`
    - forbid → `{:reject 理由}`（不问，模型直接拿到原因）
-   - prompt → 会话缓存命中 `:proceed`，否则 `{:pause {:reason :allow-session? :key}}`
+   - prompt → 会话缓存命中 `:proceed`，否则 `{:pause {:reason :allow-session? :key :metadata?}}`
+             （策略决定里的 `:metadata` map 原样带上，AG-UI 并进 `Interrupt.metadata`）
              （react 暂停；`:key` 供 resume 时「本会话都批准」记账）
 
    opts: :policy（缺省 sensitive-policy）、:cache（`session-cache`，可选）"
@@ -307,7 +308,9 @@
         :prompt (if (and session? (approved? cache k))
                   :proceed
                   {:pause (cond-> {:allow-session? session? :key k}
-                            (:reason d) (assoc :reason (:reason d)))})
+                            (:reason d) (assoc :reason (:reason d))
+                            ;; 宿主自己的标签（如 {:kind "question"}），AG-UI 并进 Interrupt.metadata
+                            (map? (:metadata d)) (assoc :metadata (:metadata d)))})
         :proceed))))
 
 ;;; ============================================================

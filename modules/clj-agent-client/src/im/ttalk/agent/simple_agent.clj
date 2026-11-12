@@ -109,6 +109,13 @@
                     持久化，进程重启后同 conversation-id + 同 store 重建 agent
                     即可 resume（跨重启 HITL；对话历史请配 SQLite ChatMemory）
    - :conversation-id 会话 ID（可选）
+   - :chat-options  每一轮 chat 都并进去的单次选项 map（可选；chat / resume 的 opts 里同名键
+                    逐键覆盖它），见 `react/invoke`
+   - :pause-transcript? 暂停快照自带对话历史（可选，缺省 false）：配了 :pause-store 而
+                    ChatMemory 不持久时，重启后的 resume 靠它把历史回填进 store
+                    （:memory false 时快照恒带，不用配）
+   - :reject-note   (fn [{:keys [tool args call-id reason cancelled? expired?]}] 文本|nil)
+                    （可选）：resume 时人拒绝 / 取消交给模型的那句，nil 回落「已拒绝执行[：理由]」
    - :max-iterations 最大工具循环次数（默认 10）
    - :tool-context   装配期塞进 ToolContext 的种子 map（可选，见返回值注释）
    - :on-pause      (fn [{:keys [pending-tool reason]}])（可选）：**配置即启用
@@ -185,7 +192,8 @@
                                                   (when (:cache a) (:cache a))
                                                   (approval/session-cache)))
                           (:breaker a) (assoc :breaker-atom (approval/denial-breaker (:breaker a)))))
-     :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error :on-pause])}))
+     :settings        (select-keys opts [:system-prompt :max-iterations :on-env-error :on-pause
+                                         :reject-note :pause-transcript? :chat-options])}))
 
 ;;; ============================================================
 ;;; 内部辅助
@@ -277,6 +285,9 @@
                           (try (on-tool-call tool-name (:args tc))
                                (catch Throwable _ nil)))
               legacy (cond
+                       ;; 回调可带 `:metadata`（宿主标签，AG-UI 并进 Interrupt.metadata）
+                       (and (map? cb-result) (:interrupt cb-result) (map? (:metadata cb-result)))
+                       {:pause {:metadata (:metadata cb-result)}}
                        (and (map? cb-result) (:interrupt cb-result)) :pause
                        (and on-pause (sensitive-tool? agent tc))     :pause
                        :else                                          :proceed)
@@ -285,6 +296,7 @@
           (cond
             (and (map? policy) (contains? policy :reject)) policy
             (and (map? policy) (contains? policy :pause))  policy
+            (map? legacy)                                  legacy
             (= :pause legacy)                              :pause
             :else                                          policy))))))
 
@@ -460,13 +472,24 @@
    `:on-token` / `:cancel-token`，`chat-async` 没补，`resume-prep` 连 opts 位都没有。
    于是异步入口不能流式也不能取消，HITL 第二段（审批后的续跑，往往正是最终答案）
    两样都没有。加键时往这里加，别再各补各的。"
-  [:on-token :cancel-token])
+  [:on-token :cancel-token :chat-options])
 
 (defn- passthrough
   "把 `loop-passthrough-keys` 里**实际出现**的键并进 loop opts（nil 不覆盖）。"
   [loop-opts opts]
   (reduce (fn [m k] (if (some? (get opts k)) (assoc m k (get opts k)) m))
           loop-opts loop-passthrough-keys))
+
+(defn- with-settings
+  "`passthrough` + agent 装配期的循环设置：`:pause-transcript?` / `:reject-note` 照抄；
+   `:chat-options` 是装配期 ⊕ 本次（本次逐键覆盖）。"
+  [loop-opts agent opts]
+  (let [st (:settings agent)
+        co (merge (:chat-options st) (:chat-options opts))]
+    (cond-> (passthrough loop-opts opts)
+      (:pause-transcript? st) (assoc :pause-transcript? true)
+      (:reject-note st)       (assoc :reject-note (:reject-note st))
+      (seq co)                (assoc :chat-options co))))
 
 (defn- build-invoke-opts
   "构建传给 agent-loop/invoke 的 opts，含 callbacks（带 metadata）。"
@@ -483,7 +506,7 @@
                                      default-max-iterations)}
           (:tool-choice opts) (assoc :tool-choice (:tool-choice opts))
           (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))
-        (passthrough opts))))
+        (with-settings agent opts))))
 
 ;;; ============================================================
 ;;; 公开 API
@@ -554,7 +577,7 @@
         expired? (and timeout-ms (:paused-at paused)
                       (> (- (System/currentTimeMillis) (:paused-at paused)) timeout-ms))
         [loop-decision payload] (if expired?
-                                  [:rejected {:message "审批超时"}]
+                                  [:rejected {:message "审批超时" :expired? true}]
                                   [loop-decision payload])
         pendings (or (:pending-tools paused) (when (:pending-tool paused) [(:pending-tool paused)]))
         per (into {} (map (fn [[k v]] [(if (keyword? k) (name k) (str k)) v])) (:decisions payload))
@@ -631,7 +654,7 @@
                         :callbacks (assoc callbacks :metadata meta)}
                  payload (assoc :payload payload)
                  (sys-prompts agent opts) (assoc :system-prompts (sys-prompts agent opts)))
-               (passthrough opts))}))
+               (with-settings agent opts))}))
 
 (defn- breaker-stop-result
   "拒绝熔断跳闸：这次 resume 不再续跑，直接以 :completed 收尾。暂停那批工具调用在历史里
