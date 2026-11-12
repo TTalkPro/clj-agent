@@ -219,18 +219,54 @@
   opts)
 
 (defn deploy
-  "推 Clojars。deps-deploy 不认 *project-root*，故路径显式 resolve 成含模块前缀的形式。"
+  "推 Clojars。deps-deploy 不认 *project-root*，故路径显式 resolve 成含模块前缀的形式。
+
+   单个模块失败不阻断其余模块，跑完再汇总：
+   - Clojars 403「redeploying non-snapshots is not allowed」说明该模块当前版本
+     已在远端，视为跳过而非失败（重跑 resume 场景下这是正常路径）；
+   - 其余异常记为失败，最后整体抛错，让退出码如实反映本次 deploy 未全绿。"
   [opts]
-  (run-modules!
-   opts "deploy"
-   (fn [{:keys [lib] :as m}]
-     (dd/deploy (merge {:installer :remote
-                        :artifact (str (b/resolve-path (jar-file m)))
-                        :pom-file (str (b/pom-path {:class-dir class-dir
-                                                    :lib lib
-                                                    :version version}))}
-                       (dissoc opts :module)))))
-  opts)
+  (let [targets (select opts)
+        ok (atom [])
+        skipped (atom [])
+        failed (atom [])]
+    (doseq [m targets]
+      (println (format "[deploy] %s %s" (:lib m) version))
+      (try
+        (b/set-project-root! (:dir m))
+        (dd/deploy (merge {:installer :remote
+                           :artifact (str (b/resolve-path (jar-file m)))
+                           :pom-file (str (b/pom-path {:class-dir class-dir
+                                                       :lib (:lib m)
+                                                       :version version}))}
+                          (dissoc opts :module)))
+        (swap! ok conj (:lib m))
+        (catch Exception e
+          (if (str/includes? (or (ex-message e) "")
+                             "redeploying non-snapshots is not allowed")
+            (do (println (format "↷ %s %s 已在远端，跳过（redeploy 非快照被 Clojars 拒绝）"
+                                 (:lib m) version))
+                (swap! skipped conj (:lib m)))
+            (do (println (format "✗ %s deploy failed：%s" (:lib m) (ex-message e)))
+                (swap! failed conj [(:lib m) e]))))
+        (finally (b/set-project-root! "."))))
+    (when (seq @failed)
+      (println)
+      (println (format "✓ 已推送：%s"
+                       (str/join " " @ok)))
+      (when (seq @skipped)
+        (println (format "↷ 已在远端跳过：%s" (str/join " " @skipped))))
+      (println (format "✗ 失败：%s"
+                       (str/join " " (map first @failed))))
+      (throw (ex-info (format "%d/%d 个模块 deploy 失败"
+                              (count @failed) (count targets))
+                      {:failed (map first @failed) :deployed @ok :skipped @skipped})))
+    (println (format "✓ 已推送 %d 个模块%s" (count @ok)
+                     (if (seq @skipped)
+                       (format "，另有 %d 个已在远端跳过：%s"
+                               (count @skipped) (str/join " " @skipped))
+                       "")))
+    opts))
 
 (defn release
   "发布前的完整本地流程。
