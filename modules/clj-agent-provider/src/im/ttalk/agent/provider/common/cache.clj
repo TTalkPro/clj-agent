@@ -24,7 +24,7 @@
    :tools             仅缓存工具定义
    :system-and-tools  缓存 system + tools（两个 breakpoint）
    :conversation      缓存到\"当前用户问题之前\"的对话历史
-                      （标记最后一条消息的最后一个内容块）
+                      （标记最后一条消息的最后一个内容块；`:cache-tail-skip n` ⇒ 往前挪 n 条）
    :tool-results      缓存到最后一个 tool_result（多轮工具循环里跨轮复用工具结果，
                       标记 messages 中最后一个 type=tool_result 的内容块）
    :system-and-conversation  同时缓存 system 与对话历史（两个 breakpoint）
@@ -136,12 +136,13 @@
     :else nil))
 
 (defn- cache-conversation
-  "缓存对话历史：标记最后一条消息的最后一个内容块"
-  [params cc]
-  (let [msgs (vec (:messages params))]
-    (if (seq msgs)
-      (let [idx (dec (count msgs))
-            m (nth msgs idx)
+  "缓存对话历史：标记倒数第 tail-skip+1 条消息的最后一个内容块（tail-skip 缺省 0 = 最后一条）。
+   条数不够（下标 < 0）⇒ 不打——**不回落到最后一条**：要避开的正是那一条（每次都变的尾巴）。"
+  [params cc tail-skip]
+  (let [msgs (vec (:messages params))
+        idx (- (count msgs) 1 (long (or tail-skip 0)))]
+    (if (and (seq msgs) (>= idx 0))
+      (let [m (nth msgs idx)
             blocks (message-content->blocks (:content m))]
         (if blocks
           (assoc params :messages
@@ -252,15 +253,24 @@
                | :tool-results | :system-and-conversation
    - ttl:      nil（5 分钟）| \"1h\"（1 小时）——所有断点同档；
                或按断点给档的 map {:tools .. :system .. :conversation .. :tool-results ..}
+   - opts:     {:tail-skip n}（config 的 `:cache-tail-skip`）：对话断点往前挪 n 条，打在倒数第 n+1 条上
+               （缺省 0 = 最后一条）；条数不够 ⇒ 对话断点不打。用于「前面几条不变、最后一条每次都变」
+               的请求（续写：前文 / 上次应答 / 正在写的一段 ⇒ n = 1），断点打在最后一条那里下次就不是块边界、
+               缓存 0 命中（同 Keelson AnthropicChatClient.CacheTailSkipKey）。只影响 :conversation 那个断点
 
    返回: 注入 cache_control 后的 params
 
    说明:
    - :none 或未知策略 -> 原样返回。
    - ttl 次序非法 / map 含未知键 -> 抛 ex-info（:type :invalid-cache-ttl），见 validate-ttl!。
+   - tail-skip 不是非负整数 -> 抛 ex-info（:type :invalid-cache-tail-skip）。
    - 注入后若断点数超过 4 会记到 meta，但不抛错（交由服务端校验 / 上层处理）。"
-  ([params strategy] (apply-anthropic-cache params strategy nil))
-  ([params strategy ttl]
+  ([params strategy] (apply-anthropic-cache params strategy nil nil))
+  ([params strategy ttl] (apply-anthropic-cache params strategy ttl nil))
+  ([params strategy ttl {:keys [tail-skip]}]
+   (when-not (or (nil? tail-skip) (and (integer? tail-skip) (not (neg? tail-skip))))
+     (throw (ex-info (str ":cache-tail-skip 必须是非负整数，实为 " (pr-str tail-skip))
+                     {:type :invalid-cache-tail-skip :cache-tail-skip tail-skip})))
    (if (or (nil? strategy) (= :none strategy))
      params
      (let [_ (validate-ttl! strategy ttl)
@@ -269,11 +279,11 @@
                     :system           (cache-system params (cc :system))
                     :tools            (cache-tools params (cc :tools))
                     :system-and-tools (-> params (cache-tools (cc :tools)) (cache-system (cc :system)))
-                    :conversation     (cache-conversation params (cc :conversation))
+                    :conversation     (cache-conversation params (cc :conversation) tail-skip)
                     :tool-results     (cache-tool-results params (cc :tool-results))
                     :system-and-conversation (-> params
                                                  (cache-system (cc :system))
-                                                 (cache-conversation (cc :conversation)))
+                                                 (cache-conversation (cc :conversation) tail-skip))
                     ;; 未知策略：原样
                     params)
            n (count-breakpoints result)]

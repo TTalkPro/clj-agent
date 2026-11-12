@@ -34,7 +34,7 @@ Keelson 的 FailureDisableAdvisor 把**业务失败**（reported：连续 5 次�
 
 ## clj-agent 回复（2026-11-12，未提交）
 
-②③④ 与「另」已修；① 待定（见下）。
+②③④ 与「另」已修；① 不照做：clj-agent 坚持有状态续跑，请观澜像锦书一样接它（见下）。
 
 - **② 不挂 memory 时带完整对话**：`react/invoke` 没有 memory filter 时，第二轮起请求 = 本轮发出的消息（不含临时提醒）
   + assistant(tool_calls) + 工具结果；pause_turn 续跑同理。观澜不必再为每个 run 现造 `in-memory-store`。
@@ -49,8 +49,15 @@ Keelson 的 FailureDisableAdvisor 把**业务失败**（reported：连续 5 次�
 - **另（单次 `:temperature` 等被丢）**：`DefaultChatModel` 的 `build-call-config` 改成 config ⊕ 单次选项，ChatModel 自己的键
   （`chat-model/non-wire-option-keys`：`:retry`、重试钩子、`:admission`、`:cancel-token`、`:on-token`）不下发；同步 / 异步 /
   流式同一处。观澜判 A-19 摘要调用不必再靠提示词。
-- **① 无状态续跑的 AG-UI agent**：待定，还没动。它是 clj-agent-agui 里新加一种 agent 形态（`tc:` 前缀 interrupt id、判停时
-  先 MESSAGES_SNAPSHOT、按 messages 推未决调用、四个 INTERRUPT_* 错误码），与现有有状态暂停并存。观澜那份移植
-  （`chartroom.agent.agui.*`）是现成参照。
+- **① 无状态续跑的 AG-UI agent：不做，clj-agent 保持有状态**。理由：
+  - 续跑要接上的不只是对话：剩余轮数、已调用记录、tool-guard 计数、工具上下文都在暂停快照里；无状态续跑只能从
+    messages 推「哪几件没办」，其余全部从零开始。
+  - 以服务端为准：续跑不依赖前端带回来的历史是否完整、是否被改过。
+  - 重启不丢：暂停快照经 `PauseStore` 挂点落盘即可（观澜已有 Bitcask，Keelson 的 `clj-bitcask-agent` 有现成的 PauseStore）。
+
+  **请观澜像锦书一样，直接接 clj-agent-agui 的有状态 runtime**，删掉 `chartroom.agent.agui.{chat-agent,run,convert,events}`
+  这份自维护的 Keelson 移植，不再两套并行。前端侧要改的：interrupt id 按 clj-agent 发的原样回送（裸 tool-call id，不拼
+  `tc:`）；续跑的请求体里服务端只读 `resume[]` 与最后一条 user 消息（历史在服务端），前端要对齐历史走 `connect`
+  （`MESSAGES_SNAPSHOT`），不依赖 RUN_FINISHED 之前的快照。接的过程中如果发现 clj-agent 的有状态协议缺什么（字段、事件次序、错误码），按缺口单独报，在 clj-agent 里补。
 - 测试：core 加了单次选项递到底（同步 / 异步、`:tool-choice :none`）、内联 `:sensitive`、两本账三组；client 原
   「无 memory 只带 assistant + tool」那条改成完整 transcript 的断言。全量 9 个模块 0 失败，`bb check-docs` 通过。

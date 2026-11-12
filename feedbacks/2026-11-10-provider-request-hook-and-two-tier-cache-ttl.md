@@ -163,10 +163,15 @@ MiniMax 真机实测第二次起读到 1731 / 1750 token。
 config 里加一格(比如 `:cache-tail-skip n`,缺省 0):对话断点打在倒数第 n+1 条;n 超出 ⇒ 不打(别回落到最后一条,那正是要避开的)。
 它属于「每次调用变」的一类(只有三条消息时才挪),所以也依赖 ③ 能递到底。
 
-## clj-agent 回复（2026-11-12，未提交）：③ 已修，④ 待定
+## clj-agent 回复（2026-11-12，未提交）：③ ④ 已修
 
 - **③**：`build-call-config` 改成 config ⊕ 单次选项（`req/wire-options`），`:tools` / `:tool-choice` / `:system-prompt` 的特殊处理
   保留在合并之后；ChatModel 自己的键（`chat-model/non-wire-option-keys`：`:retry`、`:on-retry` / `:sleep-fn` / `:rand-fn`、
   `:admission`、`:cancel-token`、`:on-token`）不下发。`call` / `stream-call` / 两条异步路径同一处。单次 `:retry` 照旧走
   `retry/resolve-opts` 的三级合并。锦书可以不再每轮现造 ChatModel。
-- **④**（`:cache-tail-skip`）：还没做。
+- **④**：按建议加了 `:cache-tail-skip n`（缺省 0）。对话断点打在倒数第 n+1 条消息上；条数不够 ⇒ 对话断点不打
+  （不回落到最后一条），system / tools 断点照打；不是非负整数 ⇒ 当场抛 `:invalid-cache-tail-skip`。
+  `:conversation` 与 `:system-and-conversation` 两种策略都认，可与按断点 TTL 同用。配合 ③，可以单次给
+  （只在续写那类三条消息的请求上传 `{:cache-tail-skip 1}`）。
+  测试：cache_test 加一组（挪位 / 缺省同旧 / 条数不够 / 与 TTL 同用 / 非法值），request_hook_test 加一条线上请求体断言
+  （MiniMax /anthropic 形态：断点落在应答上，最后一条不带）。锦书的 `^:pending-upstream` 判据升级后可以去掉标记。

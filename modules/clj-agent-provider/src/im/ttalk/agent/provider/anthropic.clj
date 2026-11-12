@@ -18,7 +18,7 @@
    - :metadata、:service-tier（\"auto\" | \"standard_only\"，容量路由）
    - 工具：:tools（含 web_search 等 wire 工具）、:tool-choice
    - 缓存：:cache-strategy + :cache-ttl（见下；可按断点给档 {:system \"1h\" :conversation nil}，
-     用到 \"1h\" 自动并入 beta extended-cache-ttl-2025-04-11）
+     用到 \"1h\" 自动并入 beta extended-cache-ttl-2025-04-11）+ :cache-tail-skip（对话断点往前挪 n 条）
    - 宿主钩子：:configure-request（(fn [payload] payload')，发出前最后改一次请求体，
      见 common.request-hook）
 
@@ -365,6 +365,7 @@
      - 工具：:tool-choice :tools（预置 schema）
      - 系统提示：:system-prompt
      - 缓存：:cache-strategy（见 cache 命名空间）:cache-ttl（标量或按断点给档的 map）
+       :cache-tail-skip（对话断点往前挪几条，缺省 0；可单次给）
      - Skills（beta）：:container（如 {:skills [...]}，需配合 config :beta 头）
    - messages:     消息列表（Anthropic wire 形态）
    - tool-schemas: 工具 schema 列表
@@ -373,7 +374,7 @@
    API 参数 map（已按 cache-strategy 注入 cache_control）"
   [{:keys [model max-tokens system-prompt tool-choice tools
            temperature top-p top-k stop metadata thinking service-tier container
-           cache-strategy cache-ttl] :as config} messages tool-schemas]
+           cache-strategy cache-ttl cache-tail-skip] :as config} messages tool-schemas]
   (let [all-tools (merge-tools tools tool-schemas)
         max-tokens (or max-tokens 4096)
         params (cond-> {:model model
@@ -395,7 +396,7 @@
         ;; 统一思考档位（:thinking-effort / :thinking-enabled / :thinking-budget-tokens；
         ;; 显式 :thinking 优先，见 common.thinking）
         params (thinking/merge-output-config params (thinking/anthropic-fields config))]
-    (cache/apply-anthropic-cache params cache-strategy cache-ttl)))
+    (cache/apply-anthropic-cache params cache-strategy cache-ttl {:tail-skip cache-tail-skip})))
 
 (defn- request-body
   "发出前的**最终请求体**：build-params（含缓存断点）→ 流式补 `:stream true` →

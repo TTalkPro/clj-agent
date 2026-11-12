@@ -157,6 +157,23 @@
     (testing "anthropic-beta 自动含 extended-cache-ttl-2025-04-11"
       (is (str/includes? (get headers "anthropic-beta" "") "extended-cache-ttl-2025-04-11")))))
 
+(deftest anthropic-cache-tail-skip-on-the-wire-test
+  ;; 锦书反馈 2026-11-10 ④：幽灵续写 [前文, 应答, 正在写的一段] ⇒ :cache-tail-skip 1，断点落在应答上
+  (let [cfg {:model "MiniMax-M3" :api-key "k" :auth-scheme :bearer
+             :base-url "https://api.minimaxi.com/anthropic"
+             :cache-strategy :conversation
+             :cache-tail-skip 1}
+        [{:keys [body]}]
+        (capturing ok-anthropic
+          (anthropic/call-anthropic cfg [{:role "user" :content "前文"}
+                                         {:role "assistant" :content "应答"}
+                                         {:role "user" :content "正在写的一段"}] []))
+        [m0 m1 m2] (:messages body)]
+    (is (= {:type "ephemeral"} (-> m1 :content last :cache_control)))
+    (is (not (str/includes? (pr-str m2) "cache_control")) "最后一条不打")
+    (is (not (str/includes? (pr-str m0) "cache_control")))
+    (is (= 1 (count-cache-controls body)))))
+
 (deftest anthropic-beta-merge-test
   (testing "用户 :beta 保留并去重"
     (let [[{:keys [headers]}]

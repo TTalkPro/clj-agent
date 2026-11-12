@@ -46,6 +46,8 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 - `tool-guard-filter` 分两本账（同 Keelson FailureDisableAdvisor）：`:classify` 可回 `:raised`（系统错误，计入门禁，
   同旧 `:failure`）与 `:reported`（业务失败，只记「任意失败」、不进门禁），新增 `:report-threshold`（缺省 5：连续任意
   失败到 n 次、碰上业务失败时换成「别原样重试」提醒，然后清零）与 `:report-note`。缺省 classify 不变（观澜反馈）。
+- Anthropic 缓存新增 `:cache-tail-skip n`（缺省 0）：对话断点打在倒数第 n+1 条消息上，条数不够则不打（不回落到最后一条）。
+  给「前面几条不变、最后一条每次都变」的请求用（续写：n = 1），同 Keelson `CacheTailSkipKey`；可单次给（锦书反馈 ④）。
 
 ### ⚠️ 缺省行为变化
 

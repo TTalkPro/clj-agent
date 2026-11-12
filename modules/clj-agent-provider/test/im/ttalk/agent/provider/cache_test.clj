@@ -63,6 +63,39 @@
       ;; 前面的消息不受影响
       (is (= "你好" (:content (first (:messages r))))))))
 
+(deftest conversation-tail-skip-test
+  ;; 锦书反馈 2026-11-10 ④：续写 [前文, 应答, 正在写的一段] ⇒ 断点打在倒数第二条
+  (testing "tail-skip 1：断点在倒数第二条，最后一条不动"
+    (let [r (cache/apply-anthropic-cache base-params :conversation nil {:tail-skip 1})
+          [m0 m1 m2] (:messages r)]
+      (is (= "你好" (:content m0)))
+      (is (= {:type "text" :text "在的" :cache_control {:type "ephemeral"}} (last (:content m1))))
+      (is (= "现在几点" (:content m2)))
+      (is (= 1 (cache/breakpoint-count r)))))
+  (testing "tail-skip 0 / nil 同旧行为"
+    (is (= (cache/apply-anthropic-cache base-params :conversation)
+           (cache/apply-anthropic-cache base-params :conversation nil {:tail-skip 0})
+           (cache/apply-anthropic-cache base-params :conversation nil nil))))
+  (testing "条数不够 ⇒ 对话断点不打（不回落到最后一条）；system 断点照打"
+    (let [r (cache/apply-anthropic-cache base-params :conversation nil {:tail-skip 3})]
+      (is (= (:messages base-params) (:messages r)))
+      (is (zero? (cache/breakpoint-count r))))
+    (let [r (cache/apply-anthropic-cache base-params :system-and-conversation nil {:tail-skip 5})]
+      (is (= 1 (cache/breakpoint-count r)))
+      (is (vector? (:system r)))))
+  (testing "与 :system-and-conversation、按断点 TTL 同用"
+    (let [r (cache/apply-anthropic-cache base-params :system-and-conversation
+                                         {:system "1h" :conversation nil} {:tail-skip 1})]
+      (is (= {:type "ephemeral" :ttl "1h"} (:cache_control (last (:system r)))))
+      (is (= {:type "ephemeral"} (:cache_control (last (:content (second (:messages r)))))))))
+  (testing "非法值当场抛"
+    (doseq [bad [-1 "1" 1.5]]
+      (is (= :invalid-cache-tail-skip
+             (:type (ex-data (try (cache/apply-anthropic-cache base-params :conversation nil {:tail-skip bad})
+                                  nil
+                                  (catch clojure.lang.ExceptionInfo e e)))))
+          (pr-str bad)))))
+
 (deftest ttl-test
   (testing "ttl 透传到 cache_control"
     (let [r (cache/apply-anthropic-cache base-params :system "1h")]
