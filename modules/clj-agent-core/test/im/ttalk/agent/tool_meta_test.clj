@@ -144,7 +144,11 @@
     (let [fd (:func-def (registry/tool-meta (k-with (inline-tool "inl")) :inl))]
       (is (= :inl (:name fd)))
       (is (false? (:sensitive fd)))
-      (is (nil? (:schema fd))))))
+      (is (nil? (:schema fd)))))
+
+  (testing "内联 map 的 :sensitive 汇进 func-def（观澜反馈 2026-11-11 ③）"
+    (let [fd (:func-def (registry/tool-meta (k-with (inline-tool "danger" :sensitive true)) :danger))]
+      (is (true? (:sensitive fd))))))
 
 ;;; ============================================================
 ;;; 装配期校验先于归一化

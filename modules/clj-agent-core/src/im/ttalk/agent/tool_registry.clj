@@ -80,12 +80,14 @@
    **var 工具与内联工具共用本函数**——曾经两个构造点分头维护，正是 `:timeout`
    对内联工具静默失效的根因（`:serial`/`:retry`/`:return-direct` 都有 inline
    分支，独 `:timeout` 漏了）。新增字段请只加在这里。"
-  [fn-name tool-var]
+  [fn-name tool-var inline]
   ;; 超时不在此列：它由 terminal 在 filter 链**之内**强制（只包裹工具本体，
   ;; 不包裹 filter 链——R1: 审批等待不再吃掉超时预算）。
+  ;; :sensitive 两个来源：var 的 `:tool/sensitive` 元数据 / 内联 map 自己的 `:sensitive`
+  ;; （曾经只看 var，内联工具恒为 false，`:on-pause` 的声明式暂停对它失效——观澜反馈 2026-11-11 ③）。
   {:name      fn-name
    :schema    (when tool-var (:tool/schema (meta tool-var)))
-   :sensitive (boolean (when tool-var (:tool/sensitive (meta tool-var))))})
+   :sensitive (boolean (if tool-var (:tool/sensitive (meta tool-var)) (:sensitive inline)))})
 
 ;;; ------------------------------------------------------------
 ;;; ToolMeta：一个工具的全部装配期声明，一张表答完
@@ -109,7 +111,7 @@
 (defn- var-tool-meta
   "var 工具的声明取自 `:tool/*` 元数据。"
   [fn-key v]
-  (->ToolMeta (build-func-def fn-key v)
+  (->ToolMeta (build-func-def fn-key v nil)
               (tool/serial-tool? v)
               (normalize-retry (tool/retry-spec v))
               (tool/timeout-spec v)
@@ -118,7 +120,7 @@
 (defn- inline-tool-meta
   "内联工具（delegate-tool 等动态构建）的声明取自其 map 自身的同名键。"
   [fn-key t]
-  (->ToolMeta (build-func-def fn-key nil)
+  (->ToolMeta (build-func-def fn-key nil t)
               (boolean (:serial t))
               (normalize-retry (:retry t))
               (:timeout t)
