@@ -4,6 +4,9 @@ Clojure AI Agent Framework - ChatClient Central Orchestrator
 
 English | [中文](README.md)
 
+English user documentation: [`docs/en/README.md`](docs/en/README.md) ·
+English API reference: [`docs/en/api/README.md`](docs/en/api/README.md)
+
 ## Overview
 
 `clj-agent` is a Clojure AI Agent framework providing a complete solution from simple conversations to tool-calling agents:
@@ -84,6 +87,23 @@ clj-agent/
 ├── build.clj              # Build/release for every module (tools.build)
 └── deps.edn               # Root Dependency Configuration
 ```
+
+## Documentation Directory
+
+The English documentation map follows a module-oriented structure:
+
+| Document | Contents |
+|---|---|
+| [Introduction](docs/en/README.md#introduction) | Architecture and first example |
+| [API directory](docs/en/api/README.md) | API reference index and reading order |
+| [Core API](docs/en/api/core.md) | ChatClient, ChatModel, tools, filters, neutral data |
+| [Client API](docs/en/api/client.md) | SimpleAgent, ReAct, memory, HITL, subagents |
+| [Provider API](docs/en/api/provider.md) | Provider factories and supported adapters |
+| [AG-UI API](docs/en/api/agui.md) | Detached runs and reconnectable event streams |
+| [MCP API](docs/en/api/mcp.md) | MCP clients, servers, transports, tools |
+| [Server API](docs/en/api/server.md) | Ring routes, SSE, security, Jetty host |
+| [Tools and HTTP](docs/en/api/tools-and-http.md) | Workspace tools and standalone HTTP client |
+| [Design documents](docs/README.md) | Design records and implementation notes |
 
 ## Quick Start
 

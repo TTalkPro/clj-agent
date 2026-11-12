@@ -83,6 +83,15 @@
 
 (def ^:private doc-files
   ["README.md" "README_EN.md" "modules/README.md"
+   "docs/en/README.md"
+   "docs/en/api/README.md"
+   "docs/en/api/core.md"
+   "docs/en/api/client.md"
+   "docs/en/api/provider.md"
+   "docs/en/api/agui.md"
+   "docs/en/api/mcp.md"
+   "docs/en/api/server.md"
+   "docs/en/api/tools-and-http.md"
    "modules/clj-agent-core/README.md"
    "modules/clj-agent-client/README.md"
    "modules/clj-agent-provider/README.md"
