@@ -85,6 +85,45 @@
       (is (str/includes? (:value r4) "本回合已停用"))
       (is (= 4 @calls)))))
 
+(deftest reported-vs-raised-test
+  ;; 观澜反馈 2026-11-11 ④：业务失败（:reported）与系统错误（:raised）两本账（同 Keelson FailureDisableAdvisor）
+  (let [calls (atom 0)
+        classify (fn [_ resp]
+                   (cond (:error resp) :raised
+                         (= "业务失败" (:result resp)) :reported
+                         :else :success))
+        c (cc/build-chat-client {:chat-model {:chat-fn (fn [_ _] nil)}
+                                 :tools [{:name "svc" :description "后端" :input_schema {:type "object"}
+                                          :handler (fn [args _] (swap! calls inc)
+                                                     (case (:mode args)
+                                                       "boom" (throw (ex-info "503" {}))
+                                                       "biz" "业务失败"
+                                                       "ok"))}]
+                                 :filters [(tg/tool-guard-filter :repeat-limit 0 :classify classify)]})
+        step (fn [[_ ctx] args] (call c ctx :svc args))]
+    (testing "业务失败不进门禁：连续 6 次（不同参数）都执行；第 5 次换成提醒，之后清零重数"
+      (let [rs (rest (reductions step [nil {}] (map (fn [i] {:mode "biz" :i i}) (range 6))))
+            vals (mapv (comp :value first) rs)]
+        (is (= 6 @calls))
+        (is (every? #(= "业务失败" %) (take 4 vals)))
+        (is (str/includes? (nth vals 4) "已连续失败 5 次"))
+        (is (str/includes? (nth vals 4) "不要原样重试"))
+        (is (= "业务失败" (nth vals 5)) "提醒后这本账清零")
+        (is (zero? (long (get-in (second (last rs)) [:tool-guard/state :fails "svc"] 0)))
+            "业务失败不记门禁那本账")))
+    (testing "系统错误照旧：连续 3 次 ⇒ 门禁拒绝"
+      (reset! calls 0)
+      (let [rs (rest (reductions step [nil {}] (map (fn [i] {:mode "boom" :i i}) (range 4))))]
+        (is (str/starts-with? (:value (first (last rs))) "已拒绝执行"))
+        (is (= 3 @calls))))
+    (testing "成功两本账都清零"
+      (let [[_ c1] (call c {} :svc {:mode "biz"})
+            [_ c2] (call c c1 :svc {:mode "boom"})
+            [_ c3] (call c c2 :svc {:mode "ok"})]
+        (is (= 2 (get-in c2 [:tool-guard/state :any "svc"])))
+        (is (= 0 (get-in c3 [:tool-guard/state :any "svc"])))
+        (is (= 0 (get-in c3 [:tool-guard/state :fails "svc"])))))))
+
 ;;; ------------------------------------------------------------ R-09 completion gate
 
 (defn- turn-run [f results]
