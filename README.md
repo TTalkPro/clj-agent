@@ -4,11 +4,17 @@ Clojure AI Agent Framework - ChatClient 中央编排器
 
 [English](README_EN.md) | 中文
 
+Clojars 发布组：**[im.ttalk](https://clojars.org/groups/im.ttalk)** —— 全部模块以 `im.ttalk/<模块名>` 坐标发布。
+
 ## 目录
 
+- [项目目标](#项目目标)
 - [项目概述](#项目概述)
 - [架构概览](#架构概览)
 - [模块结构](#模块结构)
+- [安装](#安装)
+- [API 文档](#api-文档)
+- [CHANGELOG](#changelog)
 - [快速开始](#快速开始)
   - [SimpleAgent（推荐入门）](#方式一simpleagent推荐入门)
   - [SimpleAgent + 敏感工具审批](#方式二simpleagent--敏感工具审批)
@@ -28,6 +34,16 @@ Clojure AI Agent Framework - ChatClient 中央编排器
 - [依赖](#依赖)
 
 ---
+
+## 项目目标
+
+clj-agent 想解决的核心问题：**让 Clojure 项目以最小的依赖代价，获得一个可生产使用的 AI Agent 运行时**。
+
+- **依赖倒置的 Provider 抽象**：Core 只定义协议与原语，LLM 厂商适配器（Provider）实现协议——换厂商不改业务代码
+- **零依赖内核**：core 模块零外部依赖，HTTP 传输用 JDK 内置 `java.net.http`，框架不夹带私有栈
+- **对齐 Spring AI 2.0 心智模型**：ChatClient / ChatModel / Advisor（Filter）/ ToolSearch / RAG / 结构化输出校验，从 Spring 迁移的开发者可以直接映射概念
+- **生产级 Agent 运行时**：工具调用循环、ChatMemory 持久化、HITL（暂停/审批/续跑）、子 Agent、统一错误模型、MCP、AG-UI、HTTP Server 开箱可用
+- **多模块独立发布**：按需引入——只要协议就装 core，要运行时装 client，接厂商装 provider，要工具集装 tools，全部走 Maven 坐标
 
 ## 项目概述
 
@@ -121,24 +137,63 @@ graph LR
 
 ## 模块结构
 
+全部模块发布在 Clojars group [im.ttalk](https://clojars.org/groups/im.ttalk) 下，按需组合引入：
+
+| 模块 | 坐标 | 职责 |
+|---|---|---|
+| `clj-http` | `im.ttalk/clj-http` | 通用 HTTP 客户端（JDK java.net.http，请求/异步/SSE/代理），零依赖 |
+| `clj-agent-core` | `im.ttalk/clj-agent-core` | 协议（`im.ttalk.agent.model`）+ chat-client 原语（chat_client/tool/filter），零依赖 |
+| `clj-agent-client` | `im.ttalk/clj-agent-client` | Agent 运行时（SimpleAgent/ReAct/memory/subagent/HITL），依赖 core |
+| `clj-agent-provider` | `im.ttalk/clj-agent-provider` | 厂商适配器（OpenAI/Anthropic/Gemini 等），实现协议，依赖 core + http |
+| `clj-agent-mcp` | `im.ttalk/clj-agent-mcp` | MCP 客户端 + 服务器（Streamable HTTP / stdio） |
+| `clj-agent-agui` | `im.ttalk/clj-agent-agui` | AG-UI 协议 + run/HTTP 解耦后台机制，依赖 core + client + mcp |
+| `clj-agent-tools` | `im.ttalk/clj-agent-tools` | 编码工具集（files/edit/apply_patch/exec/web_fetch） |
+| `clj-agent-server` | `im.ttalk/clj-agent-server` | AG-UI + MCP HTTP 端点（Ring handler） |
+| `clj-agent-server-jetty` | `im.ttalk/clj-agent-server-jetty` | server 的 Jetty 12 宿主适配 |
+
+模块间依赖（core 先行，按此顺序构建/发布）：
+
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-agent-core/      # 协议(im.ttalk.agent.model) + chat-client 原语(chat_client/tool/filter)；零依赖
-│   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent)，依赖 core
-│   ├── clj-agent-provider/  # 厂商适配器(im.ttalk.agent.provider.*)，实现协议，依赖 core
-│   └── clj-agent-agui/      # (可选)Agent Runtime 后台机制 + AG-UI 协议(im.ttalk.agent.agui.*)，依赖 core + client
+│   ├── clj-http/               # 通用 HTTP 客户端（零依赖）
+│   ├── clj-agent-core/         # 协议 + chat-client 原语（零依赖）
+│   ├── clj-agent-client/       # Agent 运行时，依赖 core
+│   ├── clj-agent-provider/     # 厂商适配器，依赖 core + http
+│   ├── clj-agent-mcp/          # MCP client + server，依赖 http
+│   ├── clj-agent-agui/         # AG-UI 后台机制，依赖 core + client + mcp + http
+│   ├── clj-agent-tools/        # 编码工具集，依赖 core + http
+│   ├── clj-agent-server/       # Ring handler（AG-UI + MCP 端点）
+│   └── clj-agent-server-jetty/ # Jetty 12 宿主适配
 ├── examples/              # 使用示例
 ├── docs/                  # 设计文档（索引见 docs/README.md；design-principles.md = 项目级硬约束，先读它）
+├── docs/en/api/            # 公开 API 参考（英文，按模块分册）
 ├── scripts/check_docs.clj # 文档一致性门禁（JVM Clojure，见下）
 ├── bb.edn                 # 开发任务入口（bb tasks 看全部）
 ├── build.clj              # 各模块构建/发布（tools.build）
 └── deps.edn               # 根依赖配置
 ```
 
-## 快速开始
+## 安装
 
-### 在项目中使用（不发布到 Clojars）
+### 从 Clojars 安装（推荐）
+
+全部模块发布在 [im.ttalk group](https://clojars.org/groups/im.ttalk)，版本号形如 `0.5.x`（各模块同步）。最新版本见 group 页面或 [CHANGELOG.md](CHANGELOG.md)。
+
+在 `deps.edn` 中按需引入：
+
+```clojure
+;; deps.edn —— 最小组合：运行时 + 一家 provider + 工具集
+{:deps {im.ttalk/clj-agent-client   {:mvn/version "0.5.447"}   ;; Agent 运行时（传递引入 core）
+        im.ttalk/clj-agent-provider {:mvn/version "0.5.447"}    ;; 厂商适配器（传递引入 http）
+        im.ttalk/clj-agent-tools    {:mvn/version "0.5.447"}}}  ;; 编码工具集
+```
+
+> 版本 `0.5.447` 是示例——升级时以 [Clojars group 页面](https://clojars.org/groups/im.ttalk)为准，全部模块保持同一版本号。
+
+### 其他安装方式（本地开发 / 团队协作场景）
+
+#### 方式 A：本地路径依赖（推荐开发时使用）
 
 #### 方式 A：本地路径依赖（推荐开发时使用）
 
@@ -188,7 +243,30 @@ bb release core       # 或只装某一个
         im.ttalk/clj-agent-tools {:mvn/version "0.5.xxx"}}}      ;; 编码工具集
 ```
 
-> **建议**：本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。
+> **建议**：生产依赖用上面的 Clojars 坐标；本地开发调试用方式 A，团队共享或 CI/CD 用方式 B，需要离线使用或与 Maven 生态集成用方式 C。
+
+## API 文档
+
+公开 API 按模块分册（英文，仓库内 `docs/en/api/`）：
+
+| 文档 | 内容 |
+|---|---|
+| [API 总目录](docs/en/api/README.md) | 各模块公开 API 面 |
+| [Core API](docs/en/api/core.md) | Facade、ChatClient、ChatModel、工具、Filter、消息 |
+| [Client API](docs/en/api/client.md) | SimpleAgent、ReAct 循环、memory、HITL、子 Agent |
+| [Provider API](docs/en/api/provider.md) | Provider 工厂、支持的厂商、选项 |
+| [AG-UI API](docs/en/api/agui.md) | 独立 run、事件流、AG-UI 集成 |
+| [MCP API](docs/en/api/mcp.md) | MCP 客户端、服务器、传输、工具桥接 |
+| [HTTP Server API](docs/en/api/server.md) | Ring handler、路由、SSE、Jetty 宿主 |
+| [工具与 HTTP](docs/en/api/tools-and-http.md) | 工作区工具、独立 HTTP 客户端 |
+
+设计文档（中文）见 [`docs/README.md`](docs/README.md) 索引；本文下方「核心概念」「LLM Provider」章节给出中文用法概览。
+
+## CHANGELOG
+
+所有版本变更见 [CHANGELOG.md](CHANGELOG.md)（按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织；版本号形如 `0.x.<git-count>`，各模块同步）。
+
+## 快速开始
 
 ### 方式一：SimpleAgent（推荐入门）
 
