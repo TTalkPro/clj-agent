@@ -9,6 +9,7 @@
 {:tests [{:id :unit
           :test-paths ["modules/clj-http/test"
                        "modules/clj-http-apache/test"
+                       "modules/clj-http-netty/test"
                        "modules/clj-agent-provider/test"
                        "modules/clj-agent-client/test"
                        "modules/clj-agent-core/test"

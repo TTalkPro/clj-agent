@@ -1,5 +1,6 @@
 {:paths ["modules/clj-http/src"
           "modules/clj-http-apache/src"
+          "modules/clj-http-netty/src"
           "modules/clj-agent-core/src"
           "modules/clj-agent-client/src"
           "modules/clj-agent-provider/src"
@@ -10,9 +11,11 @@
           "modules/clj-agent-server-jetty/src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.6"}
 
-        ;; 可选 Apache transport 的源码也要进根开发 / check-docs classpath；
+        ;; 可选 Apache / Netty transport 的源码也要进根开发 / check-docs classpath；
         ;; HC5 本体仍只在 clj-http-apache/deps.edn 里声明。
         im.ttalk/clj-http-apache {:local/root "modules/clj-http-apache"}
+        ;; Netty 本体只在 clj-http-netty/deps.edn 里声明。
+        im.ttalk/clj-http-netty {:local/root "modules/clj-http-netty"}
 
         ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
@@ -29,6 +32,7 @@
         ring/ring-jetty-adapter {:mvn/version "1.15.6"}}
  :aliases {:test {:extra-paths ["modules/clj-http/test"
                                "modules/clj-http-apache/test"
+                               "modules/clj-http-netty/test"
                                "modules/clj-agent-provider/test"
                                "modules/clj-agent-client/test"
                                "modules/clj-agent-core/test"

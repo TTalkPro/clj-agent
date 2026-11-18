@@ -59,6 +59,10 @@
     :lib 'im.ttalk/clj-http-apache
     :dir "modules/clj-http-apache"
     :description "im.ttalk clj-http-apache - optional Apache HttpClient 5 async transport"}
+   {:key :http-netty
+    :lib 'im.ttalk/clj-http-netty
+    :dir "modules/clj-http-netty"
+    :description "im.ttalk clj-http-netty - optional Netty HTTP/1.1 transport"}
    {:key :core
     :lib 'im.ttalk/clj-agent-core
     :dir "modules/clj-agent-core"

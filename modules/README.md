@@ -9,6 +9,7 @@ clj-agent/
 ├── modules/
 │   ├── clj-http/      # HTTP transport 契约 + JDK 缺省 adapter;零依赖,provider / mcp / tools 共用
 │   ├── clj-http-apache/ # (可选)Apache HttpClient 5 async transport,依赖 clj-http
+│   ├── clj-http-netty/  # (可选)Netty HTTP/1.1 transport,依赖 clj-http
 │   ├── clj-agent-core/      # 协议(端口) + chat-client 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
 │   ├── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
@@ -163,7 +164,21 @@ canonical error、业务码、重试判定留在 provider。
 - `im.ttalk.http.apache` - `transport` / `close` 语义(capabilities 不含 `:input-stream`)
 
 **依赖**: `clj-http`; Apache HttpClient 5。只显式引入本模块才进 classpath。
-(设计与判据见 `designs/provider-http-transport.md`;Netty 仍待真实场景触发,不排期)
+(设计与判据见 `designs/provider-http-transport.md`)
+
+---
+
+### 1.96 clj-http-netty — Netty HTTP/1.1 transport(可选)
+
+**职责**: 用 Netty 实现同一个 transport 契约:同步入口包装 `CompletableFuture`、增量按行流式、
+首字节 / 空闲 / 总请求 watchdog、取消与关闭。异常折成 `im.ttalk.http.transport` 的统一 kind,
+Netty / ByteBuf / channel 类型不进 provider 配置或返回值。v1 每条请求单独建连并带
+`Connection: close`,不支持连接池与 redirect;宿主可注入已有 `EventLoopGroup`。
+
+- `im.ttalk.http.netty` - `transport` / `close` 语义(capabilities 不含 `:input-stream`)
+
+**依赖**: `clj-http`; Netty handler + codec-http。只显式引入本模块才进 classpath。
+(设计与判据见 `designs/provider-http-transport.md`)
 
 ---
 
@@ -201,7 +216,7 @@ clj-agent-server-jetty。
 - `im.ttalk.agent.provider.api` - Provider 统一门面
 
 **依赖**: `clj-agent-core`(协议/契约), `clj-http`(transport 契约 + JDK 缺省 adapter), cheshire, timbre。
-可选 `clj-http-apache` 只在宿主应用依赖并注入时出现。
+可选 `clj-http-apache` / `clj-http-netty` 只在宿主应用依赖并注入时出现。
 
 ---
 

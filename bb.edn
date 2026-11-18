@@ -10,7 +10,7 @@
     ;; client 曾长期缺席旧 test-all.sh 的列表——CI matrix 有它、脚本没有，
     ;; 于是本地跑 test 会静默跳过整个 Agent 运行时。别再删它。
     ;; mcp 同样缺席过（2026-11-09 补上，designs/http-module.md §8）。
-    (def modules ["clj-http" "clj-http-apache" "clj-agent-core" "clj-agent-client" "clj-agent-provider" "clj-agent-mcp"
+    (def modules ["clj-http" "clj-http-apache" "clj-http-netty" "clj-agent-core" "clj-agent-client" "clj-agent-provider" "clj-agent-mcp"
                   "clj-agent-agui" "clj-agent-tools" "clj-agent-server" "clj-agent-server-jetty"])
 
     (defn module-dir

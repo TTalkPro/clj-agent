@@ -56,7 +56,7 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 - com.taoensso/timbre 6.3.0（日志）
 
 > HTTP 传输通过 `clj-http` 的 transport 契约注入；缺省是 JDK adapter（`java.net.http`）。
-> 可选实现（如 Apache HttpClient）提供 transport map；`provider.http.*` 在其上做 provider 门面
+> 可选实现（如 Apache HttpClient、Netty）提供 transport map；`provider.http.*` 在其上做 provider 门面
 >（JSON、canonical error、重试判据）。
 
 ## 支持的 Provider
@@ -229,9 +229,12 @@ Anthropic、OpenAI Responses、DashScope 与 embeddings 都传递这个键。
 
 ```clojure
 (require '[im.ttalk.agent.provider.factory.builder :as factory]
-         '[im.ttalk.http.apache :as apache])
+         '[im.ttalk.http.apache :as apache]
+         '[im.ttalk.http.netty :as http-netty])
 
 (def http-transport (apache/transport {:connect-timeout-ms 10000}))
+;; 宿主已有 Netty event loop 基础设施时，可换成：
+;; (def http-transport (http-netty/transport {:connect-timeout-ms 10000}))
 
 (def provider
   (factory/create-provider :openai

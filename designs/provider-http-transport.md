@@ -1,6 +1,6 @@
 # Provider HTTP transport：Ring 风格的可插拔 client transport
 
-> 状态：🚧 部分实施（2026-11-18；Netty 待真实场景触发）
+> 状态：✅ 已实施（2026-11-18）
 > 任务：[`tasks/H-07.md`](../tasks/H-07.md) … [`tasks/H-12.md`](../tasks/H-12.md)。
 > 出处：provider 切换 Apache HttpClient / Netty 的需求；现状与历史取舍见
 > [`http-module.md`](http-module.md)。
@@ -550,7 +550,7 @@ core 与 provider 不新增 web 框架或重型 HTTP client 依赖。
 
 ## 12. 施工差异
 
-H-07～H-10、H-12 已按本文实施；H-11 Netty 仍按触发条件**不排期**。施工时确认的差异：
+H-07～H-12 已按本文实施。施工时确认的差异：
 
 1. `im.ttalk.http.transport` 除 facade、归一化与错误 helper 外，另提供最小 `wrap-default-headers` /
    `wrap-request` middleware helper；无通用 middleware 生态。
@@ -561,3 +561,7 @@ H-07～H-10、H-12 已按本文实施；H-11 Netty 仍按触发条件**不排期
 4. Apache adapter 白名单暴露建连 / response 超时、`{:max-total :max-per-route}` 池、`:redirect` 与 `:proxy`。
 5. Apache 流式 watchdog 用 adapter 私有 scheduler，`transport/close` 立即关闭 HC5 async client；
    provider 不自动关闭注入的 transport。回调线程由 HC5 I/O 层决定，文档要求回调不阻塞。
+6. Netty adapter v1 每条请求单独建连并带 `Connection: close`，不实现 channel pool 与 redirect；
+   收到 `:pool` / `:redirect` 抛 `:invalid-request`。支持宿主注入 `EventLoopGroup`（adapter close 不关闭它）、
+   自建 Nio event loop、建连 / 总请求 / 首字节 / 空闲 watchdog、取消关闭 channel 与复制后释放 `ByteBuf`。
+   `on-response` / `on-line` 在 Netty event-loop 线程执行，README 要求不得阻塞。

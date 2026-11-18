@@ -4,7 +4,7 @@
 
 ## [0.6.0] - 未发布（2026-11-18：provider 可插拔 HTTP transport）
 
-minor 走到 `0.6`：新增 provider `:http-transport` 插件边界与可选模块 `clj-http-apache`。
+minor 走到 `0.6`：新增 provider `:http-transport` 插件边界与可选模块 `clj-http-apache` / `clj-http-netty`。
 各模块同步 `0.6.<git-count>`。
 
 总览：`designs/provider-http-transport.md`；任务 `tasks/H-07.md`～`tasks/H-12.md`。
@@ -19,6 +19,9 @@ minor 走到 `0.6`：新增 provider `:http-transport` 插件边界与可选模�
 - **新模块 `clj-http-apache`**：可选 Apache HttpClient 5 async transport。同步入口包装 async future，SSE 用
   async response consumer 增量吐行；支持连接 / response 超时、连接池、重定向与代理白名单选项，流式带首字节 /
   空闲 watchdog 与取消。Apache 依赖只进该模块；`transport/close` 由宿主显式调用。
+- **新模块 `clj-http-netty`**：可选 Netty HTTP/1.1 async transport。同步入口包装 async future，HTTP chunk
+  增量解码后按行回调；支持自建 / 注入 event loop group、建连 / 总请求 / 首字节 / 空闲超时与取消。v1 每条请求
+  单独建连（`Connection: close`），不支持连接池与 redirect。Netty 依赖只进该模块；`transport/close` 由宿主显式调用。
 
 ### 🐛 修复
 
