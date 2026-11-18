@@ -1,0 +1,15 @@
+{:paths ["src"]
+
+ :mvn/repos {"central" {:url "https://repo1.maven.org/maven2/"}
+             "clojars" {:url "https://repo.clojars.org/"}}
+
+ :deps {org.clojure/clojure {:mvn/version "1.12.6"}
+        im.ttalk/clj-http {:local/root "../clj-http"}
+
+        ;; Apache HC5 只属于可选 adapter，不进 clj-http / provider / core。
+        org.apache.httpcomponents.client5/httpclient5 {:mvn/version "5.5.1"}}
+
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {lambdaisland/kaocha {:mvn/version "1.85.1342"}}
+         :main-opts ["-m" "kaocha.runner"]}}}

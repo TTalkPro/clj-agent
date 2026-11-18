@@ -55,8 +55,9 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 - cheshire/cheshire 5.12.0（JSON）
 - com.taoensso/timbre 6.3.0（日志）
 
-> HTTP 传输（同步 + SSE 真流式）在 `clj-http`（零依赖，JDK `java.net.http`）；
-> `provider.http.*` 是它之上的 provider 门面（JSON、canonical error、重试判据）。
+> HTTP 传输通过 `clj-http` 的 transport 契约注入；缺省是 JDK adapter（`java.net.http`）。
+> 可选实现（如 Apache HttpClient）提供 transport map；`provider.http.*` 在其上做 provider 门面
+>（JSON、canonical error、重试判据）。
 
 ## 支持的 Provider
 
@@ -123,7 +124,7 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 | `im.ttalk.agent.provider.stream.dashscope` | DashScope 原生 SSE 流式处理 |
 | `im.ttalk.agent.provider.wire.{openai,openai-responses,anthropic}` | wire 格式转换（provider 内部） |
 | `im.ttalk.agent.provider.http.client` | HTTP 门面（同步 / 异步；传输是 `im.ttalk.http`） |
-| `im.ttalk.agent.provider.http.stream-client` | SSE 真流式（传输是 `im.ttalk.http/stream-lines`；本 ns 管解析、canonical error、模型核对、重试与取消） |
+| `im.ttalk.agent.provider.http.stream-client` | SSE 真流式（传输由 `:http-transport` 注入；本 ns 管解析、canonical error、模型核对、重试与取消） |
 | `im.ttalk.agent.provider.http.retry` | 重试与错误分类（指数退避 + Retry-After） |
 
 ## 快速开始
@@ -218,6 +219,35 @@ Anthropic Messages（`anthropic`）与 OpenAI Responses（`openai-responses`）�
 (registry/get-factory :openai)    ;; 获取工厂函数
 (registry/supported-providers)    ;; 支持的类型列表
 ```
+
+### HTTP transport 注入
+
+provider 的跨实现插件边界是 `:http-transport`。缺省不变：一个包住 JDK `HttpClient` 的进程级 transport
+（HTTP/1.1、虚拟线程 executor、建连 30 秒、不跟随重定向）。给 provider 配置传 transport map 后，
+非流式同步、非流式 deferred、流式同步、流式 deferred 四条路径都会使用同一个注入值；OpenAI compatible、
+Anthropic、OpenAI Responses、DashScope 与 embeddings 都传递这个键。
+
+```clojure
+(require '[im.ttalk.agent.provider.factory.builder :as factory]
+         '[im.ttalk.http.apache :as apache])
+
+(def http-transport (apache/transport {:connect-timeout-ms 10000}))
+
+(def provider
+  (factory/create-provider :openai
+    {:api-key "sk-…"
+     :model "gpt-4"
+     :http-transport http-transport}))
+```
+
+provider 只要求 transport 满足 `im.ttalk.http.transport` 契约。transport 不解析 JSON、不判定业务码、
+不重试、不核对回包模型、不解释限流头——这些仍由 `provider.http.*` 与 ChatModel 重试层负责。
+transport 异常会在 provider 边界归一成现有 canonical error：IO 型失败仍表现为
+`{:status 0 :error … :success? false}` 或流式 network / timeout error，`Retry-After` 与可重试判定语义不变。
+
+旧键 `:client` **deprecated**：迁移期只接受 `java.net.http.HttpClient`，非流式也会生效（修复此前被忽略的问题）。
+它不是任意 HTTP client 的插件类型；配置优先级是 `:http-transport` > `:client` > 缺省。
+宿主显式创建的 transport 由宿主负责关闭。
 
 ### 配置管理
 
@@ -622,3 +652,6 @@ OpenAI, Anthropic, Zhipu, DeepSeek, MiniMax, DashScope (Alibaba), Gemini, Mistra
 - `factory/create-provider-auto` - Smart config resolution
 - `chat-model/create-chat-model` - Create ChatClient-compatible ChatModel
 - `registry/register-provider!` - Register custom providers
+
+Providers accept `:http-transport` as the cross-implementation HTTP plugin boundary;
+the legacy `:client` remains JDK-only and deprecated.

@@ -8,6 +8,7 @@
 ;; `*-test`，缺省模式会把它一并收进来，那是要 MINIMAX_API_KEY 打真实端点的。
 {:tests [{:id :unit
           :test-paths ["modules/clj-http/test"
+                       "modules/clj-http-apache/test"
                        "modules/clj-agent-provider/test"
                        "modules/clj-agent-client/test"
                        "modules/clj-agent-core/test"

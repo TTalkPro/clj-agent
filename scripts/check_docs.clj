@@ -99,6 +99,7 @@
    "modules/clj-agent-tools/README.md"
    "modules/clj-agent-mcp/README.md"
    "modules/clj-http/README.md"
+   "modules/clj-http-apache/README.md"
    "modules/clj-agent-server/README.md"
    "modules/clj-agent-server-jetty/README.md"])
 

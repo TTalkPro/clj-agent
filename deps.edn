@@ -1,4 +1,5 @@
 {:paths ["modules/clj-http/src"
+          "modules/clj-http-apache/src"
           "modules/clj-agent-core/src"
           "modules/clj-agent-client/src"
           "modules/clj-agent-provider/src"
@@ -8,6 +9,10 @@
           "modules/clj-agent-server/src"
           "modules/clj-agent-server-jetty/src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.6"}
+
+        ;; 可选 Apache transport 的源码也要进根开发 / check-docs classpath；
+        ;; HC5 本体仍只在 clj-http-apache/deps.edn 里声明。
+        im.ttalk/clj-http-apache {:local/root "modules/clj-http-apache"}
 
         ;; JSON
         cheshire/cheshire {:mvn/version "5.12.0"}
@@ -23,6 +28,7 @@
         ring/ring-core {:mvn/version "1.15.6"}
         ring/ring-jetty-adapter {:mvn/version "1.15.6"}}
  :aliases {:test {:extra-paths ["modules/clj-http/test"
+                               "modules/clj-http-apache/test"
                                "modules/clj-agent-provider/test"
                                "modules/clj-agent-client/test"
                                "modules/clj-agent-core/test"

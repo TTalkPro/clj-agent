@@ -138,7 +138,8 @@
                        #(http/post api-url
                                    :headers headers
                                    :body (build-params config chunk)
-                                   :timeout (or (:timeout config) default-timeout)))]
+                                   :timeout (or (:timeout config) default-timeout)
+                                   :http-transport (:http-transport config)))]
             (if (:success? resp)
               (parse-openai-body (:body resp) provider (count chunk))
               (errors/throw! (http/response->error resp provider))))))
@@ -195,7 +196,8 @@
                                    :headers (merge {"Authorization" (str "Bearer " api-key)}
                                                    (:extra-headers config))
                                    :body body
-                                   :timeout (or (:timeout config) default-timeout)))]
+                                   :timeout (or (:timeout config) default-timeout)
+                                   :http-transport (:http-transport config)))]
             (if (:success? resp)
               (parse-dashscope-body (:body resp) provider (count chunk))
               (errors/throw! (http/response->error resp provider))))))

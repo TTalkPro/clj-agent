@@ -7,7 +7,8 @@ clj-agent 采用**依赖倒置(DIP)**的分层:**Core 定义协议(端口)+ chat
 ```
 clj-agent/
 ├── modules/
-│   ├── clj-http/      # HTTP 传输(java.net.http 唯一入口);零依赖,provider / mcp / tools 共用
+│   ├── clj-http/      # HTTP transport 契约 + JDK 缺省 adapter;零依赖,provider / mcp / tools 共用
+│   ├── clj-http-apache/ # (可选)Apache HttpClient 5 async transport,依赖 clj-http
 │   ├── clj-agent-core/      # 协议(端口) + chat-client 原语;零依赖
 │   ├── clj-agent-client/    # Agent 运行时(client/react/memory/subagent),依赖 core
 │   ├── clj-agent-provider/  # 各厂商适配器(实现协议),依赖 core
@@ -21,7 +22,8 @@ clj-agent/
 └── deps.edn                 # 根配置(开发/测试一次性加载全部模块)
 ```
 
-依赖方向:**Provider → Core ← Client ← AGUI**(实现与运行时各自依赖抽象,互不依赖;agui 挂在 client 外面,没人依赖它)。应用层在运行时构造一个 provider 注入 agent。
+依赖方向:**Provider → Core ← Client ← AGUI**(实现与运行时各自依赖抽象,互不依赖;agui 挂在 client 外面,没人依赖它)。应用层在运行时构造一个 provider 注入 agent。Provider 对 HTTP 只依赖
+`im.ttalk.http.transport` 契约;Apache adapter 可选注入,不反向依赖 provider。
 
 `clj-agent-mcp` 站在这张图**外面**:它不依赖 agent 侧的任何模块(连 core 都不,只用零依赖的 http 传输),因为 MCP 是一个独立协议,
 它产出的工具是**普通 map**——那是 clj-agent 的内联工具约定,不需要 require 任何东西就能满足。
@@ -134,13 +136,15 @@ deprecated。所以这不是升级而是重写——原来那份 legacy 实现�
 
 ---
 
-### 1.9 clj-http — HTTP 传输
+### 1.9 clj-http — HTTP transport 契约与 JDK adapter
 
-**职责**: JDK `java.net.http` 之上**唯一**一处把 Clojure map 变成 `HttpRequest` 的地方——client 构造、
+**职责**: 出站 HTTP transport 契约与 JDK `java.net.http` 缺省实现——client 构造、
 同步 / `CompletableFuture` 异步请求、按行真流式(首字节 / 空闲 watchdog)、大小写不敏感的头工具。
 缺省 Content-Type、HTTP/1.1、响应头形状(小写名 ⇒ 串向量)由它保证,不靠每个调用方记得。
 
 - `im.ttalk.http` - `client` / `request` / `request-async` / `stream-lines` / 头工具
+- `im.ttalk.http.transport` - 可插拔 transport 契约、request / response 归一化与 transport error
+- `im.ttalk.http.jdk-transport` - JDK 实现的 transport adapter(`:http-transport` 缺省值)
 - `im.ttalk.http.{sse,proxy,failure,date}` - SSE 分帧 / 环境变量代理 / 网络错分类 / HTTP 日期与 Retry-After
   (移植自 Keelson `jvm/modules/clj-net`)
 
@@ -149,6 +153,17 @@ canonical error、业务码、重试判定留在 provider。
 
 **依赖**: 无
 (设计与判据见 `designs/http-module.md`)
+
+### 1.95 clj-http-apache — Apache HttpClient 5 transport(可选)
+
+**职责**: 用 HC5 async client 实现同一个 transport 契约:同步入口包装 async future、
+`CompletableFuture` 异步、增量按行流式、首字节 / 空闲 watchdog、取消与关闭。
+异常折成 `im.ttalk.http.transport` 的统一 kind,Apache 类型不进 provider 配置或返回值。
+
+- `im.ttalk.http.apache` - `transport` / `close` 语义(capabilities 不含 `:input-stream`)
+
+**依赖**: `clj-http`; Apache HttpClient 5。只显式引入本模块才进 classpath。
+(设计与判据见 `designs/provider-http-transport.md`;Netty 仍待真实场景触发,不排期)
 
 ---
 
@@ -181,11 +196,12 @@ clj-agent-server-jetty。
 - `im.ttalk.agent.provider.{openai,anthropic,zhipu,ollama,gemini,mistral,deepseek,minimax,dashscope,openai-compat-provider,mock}` - 各 provider 实现
 - `im.ttalk.agent.provider.common.{base,openai-compat,cache,response-parser}` - 辅助层：provider 基座/OpenAI 协议层/Anthropic 缓存策略/响应解析
 - `im.ttalk.agent.provider.{wire,schema,stream}.*` - wire 格式 / 工具 schema / 流式解析（provider 内部）
-- `im.ttalk.agent.provider.http.{client,retry}` - HTTP 门面(传输在 clj-http) / 重试与错误分类
+- `im.ttalk.agent.provider.http.{client,retry}` - HTTP 门面(transport 由 `:http-transport` 注入) / 重试与错误分类
 - `im.ttalk.agent.provider.factory.*` - Provider 注册/配置/创建
 - `im.ttalk.agent.provider.api` - Provider 统一门面
 
-**依赖**: `clj-agent-core`(协议/契约), `clj-http`(HTTP 传输,零依赖), cheshire, timbre
+**依赖**: `clj-agent-core`(协议/契约), `clj-http`(transport 契约 + JDK 缺省 adapter), cheshire, timbre。
+可选 `clj-http-apache` 只在宿主应用依赖并注入时出现。
 
 ---
 
@@ -215,6 +231,8 @@ graph LR
     provider[clj-agent-provider<br/>厂商适配器]
 
     provider --> core
+    optional[clj-http-apache<br/>可选 HC5 adapter] --> http[clj-http<br/>transport 契约 + JDK]
+    provider --> http
 ```
 
 > 第三方只需依赖 `clj-agent-core`、实现 `im.ttalk.agent.model/ILLMProvider`，即可作为 provider 被 agent 使用。

@@ -4,6 +4,23 @@
 
 ---
 
+# 【当前轮】Provider 可插拔 HTTP transport（2026-11-18）
+
+> 设计：[designs/provider-http-transport.md](designs/provider-http-transport.md)。
+> 状态：**✅ 5 项完成，1 项按任务定义跳过**（H-11 Netty 待真实场景触发，不排期；只编码，未提交）。
+> 编号前缀 `H`（续 HTTP 传输模块轮）。门禁：`bb test` + `bb check-docs`。
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| [H-07](tasks/H-07.md) | transport 契约与错误归一化 | ✅ |
+| [H-08](tasks/H-08.md) | JDK transport adapter | ✅ |
+| [H-09](tasks/H-09.md) | provider 接入 `:http-transport` | ✅ |
+| [H-10](tasks/H-10.md) | Apache HttpClient transport adapter | ✅ |
+| [H-11](tasks/H-11.md) | Netty transport adapter | ⏸️ 待触发 |
+| [H-12](tasks/H-12.md) | transport 文档与收尾 | ✅ |
+
+---
+
 # 【当前轮】AG-UI 与 MCP 的 HTTP 服务端：clj-agent-server（Ring）+ clj-agent-server-jetty（2026-11-10）
 
 > 起因：把 Keelson `agui-server` 分支的 clj-net-server / clj-agui-server 移植过来，MCP 的 Streamable HTTP 端点转正。

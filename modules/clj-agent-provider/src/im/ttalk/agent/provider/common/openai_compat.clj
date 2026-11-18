@@ -222,7 +222,8 @@
         response (http/post api-url
                             :headers headers
                             :body params
-                            :timeout timeout)]
+                            :timeout timeout
+                            :http-transport (:http-transport config))]
     (if (:success? response)
       (http/success-body response (:provider-name config) config)
       (errors/throw! (response->error response (:provider-name config))))))
@@ -265,6 +266,7 @@
     (stream-client/post-stream-sync
       api-url
       {:headers headers :body params :timeout timeout
+       :http-transport (:http-transport config)
        :parse-fn stream/parse-sse-line
        :process-fn process-fn
        :make-initial-state stream/make-initial-state
@@ -303,7 +305,8 @@
     (flt/fmap (http/post-deferred api-url
                                   :headers headers
                                   :body params
-                                  :timeout timeout)
+                                  :timeout timeout
+                                  :http-transport (:http-transport config))
               (fn [response]
                 (if (:success? response)
                   (http/success-body response (:provider-name config) config)
@@ -325,6 +328,7 @@
     (stream-client/post-stream-deferred
       api-url
       {:headers headers :body params :timeout timeout
+       :http-transport (:http-transport config)
        :parse-fn stream/parse-sse-line
        :process-fn process-fn
        :make-initial-state stream/make-initial-state

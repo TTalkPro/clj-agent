@@ -179,7 +179,8 @@
         response (http/post url
                             :headers {"Authorization" (str "Bearer " api-key)}
                             :body body
-                            :timeout timeout)]
+                            :timeout timeout
+                            :http-transport (:http-transport opts))]
     ;; D5：失败一律抛 canonical error（连接级/4xx/5xx 分类统一见 http.client/response->error）。
     ;; DashScope 错误体形如 {:code "InvalidApiKey" :message ... :request_id ...}，没有 :error 键，
     ;; 绝不能当正常响应返回；其 :code/:request_id 并入 :context 供排查。
@@ -282,6 +283,7 @@
                  "Content-Type"    "application/json"
                  "X-DashScope-SSE" "enable"}
        :body body :timeout timeout
+       :http-transport (or (:http-transport config) (:http-transport opts))
        :parse-fn   dstream/parse-sse-line
        :process-fn dstream/process-event
        :make-initial-state dstream/make-initial-state

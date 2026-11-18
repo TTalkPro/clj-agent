@@ -27,8 +27,8 @@
             [deps-deploy.deps-deploy :as dd]))
 
 ;; 版本在项目根算一次：git-count-revs 跟着 *project-root* 走，但全部模块同属一个
-;; 仓库、共用 0.5.<git-count> 逐提交对齐的版本方案，故不允许按模块各算各的。
-(def version (format "0.5.%s" (b/git-count-revs nil)))
+;; 仓库、共用 0.6.<git-count> 逐提交对齐的版本方案，故不允许按模块各算各的。
+(def version (format "0.6.%s" (b/git-count-revs nil)))
 
 (def ^:private scm-url "https://github.com/TTalkPro/clj-agent")
 
@@ -55,6 +55,10 @@
     :lib 'im.ttalk/clj-http
     :dir "modules/clj-http"
     :description "im.ttalk clj-http - general-purpose zero-dependency HTTP client on java.net.http (request / async / line streaming / SSE / proxy)"}
+   {:key :http-apache
+    :lib 'im.ttalk/clj-http-apache
+    :dir "modules/clj-http-apache"
+    :description "im.ttalk clj-http-apache - optional Apache HttpClient 5 async transport"}
    {:key :core
     :lib 'im.ttalk/clj-agent-core
     :dir "modules/clj-agent-core"

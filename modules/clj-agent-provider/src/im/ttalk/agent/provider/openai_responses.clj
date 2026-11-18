@@ -142,7 +142,8 @@
   (let [resp (http/post (api-url cfg)
                         :headers (headers cfg)
                         :body (build-body cfg messages tools false)
-                        :timeout (or (:timeout cfg) 60000))]
+                        :timeout (or (:timeout cfg) 60000)
+                        :http-transport (:http-transport cfg))]
     (if (:success? resp)
       (provider-response (http/success-body resp (:provider-name cfg) cfg) (:provider-name cfg))
       (errors/throw! (http/response->error resp (:provider-name cfg))))))
@@ -156,6 +157,7 @@
       {:headers (headers cfg)
        :body body
        :timeout (or (:timeout cfg) 300000)
+       :http-transport (:http-transport cfg)
        :parse-fn (:parse-fn processor)
        :process-fn (:process-fn processor)
        :make-initial-state (:make-initial-state processor)
@@ -193,7 +195,8 @@
       (flt/fmap (http/post-deferred (api-url cfg)
                                     :headers (headers cfg)
                                     :body (build-body cfg messages tools false)
-                                    :timeout (or (:timeout cfg) 60000))
+                                    :timeout (or (:timeout cfg) 60000)
+                                    :http-transport (:http-transport cfg))
                 (fn [resp]
                   (if (:success? resp)
                     (provider-response (http/success-body resp (:provider-name cfg) cfg) (:provider-name cfg))
@@ -206,6 +209,7 @@
         {:headers (headers cfg)
          :body (build-body cfg messages tools true)
          :timeout (or (:timeout cfg) 300000)
+         :http-transport (:http-transport cfg)
          :parse-fn (:parse-fn processor)
          :process-fn (:process-fn processor)
          :make-initial-state (:make-initial-state processor)

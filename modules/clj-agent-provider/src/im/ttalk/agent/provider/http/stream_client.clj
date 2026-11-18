@@ -24,6 +24,8 @@
             [im.ttalk.agent.async :as async]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.http :as http]
+            [im.ttalk.http.jdk-transport :as jdk-transport]
+            [im.ttalk.http.transport :as transport]
             [im.ttalk.http.failure :as failure]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.streaming :as streaming]
@@ -55,11 +57,48 @@
 (defn- io-error
   "传输层异常 ⇒ canonical error；网络错补上细分 `:code`（`im.ttalk.http.failure/classify`：
    :name-resolution-error / :connection-error / :secure-connection-error），`:retryable?` 判定不变。"
-  [t]
-  (let [e (errors/exception->error t)
-        kind (when (instance? java.io.IOException t) (failure/classify t))]
+  [raw]
+  (let [t (loop [x raw seen #{}]
+            (if (and (instance? Throwable x)
+                     (not (contains? seen x))
+                     (or (instance? java.util.concurrent.CompletionException x)
+                         (instance? java.util.concurrent.ExecutionException x))
+                     (.getCause ^Throwable x))
+              (recur (.getCause ^Throwable x) (conj seen x))
+              x))
+        e (errors/exception->error t)
+        data (ex-data t)
+        transport-kind (::transport/error data)
+        kind (cond
+               (transport/error? t)
+               (if (= :unknown-io transport-kind)
+                 (failure/classify (::transport/cause data))
+                 transport-kind)
+               (instance? java.io.IOException t) (failure/classify t))]
     (cond-> e
+      (and (transport/error? t) (not= :invalid-request transport-kind)
+           (not= :cancelled-error transport-kind))
+      (assoc :type :network-error)
       (and kind (not= kind :unknown) (nil? (:code e))) (assoc :code kind))))
+
+(defn- unwrap-exception [^Throwable t]
+  (loop [x t seen #{}]
+    (if (and (some? x)
+             (not (contains? seen x))
+             (or (instance? java.util.concurrent.CompletionException x)
+                 (instance? java.util.concurrent.ExecutionException x))
+             (some? (.getCause x)))
+      (recur (.getCause x) (conj seen x))
+      x)))
+
+(defn- resolve-transport
+  "`:http-transport` 是插件边界；迁移期只把 JDK HttpClient 的 `:client` 包起来。"
+  [{:keys [http-transport client]}]
+  (cond
+    http-transport (transport/assert-transport! http-transport)
+    (instance? java.net.http.HttpClient client) (jdk-transport/transport {:client client})
+    (some? client) (transport/invalid-request! ":client 只接受 java.net.http.HttpClient；换实现请用 :http-transport")
+    :else @http-client/default-transport))
 
 ;;; ============================================================
 ;;; 入口
@@ -86,6 +125,7 @@
    返回 {:future :cancel}。"
   [url {:keys [headers body timeout parse-fn process-fn initial-state
                on-token on-complete on-error on-headers provider client
+               http-transport
                first-byte-ms idle-ms check-model]
         :or   {initial-state {}}}]
   (let [state         (atom initial-state)
@@ -117,7 +157,8 @@
                             (catch Throwable t
                               ;; 单行处理异常不应中断整条流；记录并继续
                               (log/warn "流式行处理异常，已跳过" {:error (.getMessage t)})))))
-        h             (http/stream-lines
+        h             (transport/stream-lines
+                        (resolve-transport {:http-transport http-transport :client client})
                         {:method :post
                          :url url
                          ;; Content-Type: application/json 由 http/build-request 在调用方没给时补上
@@ -125,7 +166,6 @@
                          :headers headers
                          :body (if (string? body) body (json/generate-string body))
                          :timeout-ms (or timeout 300000)
-                         :client (or client @default-client)
                          :first-byte-ms first-byte-ms
                          :idle-ms idle-ms
                          :on-response (fn [status hs] (when on-headers (on-headers status hs)))
@@ -135,7 +175,8 @@
         fut           (.handle ^CompletableFuture (:future h)
                                (reify BiFunction
                                  (apply [_ v t]
-                                   (cond
+                                   (let [t (unwrap-exception t)]
+                                     (cond
                                      (nil? t)
                                      (if (contains? v :body)
                                        ;; 非 2xx：错误体（+ 响应头）⇒ canonical error（业务码表、Retry-After）
@@ -151,11 +192,17 @@
                                      (finish-error! (timeout-error provider (= :idle (http/timeout-error? t))
                                                                    (:limit-ms (ex-data t))))
 
+                                     (and (transport/error? t :timeout-error)
+                                          (= :timeout-error (::transport/error (ex-data t))))
+                                     (finish-error! (timeout-error provider
+                                                                   (= :idle (get (::transport/data (ex-data t)) :phase))
+                                                                   (:limit-ms (::transport/data (ex-data t)))))
+
                                      (instance? CancellationException t)
                                      (finish-error! (errors/exception->error t))
 
                                      :else
-                                     (finish-error! (io-error t)))
+                                     (finish-error! (io-error t))))
                                    v)))]
     {:future fut
      :cancel (:cancel h)}))

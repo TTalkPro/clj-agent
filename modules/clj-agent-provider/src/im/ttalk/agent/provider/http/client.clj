@@ -19,6 +19,8 @@
             [taoensso.timbre :as log]
             [im.ttalk.agent.filter :as flt]
             [im.ttalk.http :as http]
+            [im.ttalk.http.jdk-transport :as jdk-transport]
+            [im.ttalk.http.transport :as transport]
             [im.ttalk.agent.model.error :as errors]
             [im.ttalk.agent.provider.common.business-codes :as codes]
             [im.ttalk.agent.provider.common.rate-limit :as rate-limit]
@@ -35,6 +37,22 @@
    executor、connect 30s。保留这个 var 是因为宿主可能 `@default-client` 拿它。"}
   default-client
   (delay (http/default-client)))
+
+(defonce ^{:doc "默认共享 transport——包住 default-client，provider 只认本契约。"}
+  default-transport
+  (delay (jdk-transport/transport {:connect-timeout-ms 30000
+                              :version :http-1.1
+                              :executor :virtual
+                              :redirect :never})))
+
+(defn- resolve-transport
+  "`:http-transport` 是插件边界；迁移期才接受 JDK HttpClient 形状的 `:client`。"
+  [{:keys [http-transport client]}]
+  (cond
+    http-transport (transport/assert-transport! http-transport)
+    (instance? java.net.http.HttpClient client) (jdk-transport/transport {:client client})
+    (some? client) (transport/invalid-request! ":client 只接受 java.net.http.HttpClient；换实现请用 :http-transport")
+    :else @default-transport))
 
 ;; ============================================================
 ;; 配置默认值
@@ -194,8 +212,7 @@
    :headers (merge *default-headers* headers)
    :body (when (some? body) (if (string? body) body (json/generate-string body)))
    :timeout-ms (or timeout *default-timeout*)
-   :as (if (= as :byte-array) :bytes :string)
-   :client @default-client})
+   :as (if (= as :byte-array) :bytes :string)})
 
 (defn- finish [resp as]
   (parse-response (select-keys resp [:status :headers :body]) as))
@@ -213,18 +230,21 @@
                       timeout *default-timeout*
                       as :json}
                  :as opts}]
-  (let [req (->http-request method url (assoc opts :timeout timeout :as as))]
+  (let [t (resolve-transport opts)
+        req (->http-request method url (assoc opts :timeout timeout :as as))]
     (if async?
-      (.thenApply (http/request-async req)
+      (.thenApply (transport/request-async t req)
                   (reify Function
                     (apply [_ resp]
                       (let [parsed (finish resp as)]
                         (when callback (callback parsed))
                         parsed))))
       (try
-        (finish (http/request req) as)
-        (catch java.io.IOException e
-          (io-failure e))))))
+        (finish (transport/request t req) as)
+        (catch Throwable e
+          (if (or (transport/io-error? e) (instance? java.io.IOException e))
+            (io-failure e)
+            (throw e)))))))
 
 (defn request-deferred
   "`request` 的异步孪生：**不阻塞**，返回 deferred<响应 map>。
@@ -241,11 +261,12 @@
                  :or {timeout *default-timeout*
                       as :json}
                  :as opts}]
-  (let [req (->http-request method url (assoc opts :timeout timeout :as as))]
+  (let [t (resolve-transport opts)
+        req (->http-request method url (assoc opts :timeout timeout :as as))]
     (flt/fcatch
-      (flt/fmap (http/request-async req) #(finish % as))
+      (flt/fmap (transport/request-async t req) #(finish % as))
       (fn [t]
-        (if (instance? java.io.IOException t)
+        (if (or (transport/io-error? t) (instance? java.io.IOException t))
           (io-failure t)
           (throw t))))))
 
@@ -270,38 +291,40 @@
              [(if has-body?
                 `(defn ~sync-name
                    ~(str "同步 " (clojure.string/upper-case (name method)) " 请求")
-                   [~'url & {:keys [~'headers ~'body ~'query-params ~'timeout]
+                   [~'url & {:keys [~'headers ~'body ~'query-params ~'timeout ~'http-transport]
                              :or {~'timeout *default-timeout*}}]
                    (request ~method-kw ~'url
                             :headers ~'headers :body ~'body
                             :query-params ~'query-params
-                            :timeout ~'timeout :async? false))
+                            :timeout ~'timeout :http-transport ~'http-transport :async? false))
                 `(defn ~sync-name
                    ~(str "同步 " (clojure.string/upper-case (name method)) " 请求")
-                   [~'url & {:keys [~'headers ~'query-params ~'timeout]
+                   [~'url & {:keys [~'headers ~'query-params ~'timeout ~'http-transport]
                              :or {~'timeout *default-timeout*}}]
                    (request ~method-kw ~'url
                             :headers ~'headers
                             :query-params ~'query-params
-                            :timeout ~'timeout :async? false)))
+                            :timeout ~'timeout :http-transport ~'http-transport :async? false)))
                (if has-body?
                  `(defn ~async-name
                     ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
-                    [~'url ~'callback & {:keys [~'headers ~'body ~'query-params ~'timeout]
+                    [~'url ~'callback & {:keys [~'headers ~'body ~'query-params ~'timeout ~'http-transport]
                                          :or {~'timeout *default-timeout*}}]
                     (request ~method-kw ~'url
                              :headers ~'headers :body ~'body
                              :query-params ~'query-params
                              :timeout ~'timeout
+                             :http-transport ~'http-transport
                              :async? true :callback ~'callback))
                  `(defn ~async-name
                     ~(str "异步 " (clojure.string/upper-case (name method)) " 请求")
-                    [~'url ~'callback & {:keys [~'headers ~'query-params ~'timeout]
+                    [~'url ~'callback & {:keys [~'headers ~'query-params ~'timeout ~'http-transport]
                                          :or {~'timeout *default-timeout*}}]
                     (request ~method-kw ~'url
                              :headers ~'headers
                              :query-params ~'query-params
                              :timeout ~'timeout
+                             :http-transport ~'http-transport
                              :async? true :callback ~'callback)))]))
          specs)))
 
@@ -326,7 +349,8 @@
          :headers (merge {"Content-Type" "application/json"
                           "Accept" "application/json"}
                          (:headers opts))
-         :timeout (or (:timeout opts) *default-timeout*))))
+         :timeout (or (:timeout opts) *default-timeout*)
+         :http-transport (:http-transport opts))))
 
 (defn get-json
   "GET JSON 请求（简化版）"
@@ -337,4 +361,5 @@
         :headers (merge {"Accept" "application/json"}
                         (:headers opts))
         :query-params (:query-params opts)
-        :timeout (or (:timeout opts) *default-timeout*))))
+        :timeout (or (:timeout opts) *default-timeout*)
+        :http-transport (:http-transport opts))))

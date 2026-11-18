@@ -2,6 +2,31 @@
 
 本项目版本号形如 `0.x.<git-count>`（各模块同步）。本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织。
 
+## [0.6.0] - 未发布（2026-11-18：provider 可插拔 HTTP transport）
+
+minor 走到 `0.6`：新增 provider `:http-transport` 插件边界与可选模块 `clj-http-apache`。
+各模块同步 `0.6.<git-count>`。
+
+总览：`designs/provider-http-transport.md`；任务 `tasks/H-07.md`～`tasks/H-12.md`。
+
+### ✨ 新增
+
+- **provider 可插拔 HTTP transport `:http-transport`**：新增 Ring 风格 transport 契约 `im.ttalk.http.transport`
+  与 JDK 缺省 adapter `im.ttalk.http.jdk-transport`。provider 非流式同步 / deferred、流式同步 / deferred 四条路径，
+  以及 OpenAI compatible、Anthropic、OpenAI Responses、DashScope 与 embeddings，都可显式注入同一个 transport；
+  transport 异常归一成 DNS / connect / TLS / timeout / cancelled / unknown-io / invalid-request kind 后再进入
+  provider 现有 canonical error 与重试语义。缺省 HTTP/1.1、虚拟线程、建连 30 秒、不跟随重定向，公开 provider API 形状不变。
+- **新模块 `clj-http-apache`**：可选 Apache HttpClient 5 async transport。同步入口包装 async future，SSE 用
+  async response consumer 增量吐行；支持连接 / response 超时、连接池、重定向与代理白名单选项，流式带首字节 /
+  空闲 watchdog 与取消。Apache 依赖只进该模块；`transport/close` 由宿主显式调用。
+
+### 🐛 修复
+
+- provider **非流式请求忽略 `:client`**：现迁移期兼容读取该键并包装成 JDK transport；`:http-transport` 优先。
+  `:client` 不升级为任意 HTTP client 类型，跨实现插件入口只有 `:http-transport`。
+
+---
+
 ## [0.5.0] - 未发布（2026-11-09～11-10：clj-http + clj-agent-server）
 
 minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 客户端）、`clj-agent-server`、`clj-agent-server-jetty`，
@@ -83,6 +108,9 @@ minor 走到 `0.5`：新增模块 `clj-http`（原 clj-agent-http，通用 HTTP 
 - web_fetch 的缺省 client 换成虚拟线程 executor（其余设置不变：不跟随重定向、建连超时 = `:timeout-ms`）。
 
 ### 🐛 修复
+
+- provider **非流式请求忽略 `:client`**：现迁移期兼容读取该键并包装成 JDK transport；`:http-transport` 优先。
+  `:client` 不升级为任意 HTTP client 类型，跨实现插件入口只有 `:http-transport`。
 
 - `react/invoke` 不挂 memory 时**暂停后 resume 丢历史**：续跑第一轮只送工具结果，模型看不到用户的问题（且 OpenAI 兼容端
   会因孤立的 tool 消息拒绝）。现暂停快照恒带 `:transcript`，resume 接回去（观澜反馈 2026-11-12 ③）。

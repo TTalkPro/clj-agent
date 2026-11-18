@@ -447,7 +447,8 @@
         response (http/post api-url
                             :headers headers
                             :body params
-                            :timeout timeout)]
+                            :timeout timeout
+                            :http-transport (:http-transport config))]
     (if (:success? response)
       ;; 成功体统一处理：HTTP 200 业务错（MiniMax base_resp）、可选模型名核对、
       ;; 限流头附加为 :rate-limit（内部字段，不影响 normalize-response 的标准解析）
@@ -482,6 +483,7 @@
     (stream-client/post-stream-sync
       api-url
       {:headers headers :body params :timeout timeout
+       :http-transport (:http-transport config)
        :parse-fn stream/parse-sse-line
        :process-fn stream/process-event
        :make-initial-state stream/make-initial-state
@@ -513,7 +515,8 @@
     (flt/fmap (http/post-deferred api-url
                                   :headers headers
                                   :body params
-                                  :timeout timeout)
+                                  :timeout timeout
+                                  :http-transport (:http-transport config))
               (fn [response]
                 (if (:success? response)
                   (http/success-body response (:provider-name config :anthropic) config)
@@ -534,6 +537,7 @@
     (stream-client/post-stream-deferred
       api-url
       {:headers headers :body params :timeout timeout
+       :http-transport (:http-transport config)
        :parse-fn stream/parse-sse-line
        :process-fn stream/process-event
        :make-initial-state stream/make-initial-state
